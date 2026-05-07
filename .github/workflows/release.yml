@@ -107,3 +107,17 @@ jobs:
               release_id: '${{ needs.draft-release.outputs.release_id }}',
               draft: false,
             });
+      # GitHub's anti-recursion guard suppresses the implicit `release:
+      # published` event that the step above would normally fire (because
+      # it's signed by GITHUB_TOKEN, not a human). `workflow_dispatch` is
+      # one of the few events that CAN be triggered from GITHUB_TOKEN, so
+      # we hand off explicitly here. The manifest workflow keeps its
+      # original `release: published` trigger as a fallback for releases
+      # published manually via the GitHub UI.
+      - name: Trigger updater-manifest workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Use the default branch rather than the tag ref so the manifest
+        # workflow always runs its current logic, not the version frozen
+        # at the release tag.
+        run: gh workflow run updater-manifest.yml --repo "$GITHUB_REPOSITORY" --ref main
