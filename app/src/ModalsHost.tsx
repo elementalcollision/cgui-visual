@@ -15,6 +15,7 @@ import {
   RunImageModal,
   OnboardingModal,
   CommandPaletteModal,
+  ImageInspectModal,
 } from './modals';
 import { toast } from './toast';
 import type { ThemeTokens } from './theme';
@@ -81,8 +82,7 @@ export default function ModalsHost(props: {
       return <JsonInspectModal t={t} title={modal.name} subtitle="container network inspect"
                                fetcher={() => api.inspectNetwork(modal.id)} onClose={onClose} />;
     case 'imageInspect':
-      return <JsonInspectModal t={t} title={modal.reference} subtitle="container image inspect"
-                               fetcher={() => api.inspectImage(modal.reference)} onClose={onClose} />;
+      return <ImageInspectModal t={t} reference={modal.reference} onClose={onClose} />;
     case 'runImage':
       return <RunImageModal t={t} image={modal.image}
                             onLaunched={(id) => toast(`launched ${id}`, 'info')}
