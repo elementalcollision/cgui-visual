@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { TrivyModal, DoctorModal, OnboardingModal } from './modals';
+import { TrivyModal, DoctorModal, OnboardingModal, parseInspect } from './modals';
 import { getTheme } from './theme';
 
 const t = getTheme(true);
@@ -22,8 +22,10 @@ describe('TrivyModal', () => {
     const user = userEvent.setup();
     render(<TrivyModal t={t} image="alpine" onClose={() => {}} />);
     await screen.findByText(/CVE-2024-21626/);
-    // Click the CRITICAL pill (text contains the count, e.g. "CRITICAL 2").
-    const critPill = screen.getByRole('button', { name: /CRITICAL/i });
+    // Click the CRITICAL severity pill specifically. The drawer-enabled
+    // rows also contain CRITICAL in their accessible name, so we anchor
+    // on the count-suffixed pill ("CRITICAL 2") to disambiguate.
+    const critPill = screen.getByRole('button', { name: /^CRITICAL\s+\d+$/i });
     await user.click(critPill);
     expect(screen.getByText('CVE-2024-21626')).toBeInTheDocument();
     expect(screen.getByText('CVE-2025-1138')).toBeInTheDocument();
@@ -39,6 +41,53 @@ describe('TrivyModal', () => {
     await user.type(search, 'openssh');
     expect(screen.getByText('CVE-2024-6387')).toBeInTheDocument();
     expect(screen.queryByText('CVE-2024-21626')).not.toBeInTheDocument();
+  });
+});
+
+describe('parseInspect (DetailModal projection)', () => {
+  it('returns null for non-JSON input', () => {
+    expect(parseInspect('Loading…')).toBeNull();
+    expect(parseInspect('not json')).toBeNull();
+  });
+
+  it('extracts env / mounts / network / ports from a docker-style payload', () => {
+    const payload = JSON.stringify({
+      State: { Status: 'running', Health: { Status: 'healthy', FailingStreak: 0, Log: [{ ExitCode: 0, Output: 'ok' }] } },
+      Config: { Env: ['FOO=bar', 'NOEQ', 'PATH=/usr/bin'] },
+      Mounts: [
+        { Source: '/host', Destination: '/in', Type: 'bind', RW: false },
+        { Source: 'vol', Destination: '/data', Type: 'volume' },
+      ],
+      NetworkSettings: {
+        Networks: { bridge: { IPAddress: '172.17.0.2', MacAddress: 'aa:bb' } },
+        Ports: {
+          '8080/tcp': [{ HostPort: '8080', HostIp: '0.0.0.0' }],
+          '9090/tcp': null,
+        },
+      },
+    });
+    const p = parseInspect(payload)!;
+    expect(p.env).toEqual([
+      { key: 'FOO', value: 'bar' },
+      { key: 'NOEQ', value: '' },
+      { key: 'PATH', value: '/usr/bin' },
+    ]);
+    expect(p.mounts).toHaveLength(2);
+    expect(p.mounts[0].readOnly).toBe(true);
+    expect(p.mounts[1].readOnly).toBeUndefined();
+    expect(p.network[0]).toEqual({ name: 'bridge', ip: '172.17.0.2', mac: 'aa:bb' });
+    expect(p.ports.find(x => x.container === '8080/tcp')?.host).toBe('0.0.0.0:8080');
+    expect(p.ports.find(x => x.container === '9090/tcp')?.host).toContain('exposed');
+    expect(p.health?.status).toBe('healthy');
+  });
+
+  it('handles top-level inspect arrays (Apple `container inspect`)', () => {
+    const payload = JSON.stringify([
+      { Config: { Env: ['A=1'] }, NetworkSettings: { IPAddress: '10.0.0.5' } },
+    ]);
+    const p = parseInspect(payload)!;
+    expect(p.env).toEqual([{ key: 'A', value: '1' }]);
+    expect(p.network[0]).toEqual({ name: 'default', ip: '10.0.0.5', mac: undefined });
   });
 });
 

@@ -123,6 +123,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // Persist + restore window size, position, maximised state, and
+        // fullscreen across sessions. Stored at ~/.config/cgui-gui (same
+        // dir as the prefs JSON via Tauri's default scope).
+        .plugin(tauri_plugin_window_state::Builder::new().build())
         .manage(Arc::new(state::History::new()))
         .setup(|app| {
             // Load prefs once: seed runtime + register optional global hotkey.

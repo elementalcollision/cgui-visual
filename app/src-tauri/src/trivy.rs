@@ -38,6 +38,31 @@ struct RawVuln {
     severity: String,
     #[serde(rename = "Title", default)]
     title: String,
+    #[serde(rename = "Description", default)]
+    description: String,
+    #[serde(rename = "References", default)]
+    references: Vec<String>,
+    #[serde(rename = "CVSS", default)]
+    cvss: std::collections::BTreeMap<String, RawCvss>,
+}
+
+// Trivy emits per-vendor CVSS blocks (`nvd`, `redhat`, `ghsa`, etc.) keyed
+// by source. We pluck the V3Score, preferring nvd → ghsa → first non-zero.
+#[derive(Debug, Default, Clone, Deserialize)]
+struct RawCvss {
+    #[serde(rename = "V3Score", default)]
+    v3: Option<f64>,
+}
+
+fn pick_cvss(map: &std::collections::BTreeMap<String, RawCvss>) -> Option<f64> {
+    for source in ["nvd", "ghsa", "redhat"] {
+        if let Some(s) = map.get(source).and_then(|c| c.v3) {
+            if s > 0.0 {
+                return Some(s);
+            }
+        }
+    }
+    map.values().find_map(|c| c.v3.filter(|s| *s > 0.0))
 }
 
 pub async fn available() -> bool {
@@ -77,6 +102,12 @@ pub async fn scan(image: &str) -> Option<TrivyResult> {
     let mut findings: Vec<TrivyFinding> = Vec::new();
     for tgt in raw.results {
         for v in tgt.vulnerabilities {
+            let cvss = pick_cvss(&v.cvss);
+            let description = if v.description.is_empty() {
+                None
+            } else {
+                Some(v.description)
+            };
             findings.push(TrivyFinding {
                 sev: normalize_severity(&v.severity),
                 cve: v.id,
@@ -84,6 +115,9 @@ pub async fn scan(image: &str) -> Option<TrivyResult> {
                 installed: v.installed,
                 fixed: v.fixed,
                 title: v.title,
+                cvss,
+                description,
+                refs: v.references,
             });
         }
     }
@@ -142,6 +176,30 @@ mod tests {
     }
 
     #[test]
+    fn pick_cvss_prefers_nvd_then_ghsa_then_first_nonzero() {
+        use std::collections::BTreeMap;
+        let mut m = BTreeMap::new();
+        m.insert("redhat".into(), RawCvss { v3: Some(7.5) });
+        m.insert("nvd".into(), RawCvss { v3: Some(9.8) });
+        m.insert("ghsa".into(), RawCvss { v3: Some(8.0) });
+        assert_eq!(pick_cvss(&m), Some(9.8));
+
+        let mut m2 = BTreeMap::new();
+        m2.insert("ghsa".into(), RawCvss { v3: Some(6.1) });
+        m2.insert("redhat".into(), RawCvss { v3: Some(0.0) });
+        assert_eq!(pick_cvss(&m2), Some(6.1));
+
+        // Falls through to first non-zero when no preferred source has it.
+        let mut m3 = BTreeMap::new();
+        m3.insert("foo".into(), RawCvss { v3: Some(0.0) });
+        m3.insert("bar".into(), RawCvss { v3: Some(4.2) });
+        assert_eq!(pick_cvss(&m3), Some(4.2));
+
+        let m4: BTreeMap<String, RawCvss> = BTreeMap::new();
+        assert_eq!(pick_cvss(&m4), None);
+    }
+
+    #[test]
     fn sev_rank_orders_critical_first() {
         assert!(sev_rank("CRITICAL") < sev_rank("HIGH"));
         assert!(sev_rank("HIGH") < sev_rank("MEDIUM"));
@@ -176,6 +234,7 @@ mod tests {
                 installed: v.installed,
                 fixed: v.fixed,
                 title: v.title,
+                ..TrivyFinding::default()
             })
             .collect();
         findings.sort_by_key(|a| sev_rank(&a.sev));

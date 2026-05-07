@@ -546,6 +546,7 @@ pub fn trivy() -> TrivyResult {
             installed: installed.into(),
             fixed: fixed.into(),
             title: title.into(),
+            ..TrivyFinding::default()
         };
     TrivyResult {
         image: "mlcommons/inference:llama2-70b".into(),
