@@ -2,7 +2,7 @@
 
 import React, { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ThemeTokens } from './theme';
-import type { Container, Image, Severity, Stack, Tab, TrivyFinding, TrivyResult, Update, DoctorCheck, Runtime } from './types';
+import type { Container, Image, Severity, Stack, Tab, TrivyFinding, TrivyResult, Update, DoctorCheck, DoctorFix, Runtime } from './types';
 import { Icon, Bar, iconBtn, pillBtn } from './components';
 import { api } from './api';
 import { withToast } from './toast';
@@ -632,6 +632,68 @@ function UpdateActions({ t, onClose }: { t: ThemeTokens; onClose: () => void }) 
   );
 }
 
+// Fire a DoctorFix. URL fixes go through the opener plugin (or a fallback
+// window.open in browser-dev mode). Copy fixes write to the clipboard and
+// flash the button label so the user sees confirmation.
+async function runDoctorFix(fix: DoctorFix): Promise<'opened' | 'copied'> {
+  if (fix.kind === 'url') {
+    try {
+      const { openUrl } = await import('@tauri-apps/plugin-opener');
+      await openUrl(fix.url);
+    } catch {
+      window.open(fix.url, '_blank', 'noopener,noreferrer');
+    }
+    return 'opened';
+  }
+  await navigator.clipboard?.writeText(fix.command);
+  return 'copied';
+}
+
+function DoctorRow({ t, d }: { t: ThemeTokens; d: DoctorCheck }) {
+  const [flash, setFlash] = useState<'opened' | 'copied' | null>(null);
+  useEffect(() => {
+    if (!flash) return;
+    const id = window.setTimeout(() => setFlash(null), 1500);
+    return () => window.clearTimeout(id);
+  }, [flash]);
+  const onClick = async () => {
+    if (!d.fix) return;
+    try {
+      const verb = await runDoctorFix(d.fix);
+      setFlash(verb);
+    } catch (e) {
+      // Fallback toast via the lazy import to avoid a circular dep.
+      const { toast } = await import('./toast');
+      toast(`Doctor fix failed: ${typeof e === 'string' ? e : (e as Error)?.message ?? 'unknown'}`);
+    }
+  };
+  const label = flash === 'copied' ? '✓ Copied'
+              : flash === 'opened' ? '✓ Opened'
+              : d.fix?.label;
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0',
+      color: d.ok ? t.fg1 : d.warn ? t.warning : t.danger,
+    }}>
+      <span style={{ width: 16, color: d.ok ? t.success : t.warning, fontWeight: 700 }}>{d.ok ? '✓' : '!'}</span>
+      <span style={{ flex: 1 }}>{d.text}</span>
+      {d.fix && (
+        <button
+          onClick={onClick}
+          style={{
+            padding: '4px 10px',
+            background: t.surfaceAlt, color: t.fg2,
+            border: `1px solid ${t.border}`, borderRadius: 4,
+            fontSize: 11, fontFamily: t.mono, cursor: 'pointer',
+            whiteSpace: 'nowrap',
+          }}
+          title={d.fix.kind === 'url' ? d.fix.url : d.fix.command}
+        >{label}</button>
+      )}
+    </div>
+  );
+}
+
 export function DoctorModal({ t, onClose }: { t: ThemeTokens; onClose: () => void }) {
   const [checks, setChecks] = useState<DoctorCheck[]>([]);
   useEffect(() => { api.doctor().then(setChecks); }, []);
@@ -647,12 +709,7 @@ export function DoctorModal({ t, onClose }: { t: ThemeTokens; onClose: () => voi
           <button onClick={onClose} style={iconBtn()}><Icon name="x" size={16} color={t.fg2} /></button>
         </div>
         <div style={{ padding: '14px 22px', fontFamily: t.mono, fontSize: 12 }}>
-          {checks.map((d, i) => (
-            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0', color: d.ok ? t.fg1 : d.warn ? t.warning : t.danger }}>
-              <span style={{ width: 16, color: d.ok ? t.success : t.warning, fontWeight: 700 }}>{d.ok ? '✓' : '!'}</span>
-              <span>{d.text}</span>
-            </div>
-          ))}
+          {checks.map((d, i) => <DoctorRow key={i} t={t} d={d} />)}
         </div>
         <div style={{ padding: '12px 22px', borderTop: `1px solid ${t.border}`, background: t.surfaceAlt, fontFamily: t.mono, fontSize: 11, color: t.fg3 }}>
           == {passed} passed · {warns} warnings · {fails} failures ==

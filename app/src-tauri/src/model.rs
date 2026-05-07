@@ -156,4 +156,21 @@ pub struct DoctorCheck {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warn: Option<bool>,
+    /// Optional one-click remediation. When set, the DoctorModal renders
+    /// a button next to the check that performs the action. Matches the
+    /// frontend's DoctorFix shape (kind = 'url' opens a link in the
+    /// default browser; kind = 'copy' puts the command on the clipboard).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<DoctorFix>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum DoctorFix {
+    /// Open this URL in the user's default browser.
+    Url { label: String, url: String },
+    /// Copy this shell command to the clipboard so the user can paste it
+    /// into Terminal. We never run shell commands directly from doctor —
+    /// `brew install …` etc. should be opt-in to keep the surface safe.
+    Copy { label: String, command: String },
 }

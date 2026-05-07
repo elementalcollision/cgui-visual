@@ -105,10 +105,15 @@ export interface Update {
   notes: string;
 }
 
+export type DoctorFix =
+  | { kind: 'url'; label: string; url: string }
+  | { kind: 'copy'; label: string; command: string };
+
 export interface DoctorCheck {
   ok: boolean;
   text: string;
   warn?: boolean;
+  fix?: DoctorFix;
 }
 
 export type Tab = 'containers' | 'images' | 'volumes' | 'networks' | 'stacks' | 'logs';

@@ -672,11 +672,13 @@ pub fn doctor() -> Vec<DoctorCheck> {
         ok: true,
         text: t.into(),
         warn: None,
+        fix: None,
     };
     let warn = |t: &str| DoctorCheck {
         ok: false,
         text: t.into(),
         warn: Some(true),
+        fix: None,
     };
     vec![
         ok("active profile: container → container"),
