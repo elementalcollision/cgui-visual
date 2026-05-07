@@ -1,8 +1,8 @@
 // Shared chrome/primitives: Icon, Sparkline, Bar, StatusDot, FramelessChrome,
 // Sidebar, TopBar, StatusBar — Workbench variation only.
 
-import { memo } from 'react';
-import type { CSSProperties, ReactNode } from 'react';
+import { memo, useEffect, useRef } from 'react';
+import type { CSSProperties, MouseEvent, ReactNode } from 'react';
 import type { ThemeTokens } from './theme';
 import type { ContainerStatus, Tab, Runtime } from './types';
 
@@ -292,6 +292,83 @@ export function StatusBar({ t, runtime, tab, lastTickAt }: {
       <span style={{ color: t.fg3 }}>L logs</span>
       <span style={{ color: t.fg3 }}>S scan</span>
       <span style={{ color: t.fg3 }}>? help</span>
+    </div>
+  );
+}
+
+// ─── Selection primitives (A5) ────────────────────────────────────────
+//
+// SelectCheckbox: a small native checkbox with an `indeterminate` prop
+// (HTML doesn't accept it as an attribute, so we set it on the imperative
+// handle after every render). Used by list views to drive bulk selection.
+
+export function SelectCheckbox({ t, checked, indeterminate, onChange, onClick, title }: {
+  t: ThemeTokens;
+  checked: boolean;
+  indeterminate?: boolean;
+  onChange: () => void;
+  onClick?: (e: MouseEvent<HTMLInputElement>) => void;
+  title?: string;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = !!indeterminate && !checked;
+  }, [indeterminate, checked]);
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      checked={checked}
+      onChange={onChange}
+      onClick={onClick}
+      title={title}
+      style={{
+        cursor: 'pointer',
+        accentColor: t.accent,
+        margin: 0,
+      }}
+    />
+  );
+}
+
+// BulkActionBar: floating bottom strip that appears whenever a list view
+// has at least one selected row. Children are the action buttons; the
+// bar itself owns the count + clear-selection control.
+
+export function BulkActionBar({ t, count, onClear, children }: {
+  t: ThemeTokens;
+  count: number;
+  onClear: () => void;
+  children: ReactNode;
+}) {
+  if (count === 0) return null;
+  return (
+    <div style={{
+      position: 'sticky', bottom: 0, zIndex: 10,
+      display: 'flex', alignItems: 'center', gap: 10,
+      padding: '10px 18px',
+      background: t.surface, borderTop: `1px solid ${t.border}`,
+      boxShadow: '0 -8px 24px rgba(0,0,0,0.18)',
+      fontFamily: t.mono, fontSize: 12, color: t.fg2,
+    }}>
+      <span style={{
+        padding: '3px 10px', borderRadius: 999,
+        background: t.accent, color: t.accentInk, fontWeight: 600,
+      }}>{count}</span>
+      <span>selected</span>
+      <div style={{ flex: 1 }} />
+      {children}
+      <button onClick={onClear} title="Clear selection"
+        style={{
+          marginLeft: 4,
+          padding: '6px 10px',
+          background: 'transparent',
+          color: t.fg3,
+          border: `1px solid ${t.border}`,
+          borderRadius: 6,
+          fontSize: 11, fontFamily: t.mono, cursor: 'pointer',
+        }}
+      >Clear</button>
     </div>
   );
 }

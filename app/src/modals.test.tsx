@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { TrivyModal, DoctorModal, OnboardingModal, parseInspect } from './modals';
+import { TrivyModal, DoctorModal, OnboardingModal, parseInspect, fuzzyScore } from './modals';
 import { getTheme } from './theme';
 
 const t = getTheme(true);
@@ -41,6 +41,29 @@ describe('TrivyModal', () => {
     await user.type(search, 'openssh');
     expect(screen.getByText('CVE-2024-6387')).toBeInTheDocument();
     expect(screen.queryByText('CVE-2024-21626')).not.toBeInTheDocument();
+  });
+});
+
+describe('fuzzyScore (Cmd-K palette ranker)', () => {
+  it('returns 0 for an empty query (no constraint)', () => {
+    expect(fuzzyScore('anything', '')).toBe(0);
+  });
+  it('returns Infinity when the query is not a subsequence', () => {
+    expect(fuzzyScore('alpine', 'xyz')).toBe(Infinity);
+  });
+  it('prefers tighter matches over scattered ones', () => {
+    // "redis" tightly matches "redis-server"; "rds" still matches but with gaps.
+    const tight = fuzzyScore('redis-server', 'redis');
+    const loose = fuzzyScore('redis-server', 'rds');
+    expect(tight).toBeLessThan(loose);
+    expect(tight).toBeLessThan(Infinity);
+    expect(loose).toBeLessThan(Infinity);
+  });
+  it('treats word-start matches as cheaper than mid-word ones', () => {
+    // 'p' at the start of "postgres" should beat 'p' inside "compose-app".
+    const start = fuzzyScore('postgres', 'p');
+    const mid = fuzzyScore('compose-app', 'p');
+    expect(start).toBeLessThanOrEqual(mid);
   });
 });
 
