@@ -10,7 +10,8 @@ pub mod state;
 pub mod trivy;
 pub mod updates;
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{
     image::Image,
@@ -18,6 +19,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager,
 };
+use tauri_plugin_notification::NotificationExt;
 
 // Icon embedded at compile time so the tray works in dev + bundled builds.
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/32x32.png");
@@ -31,6 +33,87 @@ fn fmt_tray_title(running: Option<usize>) -> String {
     }
 }
 
+// Tracks the currently-registered global hotkey so we can unregister it
+// before re-registering a new one (or when the user clears the setting).
+// `Mutex<Option<String>>` since access happens both from setup and from a
+// frontend command on the same thread.
+static CURRENT_HOTKEY: Mutex<Option<String>> = Mutex::new(None);
+
+fn parse_shortcut(
+    accelerator: &str,
+) -> Result<tauri_plugin_global_shortcut::Shortcut, Box<dyn std::error::Error>> {
+    accelerator
+        .parse::<tauri_plugin_global_shortcut::Shortcut>()
+        .map_err(|e| format!("invalid accelerator '{accelerator}': {e:?}").into())
+}
+
+fn focus_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+fn register_summon_hotkey<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    accelerator: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+    let gs = app.global_shortcut();
+    // Tear down any previously-registered summon shortcut first.
+    if let Ok(mut guard) = CURRENT_HOTKEY.lock() {
+        if let Some(prev) = guard.take() {
+            if let Ok(prev_sc) = parse_shortcut(&prev) {
+                let _ = gs.unregister(prev_sc);
+            }
+        }
+    }
+
+    let sc = parse_shortcut(accelerator)?;
+    let app_handle = app.clone();
+    gs.on_shortcut(sc, move |_app, _shortcut, event| {
+        // Only react on key-press; tauri emits both Pressed and Released.
+        if event.state == ShortcutState::Pressed {
+            focus_main_window(&app_handle);
+        }
+    })?;
+
+    if let Ok(mut guard) = CURRENT_HOTKEY.lock() {
+        *guard = Some(accelerator.to_string());
+    }
+    Ok(())
+}
+
+fn unregister_summon_hotkey<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let gs = app.global_shortcut();
+    if let Ok(mut guard) = CURRENT_HOTKEY.lock() {
+        if let Some(prev) = guard.take() {
+            if let Ok(prev_sc) = parse_shortcut(&prev) {
+                let _ = gs.unregister(prev_sc);
+            }
+        }
+    }
+}
+
+// Frontend Settings panel calls this whenever the hotkey field changes.
+// Empty string clears the binding. Returns Err with a human-readable
+// message that the UI can show via toast. Lives in a child module so the
+// `#[tauri::command]`-generated symbol doesn't collide with the symbols
+// produced by `generate_handler!` at the crate root.
+pub mod hotkey_cmd {
+    #[tauri::command]
+    pub fn set_global_hotkey(app: tauri::AppHandle, accelerator: String) -> Result<(), String> {
+        if accelerator.trim().is_empty() {
+            super::unregister_summon_hotkey(&app);
+            return Ok(());
+        }
+        super::register_summon_hotkey(&app, accelerator.trim()).map_err(|e| format!("{e}"))
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -38,10 +121,25 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(Arc::new(state::History::new()))
         .setup(|app| {
-            // Seed the runtime binary selection from persisted prefs.
-            runtime::set_bin(&prefs::Prefs::load().runtime);
+            // Load prefs once: seed runtime + register optional global hotkey.
+            let initial_prefs = prefs::Prefs::load();
+            runtime::set_bin(&initial_prefs.runtime);
+
+            // Register the global summon hotkey if one is configured. Failures
+            // (bad accelerator string, hotkey already taken by another app) are
+            // logged but non-fatal — the user can fix it from Settings.
+            if !initial_prefs.global_hotkey.is_empty() {
+                if let Err(e) = register_summon_hotkey(app.handle(), &initial_prefs.global_hotkey) {
+                    eprintln!(
+                        "global hotkey '{}' failed to register: {e:#}",
+                        initial_prefs.global_hotkey
+                    );
+                }
+            }
 
             // Menubar tray: icon + running-count title + minimal menu.
             // On left click we toggle the main window (show + focus, or hide
@@ -111,6 +209,10 @@ pub fn run() {
             let handle = app.handle().clone();
             let history: Arc<state::History> = app.state::<Arc<state::History>>().inner().clone();
             let count_item_for_tick = count_item.clone();
+            // Per-id (status, exit_code) seen on the previous tick. Powers
+            // B10 exit-notification diffing without leaking memory: any id
+            // not present in the latest poll is dropped at the bottom.
+            let mut prev_state: HashMap<String, (String, Option<i32>)> = HashMap::new();
             tauri::async_runtime::spawn(async move {
                 let mut tick = tokio::time::interval(Duration::from_secs(2));
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -133,6 +235,53 @@ pub fn run() {
                             }
                             let _ = count_item_for_tick
                                 .set_text(format!("Containers: {running} running"));
+
+                            // B10: notify on running→exited transitions. Only
+                            // fire when prefs.notify_on_exit is on, the
+                            // previous status was running (so we don't blast a
+                            // notification on first tick), and the new status
+                            // is exited/stopped/dead. Non-zero exit codes get
+                            // explicit highlight in the body.
+                            if prefs::Prefs::load().notify_on_exit {
+                                for c in &cs {
+                                    let prev = prev_state.get(&c.id);
+                                    let was_running = prev
+                                        .map(|(s, _)| s.eq_ignore_ascii_case("running"))
+                                        .unwrap_or(false);
+                                    let now_terminal = matches!(
+                                        c.status.to_ascii_lowercase().as_str(),
+                                        "exited" | "stopped" | "dead"
+                                    );
+                                    if was_running && now_terminal {
+                                        let body = match c.exit_code {
+                                            Some(code) if code != 0 => format!(
+                                                "{} exited with code {} ({})",
+                                                c.name, code, c.image
+                                            ),
+                                            _ => format!("{} exited ({})", c.name, c.image),
+                                        };
+                                        let _ = handle
+                                            .notification()
+                                            .builder()
+                                            .title("cgui — container exited")
+                                            .body(body)
+                                            .show();
+                                    }
+                                }
+                            }
+                            // Refresh prev_state to the current snapshot.
+                            prev_state.clear();
+                            for c in &cs {
+                                prev_state.insert(c.id.clone(), (c.status.clone(), c.exit_code));
+                            }
+
+                            // Emit current poll wall-clock so the UI can show
+                            // a "last updated Ns ago" indicator (A12).
+                            let now_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as u64)
+                                .unwrap_or(0);
+                            let _ = handle.emit("containers:tickAt", now_ms);
                             let _ = handle.emit("containers:tick", cs);
                         }
                         Err(e) => eprintln!("containers tick failed: {e:#}"),
@@ -175,6 +324,7 @@ pub fn run() {
             commands::stack_health,
             commands::runtime_available,
             commands::import_compose,
+            hotkey_cmd::set_global_hotkey,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

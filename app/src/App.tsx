@@ -26,6 +26,13 @@ export default function App() {
   const [showUpdateBadge, setShowUpdateBadge] = useState(true);
   const [pullReference] = useState('mlcommons/inference:llama2-70b');
   const [logTarget, setLogTarget] = useState<string | undefined>(undefined);
+  const [menubarMode, setMenubarMode] = useState(false);
+  const [globalHotkey, setGlobalHotkey] = useState('');
+  const [notifyOnExit, setNotifyOnExit] = useState(true);
+  // ms-since-epoch of the last successful container poll (A12). 0 = never.
+  const [lastTickAt, setLastTickAt] = useState(0);
+  // Re-render driver for the "Ns ago" label so it counts up between ticks.
+  const [, setNowTick] = useState(0);
   const prefsLoaded = useRef(false);
   // First-run onboarding: when the `container` CLI isn't on PATH we
   // surface a modal explaining what's happening and how to install it.
@@ -44,8 +51,20 @@ export default function App() {
       if (['containers','images','volumes','networks','stacks','logs'].includes(p.lastTab)) {
         setTab(p.lastTab as Tab);
       }
+      setMenubarMode(p.menubarMode);
+      setGlobalHotkey(p.globalHotkey);
+      setNotifyOnExit(p.notifyOnExit);
       prefsLoaded.current = true;
     });
+  }, []);
+
+  // Subscribe to the backend's per-tick wall-clock so the StatusBar can
+  // render "updated Ns ago". Re-render every second to advance the label.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    api.onTickAt(ms => setLastTickAt(ms)).then(fn => { unlisten = fn; });
+    const id = window.setInterval(() => setNowTick(n => n + 1), 1000);
+    return () => { unlisten?.(); window.clearInterval(id); };
   }, []);
 
   // First-run runtime probe. Runs once on mount; if the `container` CLI
@@ -77,9 +96,24 @@ export default function App() {
   // Persist on change (skip the first render before load completes).
   useEffect(() => {
     if (!prefsLoaded.current) return;
-    const p: Prefs = { dark, sidebarCollapsed: collapsed, runtime, lastTab: tab };
+    const p: Prefs = {
+      dark, sidebarCollapsed: collapsed, runtime, lastTab: tab,
+      menubarMode, globalHotkey, notifyOnExit,
+    };
     api.savePrefs(p);
-  }, [dark, collapsed, runtime, tab]);
+  }, [dark, collapsed, runtime, tab, menubarMode, globalHotkey, notifyOnExit]);
+
+  // Push hotkey changes to the backend so they take effect immediately
+  // without a restart. Surfaces parser/conflict errors via toast.
+  useEffect(() => {
+    if (!prefsLoaded.current) return;
+    api.setGlobalHotkey(globalHotkey).catch(err => {
+      // Lazy-import so the toast helper doesn't add to the boot path.
+      import('./toast').then(({ toast }) => {
+        toast(`Global hotkey: ${typeof err === 'string' ? err : (err?.message ?? String(err))}`);
+      });
+    });
+  }, [globalHotkey]);
 
   const [containers, setContainers] = useState<Container[]>([]);
   useEffect(() => {
@@ -174,11 +208,11 @@ export default function App() {
                                        onScan={(img: Image) => setModal({ type: 'trivy', image: img.ref })}
                                        onRun={(img: Image) => setModal({ type: 'runImage', image: img.ref })}
                                        onInspect={(img: Image) => setModal({ type: 'imageInspect', reference: img.ref })} />}
-              {tab === 'volumes'  && <VolumesView  t={t} onInspect={(v) => setModal({ type: 'volumeInspect', name: v.name })} />}
-              {tab === 'networks' && <NetworksView t={t} onInspect={(n) => setModal({ type: 'networkInspect', id: n.id, name: n.name })} />}
-              {tab === 'stacks'   && <StacksView   t={t} />}
+              {tab === 'volumes'  && <VolumesView  t={t} search={search} onInspect={(v) => setModal({ type: 'volumeInspect', name: v.name })} />}
+              {tab === 'networks' && <NetworksView t={t} search={search} onInspect={(n) => setModal({ type: 'networkInspect', id: n.id, name: n.name })} />}
+              {tab === 'stacks'   && <StacksView   t={t} search={search} />}
               {tab === 'logs'     && <LogsView     t={t} target={logTarget ?? containers.find(c => c.status === 'running')?.id} />}
-              <StatusBar t={t} runtime={runtime} tab={tab} />
+              <StatusBar t={t} runtime={runtime} tab={tab} lastTickAt={lastTickAt} />
             </div>
           </div>
         </FramelessChrome>
@@ -197,6 +231,10 @@ export default function App() {
               }}
               onUpdateClosed={() => { setModal(null); setShowUpdateBadge(false); }}
               onOnboardingResolved={() => setModal(null)}
+              dark={dark} setDark={setDark}
+              menubarMode={menubarMode} setMenubarMode={setMenubarMode}
+              globalHotkey={globalHotkey} setGlobalHotkey={setGlobalHotkey}
+              notifyOnExit={notifyOnExit} setNotifyOnExit={setNotifyOnExit}
             />
           </Suspense>
         )}

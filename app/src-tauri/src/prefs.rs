@@ -12,6 +12,17 @@ pub struct Prefs {
     pub sidebar_collapsed: bool,
     pub runtime: String,
     pub last_tab: String,
+    /// When true, closing the main window hides it instead of quitting so
+    /// the menu-bar tray stays alive. (UI affordance only — the close
+    /// button still respects this in setup.)
+    pub menubar_mode: bool,
+    /// Global hotkey that summons + focuses the main window. Empty string
+    /// disables. Format follows tauri-plugin-global-shortcut, e.g.
+    /// "CmdOrCtrl+Alt+Space".
+    pub global_hotkey: String,
+    /// Fire a macOS notification when a container exits with a non-zero
+    /// status. Only meaningful when the runtime is reachable.
+    pub notify_on_exit: bool,
 }
 
 impl Default for Prefs {
@@ -21,6 +32,9 @@ impl Default for Prefs {
             sidebar_collapsed: false,
             runtime: "container".into(),
             last_tab: "containers".into(),
+            menubar_mode: false,
+            global_hotkey: String::new(),
+            notify_on_exit: true,
         }
     }
 }
@@ -72,6 +86,9 @@ mod tests {
             sidebar_collapsed: true,
             runtime: "podman".into(),
             last_tab: "logs".into(),
+            menubar_mode: true,
+            global_hotkey: "CmdOrCtrl+Alt+Space".into(),
+            notify_on_exit: false,
         };
         let s = serde_json::to_string(&p).unwrap();
         let back: Prefs = serde_json::from_str(&s).unwrap();
@@ -79,6 +96,20 @@ mod tests {
         assert!(back.sidebar_collapsed);
         assert_eq!(back.runtime, "podman");
         assert_eq!(back.last_tab, "logs");
+        assert!(back.menubar_mode);
+        assert_eq!(back.global_hotkey, "CmdOrCtrl+Alt+Space");
+        assert!(!back.notify_on_exit);
+    }
+
+    #[test]
+    fn prefs_tolerates_missing_new_fields() {
+        // State files written by older versions lack menubar_mode /
+        // global_hotkey / notify_on_exit. Verify defaults fill in.
+        let s = r#"{"dark": false, "sidebarCollapsed": false, "runtime": "container", "lastTab": "containers"}"#;
+        let p: Prefs = serde_json::from_str(s).unwrap();
+        assert!(!p.menubar_mode);
+        assert_eq!(p.global_hotkey, "");
+        assert!(p.notify_on_exit);
     }
 
     #[test]
