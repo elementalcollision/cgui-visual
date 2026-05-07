@@ -1,6 +1,7 @@
 # Dependabot config. Weekly checks; group patch + minor bumps so we don't
 # get a deluge of noise PRs. Major bumps stay separate so they get the
-# attention they deserve.
+# attention they deserve. GitHub Actions checks monthly since action major
+# bumps are infrequent and rarely urgent.
 
 version: 2
 updates:
