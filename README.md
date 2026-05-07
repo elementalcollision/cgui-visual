@@ -23,6 +23,26 @@
 
 > **Looking for the TUI?** It lives in [elementalcollision/cgui](https://github.com/elementalcollision/cgui).
 
+## How it compares
+
+cgui-visual targets a specific niche: **devs on Apple Silicon who want a GUI for Apple's first-party `container` runtime**, MIT-licensed, with no commercial license to manage and no Linux VM to feed memory to.
+
+|                          | **cgui-visual**                | Docker Desktop                   | OrbStack            | Podman Desktop      | Lazydocker         |
+| ------------------------ | ------------------------------ | -------------------------------- | ------------------- | ------------------- | ------------------ |
+| **License**              | MIT — free for any use         | Free for personal; paid for biz  | Paid (free trial)   | Apache-2.0          | MIT                |
+| **Platforms**            | macOS                          | macOS · Windows · Linux          | macOS               | macOS · Windows · Linux | macOS · Windows · Linux |
+| **Backing runtime**      | Apple `container`              | Docker Engine                    | OrbStack engine     | Podman              | Docker             |
+| **Surface**              | Native desktop GUI             | Native desktop GUI               | Native desktop GUI  | Native desktop GUI  | Terminal (TUI)     |
+| **Compose-style stacks** | TOML stacks · Compose import roadmap | `docker-compose.yml`       | `docker-compose.yml`| Compose plugin      | View-only          |
+| **Image vuln scanning**  | Trivy (`brew install trivy`)   | Snyk (paid tier)                 | —                   | —                   | —                  |
+| **Bundle size on disk**  | ~10 MB                         | ~1 GB (incl. engine)             | ~600 MB             | ~400 MB             | ~10 MB             |
+
+**TL;DR by audience:**
+- **You're already using `cgui` (TUI)** → cgui-visual is the visual companion. Same stacks, same workflows, same `~/.config/cgui/`.
+- **Coming from Docker Desktop** → cgui-visual is one of the lightest exits, but you'll be on Apple's `container` runtime instead of Docker Engine. Compose-import is on the roadmap.
+- **Considering OrbStack** → OrbStack is more polished and cross-runtime; cgui-visual is free, OSS, and laser-focused on Apple's runtime.
+- **You like terminal-first tooling** → use [`cgui`](https://github.com/elementalcollision/cgui) (TUI) directly; cgui-visual is for when you want a GUI alongside it.
+
 ## What it does
 
 - **Containers** — list / inspect / start / stop / restart / kill / delete with live CPU, memory, network, disk rates derived from `container stats` deltas
