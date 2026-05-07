@@ -81,13 +81,20 @@ jobs:
           # `latest.json` will be missing the `signature` field.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # NOTE: Apple notarization / Gatekeeper signing env vars are
-          # intentionally NOT defined here. tauri-action treats an empty-
-          # string secret as "user wants signing but provided no cert"
-          # and fails. To enable signing later, add a secrets-conditional
-          # step below this one that exports APPLE_CERTIFICATE etc. only
-          # when the matching secrets exist, OR add the env vars back here
-          # in lockstep with creating the secrets.
+          # Apple Developer ID codesigning. The base64'd .p12 is imported
+          # into a temp keychain on the runner; tauri-action signs the
+          # universal binary with the identity below.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # Apple notarization. tauri-action submits the signed .app to
+          # notarytool, waits for Apple's verdict, then staples the
+          # ticket so the bundle launches cleanly without a network round-
+          # trip on every machine that opens it. APPLE_PASSWORD must be
+          # an app-specific password, not the Apple ID password.
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: app
           releaseId: ${{ needs.draft-release.outputs.release_id }}

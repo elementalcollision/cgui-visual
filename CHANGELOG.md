@@ -7,39 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-05-07
+
 ### Added
 
-- **Stack up / down** — actually launches and tears down compose-style
-  stacks defined in `~/.config/cgui/stacks/*.toml`. Topological order;
-  full schema (env, ports, volumes, network, depends_on, args, restart,
-  cap_add, cap_drop) translated to `container run -d` argv. Per-stack
-  output strip on each card.
-- **Stack TCP healthchecks** — frontend polls `stack_health` every 5 s
-  while the Stacks tab is open; per-service health label updates from
-  the live probe instead of just mirroring "running".
-- **Image inspect** modal (info button on each image row).
-- **Container kill** button on the DetailModal for running containers
-  (with confirmation).
-- **Volume reference count** — derived from container mounts; the "N
-  references" line is now real.
-- **Logs level filter + search** — three toggleable level pills (ERROR /
-  WARN / INFO) plus a free-text search box; copy button copies only the
-  visible (filtered) lines.
-- **Self-update via tauri-plugin-updater** — Updates modal "Install"
-  button now downloads + verifies + installs signed updates from a
-  GitHub-Pages-hosted manifest, then relaunches.
-- **Updater-manifest workflow** — `updater-manifest.yml` builds and
-  publishes `latest.json` to GitHub Pages on every release.
+- **macOS code-signing + notarization.** Releases now ship as Developer ID
+  signed and Apple-notarized universal binaries. First-launch Gatekeeper
+  warning is gone. Notarization ticket is stapled to the bundle so it
+  doesn't require a network round-trip on each user's first run.
+- **Auto-fire updater-manifest workflow** from `release.yml`'s
+  `publish-release` job via `gh workflow run`. Sidesteps GitHub's
+  anti-recursion guard which suppressed the `release: published` event
+  in v0.1.0 (manual workflow_dispatch was needed). Manifest workflow
+  retains the `release: published` trigger as a fallback for
+  manually-published releases.
 
-### Repo
+### Fixed
 
-- `LICENSE` (MIT) at the repo root.
-- `CONTRIBUTING.md` documenting setup, dev workflow, code conventions,
-  PR + release process.
-- `.github/dependabot.yml` for weekly npm/cargo updates and monthly
-  GitHub Actions updates, with patch+minor grouped.
+- `smoke` Rust binary lived under `src/bin/` and got auto-discovered by
+  the Tauri bundler when building `--target universal-apple-darwin`,
+  failing with "smoke does not exist" because the binary was only built
+  for the host architecture. Moved to `examples/smoke.rs`; run via
+  `cargo run --example smoke`. Cargo examples are not picked up by the
+  bundler.
 
-## [0.1.0] — TBD
+### Changed
+
+- Updater public key rotated. Old key id `66A8237E2AC689D6` (development
+  key, generated locally without a passphrase) is no longer trusted by
+  the shipping app. New key id is `2234EEE99B999AAB`.
+
+## [0.1.0] — 2026-05-07
 
 Initial macOS-only release. Tauri + React + TypeScript GUI for Apple's
 [`container`](https://github.com/apple/container) CLI / the
@@ -114,5 +112,6 @@ Initial macOS-only release. Tauri + React + TypeScript GUI for Apple's
   binary. Apple's `container` CLI is similarly optional but required for
   any real data.
 
-[Unreleased]: https://github.com/elementalcollision/cgui/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/elementalcollision/cgui/releases/tag/v0.1.0
+[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/elementalcollision/cgui-visual/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/elementalcollision/cgui-visual/releases/tag/v0.1.0
