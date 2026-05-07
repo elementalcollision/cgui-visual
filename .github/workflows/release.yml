@@ -75,19 +75,19 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Apple notarization / Gatekeeper signing (no-op when unset).
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           # Tauri-updater minisign signing. The matching public key is
           # baked into tauri.conf.json `plugins.updater.pubkey`. Without
           # this secret the in-app updater can't verify downloads and
           # `latest.json` will be missing the `signature` field.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # NOTE: Apple notarization / Gatekeeper signing env vars are
+          # intentionally NOT defined here. tauri-action treats an empty-
+          # string secret as "user wants signing but provided no cert"
+          # and fails. To enable signing later, add a secrets-conditional
+          # step below this one that exports APPLE_CERTIFICATE etc. only
+          # when the matching secrets exist, OR add the env vars back here
+          # in lockstep with creating the secrets.
         with:
           projectPath: app
           releaseId: ${{ needs.draft-release.outputs.release_id }}
