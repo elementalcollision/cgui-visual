@@ -43,7 +43,7 @@ npm run dev
   layer:
   ```sh
   container run -d --name smoke alpine sleep 3600
-  cd app/src-tauri && cargo run --bin smoke
+  cd app/src-tauri && cargo run --example smoke
   ```
   The `smoke` binary exercises `runtime::list_containers_raw`,
   `state::poll_once`, `runtime::list_images/volumes/networks`, the stacks

@@ -68,7 +68,7 @@ app/
 
 ```sh
 container run -d --name smoke alpine sleep 3600
-cd src-tauri && cargo run --bin smoke
+cd src-tauri && cargo run --example smoke
 ```
 
 The smoke binary exercises the full runtime path (ls + stats merge, deltas,
