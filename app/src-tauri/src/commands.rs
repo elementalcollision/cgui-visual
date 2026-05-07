@@ -128,6 +128,36 @@ pub async fn runtime_available() -> bool {
     runtime::available().await
 }
 
+// Convert a docker-compose.yml at `path` into a cgui stack TOML and write
+// it to ~/.config/cgui/stacks/<name>.toml. Returns the destination path
+// so the frontend can show it in a toast.
+//
+// Refuses to overwrite an existing stack with the same name unless
+// `overwrite` is true — Compose imports usually happen against fresh
+// stack names, but accidental clobbers would silently lose hand-edits.
+#[tauri::command]
+pub async fn import_compose(path: String, overwrite: bool) -> Result<String, String> {
+    use std::path::PathBuf;
+
+    let p = PathBuf::from(&path);
+    let (stack, toml_text) = crate::compose::import_file(&p).map_err(err_str)?;
+
+    let dir = crate::stacks::stacks_dir()
+        .ok_or_else(|| "could not resolve $XDG_CONFIG_HOME or $HOME".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create stacks dir: {e}"))?;
+    let dest = dir.join(format!("{}.toml", stack.name));
+
+    if dest.exists() && !overwrite {
+        return Err(format!(
+            "stack '{}' already exists at {}; pass overwrite=true to replace",
+            stack.name,
+            dest.display()
+        ));
+    }
+    std::fs::write(&dest, toml_text).map_err(|e| format!("write {}: {e}", dest.display()))?;
+    Ok(dest.display().to_string())
+}
+
 // ─── Actions (return Result so the frontend can surface errors) ───────
 
 #[tauri::command]

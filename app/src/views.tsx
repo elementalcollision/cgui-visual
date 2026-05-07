@@ -339,8 +339,58 @@ export function StacksView({ t }: { t: ThemeTokens }) {
     return t.fg3;
   };
 
+  // Open the native file picker, run the import, surface the result.
+  // Confirms before overwriting an existing stack of the same name.
+  const importCompose = async () => {
+    let path: string | null = null;
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const picked = await open({
+        title: 'Import a docker-compose.yml',
+        multiple: false,
+        directory: false,
+        filters: [{ name: 'Compose', extensions: ['yml', 'yaml'] }],
+      });
+      path = typeof picked === 'string' ? picked : null;
+    } catch (e) {
+      // Dialog plugin isn't available outside Tauri — fall back to prompt.
+      path = window.prompt('Path to docker-compose.yml');
+    }
+    if (!path) return;
+    try {
+      const dest = await api.importCompose(path);
+      withToast(`Imported to ${dest}`, Promise.resolve()).catch(() => {});
+      await reload();
+    } catch (err: any) {
+      const msg = String(err?.message ?? err);
+      // Conflict: backend refuses overwrite by default. Prompt + retry.
+      if (msg.includes('already exists')) {
+        if (confirm(`${msg}\n\nOverwrite?`)) {
+          try {
+            const dest = await api.importCompose(path, true);
+            withToast(`Imported to ${dest}`, Promise.resolve()).catch(() => {});
+            await reload();
+          } catch (e2: any) {
+            withToast(`import compose`, Promise.reject(e2)).catch(() => {});
+          }
+        }
+      } else {
+        withToast(`import compose`, Promise.reject(err)).catch(() => {});
+      }
+    }
+  };
+
   return (
     <div style={{ flex: 1, overflow: 'auto', background: t.bg, padding: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+        <span style={{ fontSize: 12, color: t.fg3, fontFamily: t.mono }}>
+          {items.length} stack{items.length === 1 ? '' : 's'}
+        </span>
+        <div style={{ flex: 1 }} />
+        <button onClick={importCompose} style={pillBtn(t, t.accent)}>
+          <Icon name="download" size={12} color={t.accent} />Import compose
+        </button>
+      </div>
       <div style={{ display: 'grid', gap: 12 }}>
         {items.map(s => {
           const running = s.services.filter(sv => sv.state === 'running').length;

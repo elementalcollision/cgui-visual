@@ -5,7 +5,7 @@
 // healthcheck poller can probe each service.
 
 use anyhow::{anyhow, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -15,38 +15,40 @@ use tokio::process::Command;
 use crate::model::{Container, Service as UiService, Stack as UiStack};
 use crate::runtime;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StackToml {
     pub name: String,
-    #[serde(rename = "service", default)]
+    #[serde(rename = "service", default, skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<ServiceToml>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ServiceToml {
     pub name: String,
     pub image: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cap_add: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cap_drop: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub healthcheck: Option<Healthcheck>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Healthcheck {
     /// "tcp" (default), "http", or "cmd".
     #[serde(default = "default_kind")]
@@ -55,22 +57,26 @@ pub struct Healthcheck {
     /// For http: a port ("8080" → http://127.0.0.1:8080/), a "port/path"
     /// ("8080/health"), or a full URL ("http://host:port/path").
     /// Ignored for cmd.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
     /// For cmd: argv passed to `container exec <stack>_<svc>`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command: Vec<String>,
     /// HTTP only: success status range. Empty → 200..=399.
     /// Two entries `[lo, hi]` → range; one entry `[code]` → exact match.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expect_status: Vec<u16>,
     #[serde(default = "default_interval")]
     pub interval_s: u64,
     /// Compose-style startup grace. Probes still run inside the period
     /// but failures surface as "starting" rather than "unhealthy". Counts
     /// from when the probe first sees the container exists.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub start_period_s: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 fn default_kind() -> String {

@@ -1,4 +1,5 @@
 mod commands;
+pub mod compose;
 mod doctor;
 mod fixtures;
 pub mod model;
@@ -19,6 +20,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(Arc::new(state::History::new()))
         .setup(|app| {
             // Seed the runtime binary selection from persisted prefs.
@@ -77,6 +79,7 @@ pub fn run() {
             commands::stack_down,
             commands::stack_health,
             commands::runtime_available,
+            commands::import_compose,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

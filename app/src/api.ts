@@ -82,6 +82,14 @@ export const api = {
   // entire data layer is fixtures by design.
   runtimeAvailable: () => call<boolean>('runtime_available', true),
 
+  // Compose import: read a docker-compose.yml at `path`, write a converted
+  // stack TOML to ~/.config/cgui/stacks/<name>.toml. Returns the
+  // destination path; throws if the parser fails or the stack already
+  // exists (unless overwrite=true). Browser-dev no-op.
+  importCompose: (path: string, overwrite = false) =>
+    inTauri ? invokeStrict<string>('import_compose', { path, overwrite }) :
+              Promise.resolve('(dev-mode no-op)'),
+
   // Stacks: up/down return per-line log output; health returns
   // [serviceName, "healthy"|"unhealthy"|"—"|"unsupported:<kind>"].
   stackUp:     (name: string) => inTauri ? invokeStrict<string[]>('stack_up',     { name }) : Promise.resolve(['(dev-mode no-op)']),
