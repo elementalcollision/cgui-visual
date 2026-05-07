@@ -94,6 +94,18 @@ export const api = {
     inTauri ? invokeStrict<string>('import_compose', { path, overwrite }) :
               Promise.resolve('(dev-mode no-op)'),
 
+  // Render a stack as docker-compose YAML. Browser-dev mode hands back
+  // a deterministic stub so the download flow can still be exercised.
+  exportCompose: (name: string) =>
+    inTauri ? invokeStrict<string>('export_compose', { name }) :
+              Promise.resolve(`name: ${name}\nservices: {}\n`),
+
+  // Per-runtime availability probe (B8). Outside Tauri we report all
+  // three as available so the Settings UI exercises every state.
+  probeRuntime: (name: string) =>
+    inTauri ? invokeStrict<boolean>('probe_runtime', { name }) :
+              Promise.resolve(true),
+
   // Stacks: up/down return per-line log output; health returns
   // [serviceName, "healthy"|"unhealthy"|"—"|"unsupported:<kind>"].
   stackUp:     (name: string) => inTauri ? invokeStrict<string[]>('stack_up',     { name }) : Promise.resolve(['(dev-mode no-op)']),

@@ -74,6 +74,18 @@ pub async fn available() -> bool {
         .unwrap_or(false)
 }
 
+// Per-runtime availability probe (B8). Doesn't read or mutate the
+// active-runtime slot; lets the Settings UI surface availability badges
+// for each candidate without flipping the active selection.
+pub async fn probe_bin(name: &str) -> bool {
+    Command::new(name)
+        .arg("--version")
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 async fn run(args: &[&str]) -> Result<Vec<u8>> {
     let fut = Command::new(bin()).args(args).output();
     let out = tokio::time::timeout(RUN_TIMEOUT, fut)
