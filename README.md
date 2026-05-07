@@ -1,10 +1,25 @@
-# cgui-visual
+<h1 align="center">cgui-visual</h1>
 
-Tauri + React + TypeScript desktop GUI for Apple's
-[`container`](https://github.com/apple/container) runtime. macOS-only.
+<p align="center">
+  <strong>Desktop GUI for Apple's <a href="https://github.com/apple/container"><code>container</code></a> runtime.</strong><br/>
+  Tauri 2 · React · TypeScript · macOS only.
+</p>
 
-The visual companion to the [`cgui`](https://github.com/elementalcollision/cgui)
-ratatui TUI — same workflows, different surface.
+<p align="center">
+  <a href="https://github.com/elementalcollision/cgui-visual/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/elementalcollision/cgui-visual/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/elementalcollision/cgui-visual/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/elementalcollision/cgui-visual?color=blue"></a>
+  <a href="./LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/elementalcollision/cgui-visual?color=blue"></a>
+  <img alt="Platform: macOS" src="https://img.shields.io/badge/platform-macOS-1d1d1f?logo=apple&logoColor=white">
+  <a href="https://tauri.app"><img alt="Built with Tauri" src="https://img.shields.io/badge/built_with-Tauri_2-24C8DB?logo=tauri&logoColor=white"></a>
+</p>
+
+<p align="center">
+  <img src="design_handoff_cgui/screenshots/01-containers.png" alt="cgui-visual containers tab — workbench variation, dark mode" width="820"/>
+</p>
+
+<p align="center">
+  The visual companion to the <a href="https://github.com/elementalcollision/cgui"><code>cgui</code></a> ratatui TUI — same workflows, different surface.
+</p>
 
 > **Looking for the TUI?** It lives in [elementalcollision/cgui](https://github.com/elementalcollision/cgui).
 
