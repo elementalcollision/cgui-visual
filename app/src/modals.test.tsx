@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { TrivyModal, DoctorModal, OnboardingModal, parseInspect, fuzzyScore } from './modals';
+import { TrivyModal, DoctorModal, OnboardingModal, parseInspect, fuzzyScore, parseImageInspect } from './modals';
 import { getTheme } from './theme';
 
 const t = getTheme(true);
@@ -111,6 +111,50 @@ describe('parseInspect (DetailModal projection)', () => {
     const p = parseInspect(payload)!;
     expect(p.env).toEqual([{ key: 'A', value: '1' }]);
     expect(p.network[0]).toEqual({ name: 'default', ip: '10.0.0.5', mac: undefined });
+  });
+});
+
+describe('parseImageInspect (ImageInspectModal projection)', () => {
+  it('returns null for non-JSON input', () => {
+    expect(parseImageInspect('Loading…')).toBeNull();
+  });
+
+  it('walks history and aligns diff_ids to non-empty layers', () => {
+    const payload = JSON.stringify({
+      architecture: 'arm64',
+      os: 'linux',
+      rootfs: { diff_ids: ['sha256:aaa', 'sha256:bbb'] },
+      history: [
+        { created: '2024-01-01T00:00:00Z', created_by: '/bin/sh -c #(nop) FROM alpine', empty_layer: true },
+        { created: '2024-01-02T00:00:00Z', created_by: '/bin/sh -c apk add curl' },
+        { created: '2024-01-03T00:00:00Z', created_by: '/bin/sh -c #(nop) ENV KEY=v', empty_layer: true },
+        { created: '2024-01-04T00:00:00Z', created_by: '/bin/sh -c make install' },
+      ],
+    });
+    const p = parseImageInspect(payload)!;
+    expect(p.layers).toHaveLength(4);
+    expect(p.layers[0].emptyLayer).toBe(true);
+    expect(p.layers[0].diffId).toBeUndefined();
+    expect(p.layers[1].emptyLayer).toBeFalsy();
+    expect(p.layers[1].diffId).toBe('sha256:aaa');
+    expect(p.layers[2].emptyLayer).toBe(true);
+    expect(p.layers[3].diffId).toBe('sha256:bbb');
+    expect(p.architecture).toBe('arm64');
+    expect(p.os).toBe('linux');
+  });
+
+  it('handles docker-style PascalCase shape', () => {
+    const payload = JSON.stringify([{
+      Architecture: 'amd64', Os: 'linux',
+      RootFS: { DiffIDs: ['sha256:xyz'] },
+      History: [
+        { Created: '2024-06-01T00:00:00Z', CreatedBy: '/bin/sh -c apk add jq' },
+      ],
+    }]);
+    const p = parseImageInspect(payload)!;
+    expect(p.layers[0].createdBy).toMatch(/apk add jq/);
+    expect(p.layers[0].diffId).toBe('sha256:xyz');
+    expect(p.architecture).toBe('amd64');
   });
 });
 

@@ -719,6 +719,219 @@ export function DoctorModal({ t, onClose }: { t: ThemeTokens; onClose: () => voi
   );
 }
 
+// ─── Image layer inspector (A7) ───────────────────────────────────────
+//
+// Apple's `container image inspect` returns the OCI image config, which
+// includes a `history[]` array describing each build step (Dockerfile
+// instruction → resulting layer). We surface that as a "Layers" view
+// alongside the raw JSON. Sizes aren't in the config — they live in the
+// manifest — so the layer rows show command + age + empty-layer flag and
+// the diff_id when available, but `size` stays optional.
+
+export interface ImageLayer {
+  /** Wall-clock timestamp the layer was created. ISO-8601 from the OCI
+   *  config; empty when the build step is missing it. */
+  created: string;
+  /** The build command (Dockerfile RUN/COPY/CMD/etc.) that produced this
+   *  layer. Often prefixed with `/bin/sh -c #(nop)` for non-RUN steps. */
+  createdBy: string;
+  /** Optional comment shown next to the command. */
+  comment?: string;
+  /** OCI calls a step "empty" when no filesystem diff was produced
+   *  (typical of CMD / ENV / LABEL). We render those dim. */
+  emptyLayer?: boolean;
+  /** sha256 diff id from rootfs.diff_ids. Aligned to non-empty layers in
+   *  history order; undefined when the alignment is ambiguous. */
+  diffId?: string;
+}
+
+export interface ParsedImage {
+  layers: ImageLayer[];
+  digest?: string;
+  os?: string;
+  architecture?: string;
+}
+
+// Pull a layer summary out of an `image inspect` JSON payload. Tolerant
+// to docker (PascalCase) vs apple/OCI (camelCase) and to the top-level
+// array form `[{ ... }]`. Returns null on un-parseable input so the
+// caller can fall back to a raw-JSON view.
+export function parseImageInspect(text: string): ParsedImage | null {
+  let root: any;
+  try {
+    const v = JSON.parse(text);
+    root = Array.isArray(v) ? v[0] : v;
+  } catch {
+    return null;
+  }
+  if (!root || typeof root !== 'object') return null;
+
+  const history: any[] = root.history ?? root.History ?? [];
+  const diffIds: string[] = root?.rootfs?.diff_ids ?? root?.RootFS?.DiffIDs ?? [];
+
+  // Walk history; for every non-empty step, claim the next diff id off
+  // the queue. Empty steps don't consume a diff id (per OCI spec).
+  let dq = 0;
+  const layers: ImageLayer[] = history.map((h: any) => {
+    const empty = h.empty_layer === true || h.emptyLayer === true;
+    const diffId = empty ? undefined : diffIds[dq];
+    if (!empty) dq++;
+    return {
+      created: h.created ?? h.Created ?? '',
+      createdBy: h.created_by ?? h.createdBy ?? h.CreatedBy ?? '',
+      comment: h.comment ?? h.Comment ?? undefined,
+      emptyLayer: empty || undefined,
+      diffId,
+    };
+  });
+
+  return {
+    layers,
+    digest: root.config?.digest ?? root.Id ?? root.id,
+    os: root.os ?? root.Os,
+    architecture: root.architecture ?? root.Architecture,
+  };
+}
+
+// Squash leading `/bin/sh -c #(nop) ` so the visible command focuses on
+// the Dockerfile instruction. Falls back to the full string when the
+// prefix isn't present.
+function prettyCmd(s: string): string {
+  return s.replace(/^\/bin\/sh -c #\(nop\)\s*/, '').trim() || s;
+}
+
+// Best-effort relative "n ago" without pulling a date library. Returns
+// "—" for missing / un-parseable timestamps so the column degrades.
+function ago(iso: string): string {
+  if (!iso) return '—';
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return '—';
+  const sec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 48) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day < 30) return `${day}d ago`;
+  const mo = Math.floor(day / 30);
+  if (mo < 24) return `${mo}mo ago`;
+  return `${Math.floor(day / 365)}y ago`;
+}
+
+export function ImageInspectModal({ t, reference, onClose }: {
+  t: ThemeTokens; reference: string; onClose: () => void;
+}) {
+  const [json, setJson] = useState<string>('Loading…');
+  const [tab, setTab] = useState<'layers' | 'raw'>('layers');
+  useEffect(() => {
+    let cancelled = false;
+    api.inspectImage(reference)
+      .then(s => { if (!cancelled) setJson(s); })
+      .catch(e => { if (!cancelled) setJson(`error: ${e}`); });
+    return () => { cancelled = true; };
+  }, [reference]);
+
+  const parsed = useMemo(() => parseImageInspect(json), [json]);
+  const layers = parsed?.layers ?? [];
+  const realLayers = layers.filter(l => !l.emptyLayer).length;
+
+  return (
+    <Backdrop onClose={onClose}>
+      <div style={{ width: 820, maxHeight: '85vh', background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 80px rgba(0,0,0,0.4)' }}>
+        <div style={{ padding: '18px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+          <Icon name="image" size={20} color={t.accent} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 16, fontWeight: 600, color: t.fg1, fontFamily: t.mono, wordBreak: 'break-all' }}>{reference}</div>
+            <div style={{ fontSize: 12, color: t.fg3, fontFamily: t.mono, marginTop: 4 }}>
+              container image inspect
+              {parsed && (
+                <span style={{ marginLeft: 8 }}>
+                  · {realLayers} layer{realLayers === 1 ? '' : 's'}
+                  {parsed.architecture && ` · ${parsed.os ?? 'linux'}/${parsed.architecture}`}
+                </span>
+              )}
+            </div>
+          </div>
+          <button onClick={onClose} style={iconBtn()}><Icon name="x" size={16} color={t.fg2} /></button>
+        </div>
+        <div style={{ display: 'flex', gap: 4, padding: '8px 16px 0', borderBottom: `1px solid ${t.border}` }}>
+          {([
+            { id: 'layers' as const, label: 'Layers', count: layers.length, available: layers.length > 0 },
+            { id: 'raw'    as const, label: 'Raw',    count: 0,             available: true },
+          ]).map(item => {
+            const active = tab === item.id;
+            const dim = !item.available && item.id !== 'raw';
+            return (
+              <button
+                key={item.id}
+                disabled={dim}
+                onClick={() => setTab(item.id)}
+                style={{
+                  padding: '8px 12px',
+                  fontSize: 12, fontWeight: 500, fontFamily: t.mono,
+                  color: active ? t.fg1 : (dim ? t.fg3 : t.fg2),
+                  background: 'transparent', border: 'none',
+                  borderBottom: `2px solid ${active ? t.accent : 'transparent'}`,
+                  cursor: dim ? 'default' : 'pointer',
+                  opacity: dim ? 0.5 : 1, marginBottom: -1,
+                }}
+              >
+                {item.label}{item.count > 0 && <span style={{ marginLeft: 6, color: t.fg3, fontSize: 10 }}>{item.count}</span>}
+              </button>
+            );
+          })}
+        </div>
+        <div style={{ flex: 1, overflow: 'auto', padding: '12px 22px', minHeight: 240 }}>
+          {tab === 'raw' || !parsed ? (
+            <pre style={{ margin: 0, fontFamily: t.mono, fontSize: 11, lineHeight: 1.6, color: t.fg2, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{json}</pre>
+          ) : layers.length === 0 ? (
+            <div style={{ fontSize: 12, color: t.fg3, fontStyle: 'italic' }}>No layer history reported by the runtime.</div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {layers.map((l, i) => (
+                <div key={i} style={{
+                  padding: '8px 10px',
+                  background: l.emptyLayer ? 'transparent' : t.surfaceAlt,
+                  border: `1px solid ${t.border}`,
+                  borderRadius: 6,
+                  opacity: l.emptyLayer ? 0.65 : 1,
+                  display: 'grid', gridTemplateColumns: '40px 1fr auto', gap: 10, alignItems: 'baseline',
+                }}>
+                  <span style={{ fontFamily: t.mono, fontSize: 10, color: t.fg3, fontVariantNumeric: 'tabular-nums' }}>
+                    #{i + 1}
+                  </span>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontFamily: t.mono, fontSize: 12, color: t.fg1, wordBreak: 'break-all', whiteSpace: 'pre-wrap' }}>
+                      {prettyCmd(l.createdBy) || <span style={{ color: t.fg3 }}>(no command)</span>}
+                    </div>
+                    {(l.comment || l.diffId) && (
+                      <div style={{ fontFamily: t.mono, fontSize: 10, color: t.fg3, marginTop: 4, wordBreak: 'break-all' }}>
+                        {l.comment && <span>{l.comment}{l.diffId ? ' · ' : ''}</span>}
+                        {l.diffId && <span>{l.diffId}</span>}
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ fontFamily: t.mono, fontSize: 10, color: t.fg3, whiteSpace: 'nowrap' }}>{ago(l.created)}</div>
+                    {l.emptyLayer && (
+                      <div style={{ fontFamily: t.mono, fontSize: 9, color: t.fg3, marginTop: 2, letterSpacing: '0.04em', textTransform: 'uppercase' }}>empty</div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div style={{ padding: '12px 22px', borderTop: `1px solid ${t.border}`, display: 'flex', gap: 8, justifyContent: 'flex-end', background: t.surfaceAlt }}>
+          <button style={pillBtn(t)} onClick={() => navigator.clipboard?.writeText(json)}>Copy JSON</button>
+          <button style={pillBtn(t)} onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </Backdrop>
+  );
+}
+
 // Generic JSON inspect modal — shared by volume + network.
 export function JsonInspectModal({ t, title, subtitle, fetcher, onClose }: {
   t: ThemeTokens; title: string; subtitle: string;
