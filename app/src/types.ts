@@ -132,4 +132,5 @@ export type Modal =
   | { type: 'runImage'; image: string }
   | { type: 'onboarding' }
   | { type: 'commandPalette' }
+  | { type: 'terminal'; container: Container }
   | null;

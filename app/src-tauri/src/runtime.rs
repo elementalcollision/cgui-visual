@@ -63,6 +63,13 @@ fn bin() -> String {
     slot().read().unwrap().clone()
 }
 
+/// Public accessor for the currently-active runtime binary name. Used
+/// by callers (e.g. pty.rs) that want to compose their own argv without
+/// going through the `run`/`spawn` helpers.
+pub fn current_bin() -> String {
+    bin()
+}
+
 // True when the binary is reachable on PATH. Used so the UI can fall back to
 // fixtures on machines without Apple's container runtime installed.
 pub async fn available() -> bool {

@@ -128,6 +128,48 @@ pub async fn runtime_available() -> bool {
     runtime::available().await
 }
 
+// ─── Embedded terminal (B5) ───────────────────────────────────────────
+//
+// Open a pty that runs `<runtime> exec -it <id> <shell>` and stream the
+// output back to the frontend via `pty:tick:<session_id>` events. The
+// session id round-trips so the UI can multiplex stdin writes + resize
+// + close.
+
+#[tauri::command]
+pub fn pty_open(
+    app: AppHandle,
+    id: String,
+    shell: Option<String>,
+    cols: u16,
+    rows: u16,
+) -> Result<String, String> {
+    let runtime_bin = runtime::current_bin();
+    crate::pty::open(
+        &app,
+        &runtime_bin,
+        &id,
+        shell.as_deref(),
+        cols.max(2),
+        rows.max(2),
+    )
+    .map_err(err_str)
+}
+
+#[tauri::command]
+pub fn pty_write(session_id: String, data: String) -> Result<(), String> {
+    crate::pty::write(&session_id, &data).map_err(err_str)
+}
+
+#[tauri::command]
+pub fn pty_resize(session_id: String, cols: u16, rows: u16) -> Result<(), String> {
+    crate::pty::resize(&session_id, cols.max(2), rows.max(2)).map_err(err_str)
+}
+
+#[tauri::command]
+pub fn pty_close(session_id: String) -> Result<(), String> {
+    crate::pty::close(&session_id).map_err(err_str)
+}
+
 // Per-binary availability probe (B8). Settings calls this once per
 // runtime option to render an availability badge so users can see at a
 // glance which runtimes are installed before flipping the active one.

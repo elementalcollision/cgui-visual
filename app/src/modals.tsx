@@ -280,7 +280,12 @@ function Muted({ t, children }: { t: ThemeTokens; children: ReactNode }) {
   return <div style={{ fontSize: 12, color: t.fg3, fontStyle: 'italic' }}>{children}</div>;
 }
 
-export function DetailModal({ item, t, onClose }: { item: Container; t: ThemeTokens; onClose: () => void }) {
+export function DetailModal({ item, t, onClose, onExec }: {
+  item: Container; t: ThemeTokens; onClose: () => void;
+  // Open the embedded terminal for this container. The host (ModalsHost)
+  // swaps the modal type so the DetailModal closes as the Terminal mounts.
+  onExec: (c: Container) => void;
+}) {
   const [json, setJson] = useState<string>('Loading…');
   const [tab, setTab] = useState<InspectTab>('env');
   useEffect(() => { api.inspectContainer(item.id).then(setJson); }, [item.id]);
@@ -322,7 +327,10 @@ export function DetailModal({ item, t, onClose }: { item: Container; t: ThemeTok
         </div>
         <div style={{ padding: '12px 22px', borderTop: `1px solid ${t.border}`, display: 'flex', gap: 8, justifyContent: 'flex-end', background: t.surfaceAlt }}>
           <button style={pillBtn(t)} onClick={() => withToast(`restart ${c.name}`, api.restartContainer(c.id)).catch(() => {})}>Restart</button>
-          <button style={pillBtn(t)} onClick={() => withToast(`exec ${c.name}`, api.execContainer(c.id)).catch(() => {})}>Exec /bin/sh</button>
+          <button style={pillBtn(t)} onClick={() => onExec(c)} disabled={c.status !== 'running'}
+                  title={c.status === 'running' ? 'Open embedded terminal' : 'Container is not running'}>
+            Exec /bin/sh
+          </button>
           {c.status === 'running' && (
             <button style={pillBtn(t, t.danger)}
                     onClick={() => {
