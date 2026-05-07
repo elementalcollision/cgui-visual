@@ -1,0 +1,18 @@
+# Local agent + IDE state
+.claude/
+.vscode/
+.idea/
+*.swp
+*.sw?
+.DS_Store
+
+# Build artifacts (sub-gitignores already cover these; defensive)
+node_modules/
+dist/
+target/
+gen/
+
+# Updater private keys — never commit. The `.pub` is fine and lives in
+# tauri.conf.json instead.
+*.key
+*.key.enc

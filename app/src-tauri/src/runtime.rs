@@ -1,0 +1,820 @@
+// Thin async wrapper around the active container runtime CLI (defaults to
+// Apple's `container`). Mirrors the parsing logic in cgui's container.rs so
+// the rest of the app gets typed `Container` values regardless of which CLI
+// is active.
+
+use anyhow::{anyhow, Context, Result};
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
+use serde_json::Value;
+use std::process::Stdio;
+use std::sync::{OnceLock, RwLock};
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::{Child, Command};
+
+use crate::model::{Container, Image, MemUsage, Network, Volume};
+
+// Active runtime binary, settable from prefs at startup and from the Settings
+// modal. `bin()` returns a snapshot for the call site.
+static RUNTIME_BIN: OnceLock<RwLock<String>> = OnceLock::new();
+
+fn slot() -> &'static RwLock<String> {
+    RUNTIME_BIN.get_or_init(|| RwLock::new("container".to_string()))
+}
+
+pub fn set_bin(name: &str) {
+    *slot().write().unwrap() = name.to_string();
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct StatRow {
+    pub id: String,
+    // Apple's `container stats` reports cumulative CPU time in microseconds.
+    // CPU% is computed in state.rs via deltas across polls.
+    #[serde(rename = "cpuUsageUsec", alias = "cpu_usage_usec")]
+    pub cpu_usage_usec: u64,
+    #[serde(
+        rename = "memoryUsageBytes",
+        alias = "memory_usage_bytes",
+        alias = "memoryUsage"
+    )]
+    pub memory_usage_bytes: u64,
+    #[serde(
+        rename = "memoryLimitBytes",
+        alias = "memory_limit_bytes",
+        alias = "memoryLimit"
+    )]
+    pub memory_limit_bytes: u64,
+    #[serde(rename = "networkRxBytes", alias = "network_rx_bytes", default)]
+    pub network_rx_bytes: u64,
+    #[serde(rename = "networkTxBytes", alias = "network_tx_bytes", default)]
+    pub network_tx_bytes: u64,
+    #[serde(rename = "blockReadBytes", alias = "block_read_bytes", default)]
+    pub block_read_bytes: u64,
+    #[serde(rename = "blockWriteBytes", alias = "block_write_bytes", default)]
+    pub block_write_bytes: u64,
+}
+
+const RUN_TIMEOUT: Duration = Duration::from_secs(8);
+
+fn bin() -> String {
+    slot().read().unwrap().clone()
+}
+
+// True when the binary is reachable on PATH. Used so the UI can fall back to
+// fixtures on machines without Apple's container runtime installed.
+pub async fn available() -> bool {
+    Command::new(bin())
+        .arg("--version")
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+async fn run(args: &[&str]) -> Result<Vec<u8>> {
+    let fut = Command::new(bin()).args(args).output();
+    let out = tokio::time::timeout(RUN_TIMEOUT, fut)
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "`{} {}` timed out after {}s",
+                bin(),
+                args.join(" "),
+                RUN_TIMEOUT.as_secs()
+            )
+        })?
+        .with_context(|| format!("failed to spawn `{} {}`", bin(), args.join(" ")))?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "`{} {}` exited {}: {}",
+            bin(),
+            args.join(" "),
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(out.stdout)
+}
+
+// Raw ls + stats; the merge happens in state.rs because CPU% needs deltas
+// across polls, which require persistent state.
+pub async fn list_containers_raw() -> Result<(Vec<Container>, Vec<StatRow>)> {
+    let (ls_res, stats_res) =
+        tokio::join!(run(&["ls", "--all", "--format", "json"]), stats_snapshot(),);
+    let bytes = ls_res?;
+    let raw: Vec<Value> = serde_json::from_slice(&bytes).context("parse `container ls` json")?;
+    let cs: Vec<Container> = raw.into_iter().map(parse_container).collect();
+    Ok((cs, stats_res.unwrap_or_default()))
+}
+
+pub async fn stats_snapshot() -> Result<Vec<StatRow>> {
+    let bytes = run(&["stats", "--no-stream", "--format", "json"]).await?;
+    let raw: Vec<Value> = serde_json::from_slice(&bytes).unwrap_or_default();
+    Ok(raw
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect())
+}
+
+pub fn match_stat<'a>(stats: &'a [StatRow], short_id: &str) -> Option<&'a StatRow> {
+    stats
+        .iter()
+        .find(|s| s.id.starts_with(short_id) || short_id.starts_with(&s.id))
+}
+
+fn parse_container(v: Value) -> Container {
+    let cfg = v.get("configuration").cloned().unwrap_or(Value::Null);
+    let id = cfg
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+        .to_string();
+    let image = cfg
+        .get("image")
+        .and_then(|i| i.get("reference"))
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+        .to_string();
+    let status = v
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let memory_bytes = cfg
+        .get("resources")
+        .and_then(|r| r.get("memoryInBytes"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let ports = cfg
+        .get("publishedPorts")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .map(|p| {
+                    let host = p.get("hostPort").and_then(Value::as_u64).unwrap_or(0);
+                    let cont = p.get("containerPort").and_then(Value::as_u64).unwrap_or(0);
+                    format!("{host}:{cont}")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mem_limit_gib = bytes_to_gib(memory_bytes);
+    let stack = compose_project(&cfg);
+
+    // Short-id (first 8 chars) for parity with the prototype's display.
+    let short_id = id.chars().take(8).collect::<String>();
+
+    // Apple's container reports `startedDate` (or `createdDate`) as a float
+    // in NSDate reference epoch (seconds since 2001-01-01 UTC). Fall back to
+    // the RFC3339 `createdAt` if a future runtime version emits it.
+    let started_apple = v
+        .get("startedDate")
+        .or_else(|| v.get("createdDate"))
+        .or_else(|| cfg.get("createdAt"))
+        .and_then(Value::as_f64);
+    let started_iso = cfg
+        .get("createdAt")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let started_unix = started_apple.map(apple_epoch_to_unix);
+
+    let normalized = normalize_status(&status);
+    let uptime = if normalized == "running" {
+        match started_unix {
+            Some(t) => format_uptime_from_unix(t),
+            None if !started_iso.is_empty() => format_uptime_from_iso(&started_iso),
+            _ => "—".into(),
+        }
+    } else {
+        "—".into()
+    };
+
+    let name = cfg
+        .get("hostname")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            cfg.get("networks")
+                .and_then(|n| n.get(0))
+                .and_then(|n| n.get("hostname"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or(&id)
+        .to_string();
+
+    let cmd = cfg
+        .get("initProcess")
+        .or_else(|| cfg.get("processConfig"))
+        .map(|p| {
+            let exe = p.get("executable").and_then(Value::as_str).unwrap_or("");
+            let args = p
+                .get("arguments")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let mut out = Vec::with_capacity(1 + args.len());
+            if !exe.is_empty() {
+                out.push(exe.to_string());
+            }
+            out.extend(args);
+            out
+        })
+        .unwrap_or_default();
+
+    Container {
+        id: short_id,
+        name,
+        image,
+        status: normalized,
+        uptime,
+        exit_code: None,
+        cpu: 0.0,
+        mem: MemUsage {
+            used: 0.0,
+            limit: mem_limit_gib,
+            unit: "GiB".into(),
+            pct: 0.0,
+        },
+        ports,
+        stack,
+        created: started_iso,
+        cpu_history: vec![0.0; 24],
+        cmd,
+        net_io_bps: 0.0,
+        disk_io_bps: 0.0,
+        started_unix,
+    }
+}
+
+// Apple NSDate reference epoch is 2001-01-01 00:00:00 UTC.
+const APPLE_EPOCH_OFFSET: f64 = 978_307_200.0;
+
+fn apple_epoch_to_unix(apple_ts: f64) -> i64 {
+    (apple_ts + APPLE_EPOCH_OFFSET) as i64
+}
+
+fn format_uptime_from_unix(unix_secs: i64) -> String {
+    let secs = (Utc::now().timestamp() - unix_secs).max(0);
+    format_duration(secs)
+}
+
+fn format_uptime_from_iso(s: &str) -> String {
+    let Ok(t) = DateTime::parse_from_rfc3339(s) else {
+        return "—".into();
+    };
+    let secs = (Utc::now() - t.with_timezone(&Utc)).num_seconds().max(0);
+    format_duration(secs)
+}
+
+fn format_duration(secs: i64) -> String {
+    let d = secs / 86_400;
+    let h = (secs % 86_400) / 3600;
+    let m = (secs % 3600) / 60;
+    if d > 0 {
+        format!("{d}d {h:02}h")
+    } else if h > 0 {
+        format!("{h}h {m:02}m")
+    } else if m > 0 {
+        format!("{m}m")
+    } else {
+        format!("{secs}s")
+    }
+}
+
+fn bytes_to_gib(bytes: u64) -> f64 {
+    (bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+}
+
+// `container` returns lowercase status strings already; normalize a few
+// docker-flavored variants for safety so the UI's status-pill switch hits.
+fn normalize_status(s: &str) -> String {
+    let lower = s.to_ascii_lowercase();
+    match lower.as_str() {
+        "up" | "running" => "running".into(),
+        "paused" => "paused".into(),
+        "exited" | "stopped" | "created" => "exited".into(),
+        other => other.into(),
+    }
+}
+
+// Compose project label, mirrors what `cgui` reads for stack grouping.
+fn compose_project(cfg: &Value) -> Option<String> {
+    cfg.get("labels")
+        .and_then(Value::as_object)
+        .and_then(|m| m.get("com.docker.compose.project"))
+        .and_then(Value::as_str)
+        .map(String::from)
+}
+
+// ─── Images / Volumes / Networks ──────────────────────────────────────
+
+pub async fn list_images() -> Result<Vec<Image>> {
+    let bytes = run(&["image", "ls", "--format", "json"]).await?;
+    let raw: Vec<Value> = serde_json::from_slice(&bytes).context("parse `image ls` json")?;
+    Ok(raw
+        .into_iter()
+        .map(|v| {
+            let reference = v
+                .get("reference")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string();
+            let size_str = v
+                .get("fullSize")
+                .and_then(Value::as_str)
+                .unwrap_or("0")
+                .to_string();
+            let size = parse_size_to_gib(&size_str);
+            let digest = v
+                .get("descriptor")
+                .and_then(|d| d.get("digest"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let id = digest
+                .split(':')
+                .nth(1)
+                .map(|h| format!("sha256:{}", &h[..h.len().min(8)]))
+                .unwrap_or_else(|| digest.clone());
+            Image {
+                id,
+                reference,
+                size,
+                size_unit: "GiB".into(),
+                created: v
+                    .get("createdAt")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                tags: v
+                    .get("tags")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                digest,
+                // `image ls` doesn't expose layer count directly; surface 0 for
+                // now (a follow-up can call `image inspect` per row to get it).
+                layers: 0,
+            }
+        })
+        .collect())
+}
+
+// "1.4 GB" / "142 MB" / "8192 bytes" → GiB.
+fn parse_size_to_gib(s: &str) -> f64 {
+    let s = s.trim();
+    let (num_str, unit) = s.split_at(
+        s.find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .unwrap_or(s.len()),
+    );
+    let n: f64 = num_str.parse().unwrap_or(0.0);
+    let u = unit.trim().to_ascii_uppercase();
+    match u.as_str() {
+        "B" | "BYTES" => n / (1024.0 * 1024.0 * 1024.0),
+        "KB" | "KIB" => n / (1024.0 * 1024.0),
+        "MB" | "MIB" => n / 1024.0,
+        "GB" | "GIB" => n,
+        "TB" | "TIB" => n * 1024.0,
+        _ => n / (1024.0 * 1024.0 * 1024.0),
+    }
+}
+
+pub async fn list_volumes() -> Result<Vec<Volume>> {
+    // Fetch the volume list and the container list in parallel — we need the
+    // latter to count how many running containers reference each volume.
+    let (vol_res, ctr_res) = tokio::join!(
+        run(&["volume", "ls", "--format", "json"]),
+        run(&["ls", "--all", "--format", "json"]),
+    );
+    let bytes = vol_res?;
+    if bytes.iter().all(|b| b.is_ascii_whitespace()) {
+        return Ok(vec![]);
+    }
+    let raw: Vec<Value> = serde_json::from_slice(&bytes).unwrap_or_default();
+    let refs = ctr_res.map(|b| volume_ref_counts(&b)).unwrap_or_default();
+
+    Ok(raw
+        .into_iter()
+        .map(|v| {
+            let name = v
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string();
+            let driver = v
+                .get("driver")
+                .and_then(Value::as_str)
+                .unwrap_or("local")
+                .to_string();
+            let source = v
+                .get("source")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let capacity_bytes = v.get("sizeInBytes").and_then(Value::as_u64).unwrap_or(0);
+            let used_bytes = if source.is_empty() {
+                0
+            } else {
+                std::fs::metadata(&source).map(|m| m.len()).unwrap_or(0)
+            };
+            let ref_count = refs.get(name.as_str()).copied().unwrap_or(0);
+            Volume {
+                name,
+                driver,
+                mountpoint: source,
+                size: bytes_to_gib(capacity_bytes),
+                used: bytes_to_gib(used_bytes),
+                unit: "GiB".into(),
+                refs: ref_count,
+            }
+        })
+        .collect())
+}
+
+// Scan container ls output for volume mounts and return a name → count map.
+// Apple's container reports each mount as `{"source": "<name>", "type":
+// "volume", ...}` inside `configuration.mounts`. Bind mounts (`type:
+// "bind"`) are skipped.
+fn volume_ref_counts(ls_bytes: &[u8]) -> std::collections::HashMap<String, u32> {
+    use std::collections::HashMap;
+    let raw: Vec<Value> = serde_json::from_slice(ls_bytes).unwrap_or_default();
+    let mut out: HashMap<String, u32> = HashMap::new();
+    for c in raw {
+        let mounts = c
+            .get("configuration")
+            .and_then(|cfg| cfg.get("mounts"))
+            .and_then(Value::as_array);
+        let Some(mounts) = mounts else { continue };
+        for m in mounts {
+            let kind = m.get("type").and_then(Value::as_str).unwrap_or("");
+            if kind != "volume" {
+                continue;
+            }
+            if let Some(src) = m.get("source").and_then(Value::as_str) {
+                *out.entry(src.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+    out
+}
+
+pub async fn list_networks() -> Result<Vec<Network>> {
+    let bytes = run(&["network", "ls", "--format", "json"]).await?;
+    let raw: Vec<Value> = serde_json::from_slice(&bytes).unwrap_or_default();
+    Ok(raw
+        .into_iter()
+        .map(|v| {
+            let cfg = v.get("config").cloned().unwrap_or(Value::Null);
+            let name = v
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string();
+            let mode = cfg
+                .get("mode")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string();
+            // Apple's CLI returns "running" for an up network; the UI treats
+            // "active" as the up state. Normalize so the status dot lights up.
+            let raw_state = v.get("state").and_then(Value::as_str).unwrap_or("active");
+            let state = if matches!(raw_state, "running" | "active" | "up") {
+                "active"
+            } else {
+                "stopped"
+            }
+            .to_string();
+            let subnet = v
+                .get("status")
+                .and_then(|s| s.get("ipv4Subnet").or_else(|| s.get("ipv6Subnet")))
+                .and_then(Value::as_str)
+                .unwrap_or("—")
+                .to_string();
+            Network {
+                id: name.clone(),
+                name,
+                mode,
+                state,
+                subnet,
+                gateway: "—".into(),
+                dns: vec![],
+                containers: 0,
+            }
+        })
+        .collect())
+}
+
+// ─── Inspect / actions ────────────────────────────────────────────────
+
+pub async fn inspect(id: &str) -> Result<String> {
+    inspect_args(&["inspect", id]).await
+}
+
+pub async fn inspect_volume(name: &str) -> Result<String> {
+    inspect_args(&["volume", "inspect", name]).await
+}
+
+pub async fn inspect_network(id: &str) -> Result<String> {
+    inspect_args(&["network", "inspect", id]).await
+}
+
+pub async fn inspect_image(reference: &str) -> Result<String> {
+    inspect_args(&["image", "inspect", reference]).await
+}
+
+async fn inspect_args(args: &[&str]) -> Result<String> {
+    let bytes = run(args).await?;
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(v) => Ok(serde_json::to_string_pretty(&v)
+            .unwrap_or_else(|_| String::from_utf8_lossy(&bytes).into_owned())),
+        Err(_) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+    }
+}
+
+pub async fn start(id: &str) -> Result<()> {
+    run(&["start", id]).await.map(|_| ())
+}
+pub async fn stop(id: &str) -> Result<()> {
+    run(&["stop", id]).await.map(|_| ())
+}
+pub async fn kill(id: &str) -> Result<()> {
+    run(&["kill", id]).await.map(|_| ())
+}
+pub async fn delete(id: &str) -> Result<()> {
+    run(&["delete", id]).await.map(|_| ())
+}
+pub async fn restart(id: &str) -> Result<()> {
+    let _ = run(&["stop", id]).await;
+    run(&["start", id]).await.map(|_| ())
+}
+
+// Args used to build a `container run -d` invocation. All optional except the
+// image reference. Matches the fields the UI's RunImageModal collects.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunArgs {
+    pub image: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub ports: Vec<String>, // "host:container" each
+    #[serde(default)]
+    pub env: Vec<String>, // "KEY=value" each
+    #[serde(default)]
+    pub command: Option<String>, // free-form; split on spaces
+}
+
+pub async fn run_image(args: RunArgs) -> Result<String> {
+    let mut argv: Vec<String> = vec!["run".into(), "-d".into()];
+    if let Some(n) = args.name.as_deref().filter(|s| !s.is_empty()) {
+        argv.push("--name".into());
+        argv.push(n.into());
+    }
+    for p in &args.ports {
+        if !p.is_empty() {
+            argv.push("-p".into());
+            argv.push(p.clone());
+        }
+    }
+    for e in &args.env {
+        if !e.is_empty() {
+            argv.push("-e".into());
+            argv.push(e.clone());
+        }
+    }
+    argv.push(args.image.clone());
+    if let Some(cmd) = args.command.as_deref().filter(|s| !s.is_empty()) {
+        for tok in cmd.split_whitespace() {
+            argv.push(tok.into());
+        }
+    }
+    let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let bytes = run(&argv_ref).await?;
+    Ok(String::from_utf8_lossy(&bytes).trim().to_string())
+}
+
+pub async fn delete_image(reference: &str) -> Result<()> {
+    run(&["image", "delete", reference]).await.map(|_| ())
+}
+pub async fn delete_volume(name: &str) -> Result<()> {
+    run(&["volume", "delete", name]).await.map(|_| ())
+}
+pub async fn delete_network(id: &str) -> Result<()> {
+    run(&["network", "delete", id]).await.map(|_| ())
+}
+
+// Open a Terminal.app window running `<runtime> exec -it <id> /bin/sh`.
+// macOS-only because the host project (Apple's `container` runtime) is
+// macOS-only.
+pub fn exec_in_terminal(id: &str) -> Result<()> {
+    let runtime_bin = bin();
+    let cmd_line = format!(
+        "{} exec -it {} /bin/sh",
+        shell_quote(&runtime_bin),
+        shell_quote(id)
+    );
+    let script = format!(
+        r#"tell application "Terminal" to do script "{}""#,
+        cmd_line.replace('\\', "\\\\").replace('"', "\\\"")
+    );
+    std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .spawn()
+        .with_context(|| "failed to spawn osascript")?;
+    let _ = std::process::Command::new("osascript")
+        .args(["-e", r#"tell application "Terminal" to activate"#])
+        .status();
+    Ok(())
+}
+
+fn shell_quote(s: &str) -> String {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-._/=:".contains(c))
+    {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+}
+
+// ─── Streaming spawners ───────────────────────────────────────────────
+//
+// Each returns a spawned `Child` and a stream-consumer task. The caller
+// (commands.rs) merges stdout+stderr into per-line callbacks and emits Tauri
+// events. Callers should hold onto the Child to abort with `start_kill()`.
+
+pub fn spawn(args: &[&str]) -> Result<Child> {
+    Command::new(bin())
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("spawn `{} {}`", bin(), args.join(" ")))
+}
+
+// Drain stdout+stderr line-by-line, invoking `on_line` for each. Returns when
+// the child exits; the child handle is consumed.
+pub async fn drain_lines<F>(mut child: Child, mut on_line: F) -> Result<std::process::ExitStatus>
+where
+    F: FnMut(String) + Send + 'static,
+{
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let tx_out = tx.clone();
+    let t_out = tokio::spawn(async move {
+        if let Some(out) = stdout {
+            let mut lines = BufReader::new(out).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let _ = tx_out.send(line);
+            }
+        }
+    });
+    let tx_err = tx.clone();
+    let t_err = tokio::spawn(async move {
+        if let Some(err) = stderr {
+            let mut lines = BufReader::new(err).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let _ = tx_err.send(line);
+            }
+        }
+    });
+    drop(tx);
+    let pump = tokio::spawn(async move {
+        while let Some(line) = rx.recv().await {
+            on_line(line);
+        }
+    });
+    let status = child.wait().await?;
+    let _ = t_out.await;
+    let _ = t_err.await;
+    let _ = pump.await;
+    Ok(status)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_size_to_gib_handles_units() {
+        assert!((parse_size_to_gib("1 GB") - 1.0).abs() < 1e-6);
+        assert!((parse_size_to_gib("512 MB") - 0.5).abs() < 1e-6);
+        assert!((parse_size_to_gib("70.5 MB") - (70.5 / 1024.0)).abs() < 1e-6);
+        assert!((parse_size_to_gib("2 TB") - 2048.0).abs() < 1e-6);
+        assert_eq!(parse_size_to_gib(""), 0.0);
+    }
+
+    #[test]
+    fn normalize_status_buckets_variants() {
+        assert_eq!(normalize_status("running"), "running");
+        assert_eq!(normalize_status("Up"), "running");
+        assert_eq!(normalize_status("Paused"), "paused");
+        assert_eq!(normalize_status("exited"), "exited");
+        assert_eq!(normalize_status("created"), "exited");
+        assert_eq!(normalize_status("dead"), "dead");
+    }
+
+    #[test]
+    fn format_duration_picks_largest_unit() {
+        assert_eq!(format_duration(45), "45s");
+        assert_eq!(format_duration(125), "2m");
+        assert_eq!(format_duration(3725), "1h 02m");
+        assert_eq!(format_duration(90061), "1d 01h");
+    }
+
+    #[test]
+    fn apple_epoch_offset_matches_2001() {
+        // 2001-01-01T00:00:00Z = unix 978307200
+        assert_eq!(apple_epoch_to_unix(0.0), 978_307_200);
+    }
+
+    #[test]
+    fn shell_quote_escapes_only_when_needed() {
+        assert_eq!(shell_quote("simple"), "simple");
+        assert_eq!(shell_quote("path/to/bin"), "path/to/bin");
+        assert_eq!(shell_quote("has space"), "'has space'");
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    // Exercise the streaming line pump end-to-end against a controlled
+    // child. Captures the same path used by start_log_stream / start_pull.
+    #[tokio::test]
+    async fn drain_lines_collects_all_output() {
+        let child = Command::new("sh")
+            .args([
+                "-c",
+                "printf 'alpha\\nbravo\\ncharlie\\n'; printf 'errline\\n' >&2",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn sh");
+        let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink = collected.clone();
+        let status = drain_lines(child, move |line| sink.lock().unwrap().push(line))
+            .await
+            .expect("drain ok");
+        assert!(status.success());
+        let lines = collected.lock().unwrap().clone();
+        assert!(
+            lines.iter().any(|l| l == "alpha"),
+            "missing stdout line: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l == "bravo"),
+            "missing stdout line: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l == "charlie"),
+            "missing stdout line: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l == "errline"),
+            "missing stderr line: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn parse_container_apple_shape() {
+        // Hand-crafted from real `container ls --all --format json` output.
+        let v = json!({
+            "status": "running",
+            "startedDate": 0.0, // Apple epoch — translates to unix 978307200
+            "configuration": {
+                "id": "abcdef1234567890",
+                "image": { "reference": "docker.io/library/alpine:latest" },
+                "resources": { "memoryInBytes": 1073741824u64 },
+                "publishedPorts": [{ "hostPort": 8080, "containerPort": 80, "proto": "tcp" }],
+                "networks": [{ "hostname": "myapp" }],
+                "initProcess": { "executable": "sh", "arguments": ["-c", "true"] },
+                "labels": { "com.docker.compose.project": "demo" }
+            }
+        });
+        let c = parse_container(v);
+        assert_eq!(c.id, "abcdef12");
+        assert_eq!(c.name, "myapp");
+        assert_eq!(c.image, "docker.io/library/alpine:latest");
+        assert_eq!(c.status, "running");
+        assert_eq!(c.ports, vec!["8080:80"]);
+        assert_eq!(c.cmd, vec!["sh", "-c", "true"]);
+        assert_eq!(c.stack.as_deref(), Some("demo"));
+        // Memory limit reported in GiB.
+        assert!((c.mem.limit - 1.0).abs() < 1e-6);
+    }
+}

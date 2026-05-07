@@ -1,0 +1,109 @@
+name: Release
+
+# Builds a universal-binary macOS bundle on every git tag matching `v*`.
+# This project is macOS-only (wraps Apple's `container` CLI), so no Linux or
+# Windows targets are produced.
+#
+# Code signing notes:
+#   Set repo secrets APPLE_CERTIFICATE (base64 .p12),
+#   APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY, APPLE_ID,
+#   APPLE_PASSWORD, APPLE_TEAM_ID. Without these, the .app/.dmg ships
+#   unsigned and Gatekeeper will block first launch.
+#
+# To cut a release:
+#   git tag v0.1.0 && git push --tags
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  draft-release:
+    name: Create draft release
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.id }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: create
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.replace('refs/tags/', '');
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: `cgui ${tag}`,
+              draft: true,
+              prerelease: false,
+              generate_release_notes: true,
+            });
+            core.setOutput('id', data.id);
+
+  build:
+    needs: draft-release
+    name: Build (macOS universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - name: npm ci
+        working-directory: app
+        run: npm ci
+
+      - name: tauri build + upload to release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Apple notarization / Gatekeeper signing (no-op when unset).
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Tauri-updater minisign signing. The matching public key is
+          # baked into tauri.conf.json `plugins.updater.pubkey`. Without
+          # this secret the in-app updater can't verify downloads and
+          # `latest.json` will be missing the `signature` field.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: app
+          releaseId: ${{ needs.draft-release.outputs.release_id }}
+          args: --target universal-apple-darwin
+
+  publish-release:
+    name: Publish draft release
+    needs: [draft-release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: '${{ needs.draft-release.outputs.release_id }}',
+              draft: false,
+            });

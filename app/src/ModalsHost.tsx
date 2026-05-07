@@ -1,0 +1,60 @@
+// Modal dispatch host. Lazy-loaded via React.lazy in App.tsx so the
+// ~30 KB of modal code doesn't ship in the initial bundle. The user
+// pays the import cost on the first modal open, which is async-fine
+// (modals already do an `api.invoke()` before rendering content).
+
+import { api } from './api';
+import {
+  DetailModal,
+  PullModal,
+  TrivyModal,
+  UpdateModal,
+  DoctorModal,
+  SettingsModal,
+  JsonInspectModal,
+  RunImageModal,
+} from './modals';
+import { toast } from './toast';
+import type { ThemeTokens } from './theme';
+import type { Modal, Runtime } from './types';
+
+export default function ModalsHost(props: {
+  modal: Modal;
+  t: ThemeTokens;
+  runtime: Runtime;
+  setRuntime: (r: Runtime) => void;
+  pullReference: string;
+  onClose: () => void;
+  onUpdateClosed: () => void;
+}) {
+  const { modal, t, runtime, setRuntime, pullReference, onClose, onUpdateClosed } = props;
+  if (!modal) return null;
+
+  switch (modal.type) {
+    case 'detail':
+      return <DetailModal item={modal.payload} t={t} onClose={onClose} />;
+    case 'pull':
+      return <PullModal t={t} reference={pullReference} onClose={onClose} />;
+    case 'trivy':
+      return <TrivyModal t={t} image={modal.image} onClose={onClose} />;
+    case 'update':
+      return <UpdateModal t={t} onClose={onUpdateClosed} />;
+    case 'doctor':
+      return <DoctorModal t={t} onClose={onClose} />;
+    case 'settings':
+      return <SettingsModal t={t} runtime={runtime} setRuntime={setRuntime} onClose={onClose} />;
+    case 'volumeInspect':
+      return <JsonInspectModal t={t} title={modal.name} subtitle="container volume inspect"
+                               fetcher={() => api.inspectVolume(modal.name)} onClose={onClose} />;
+    case 'networkInspect':
+      return <JsonInspectModal t={t} title={modal.name} subtitle="container network inspect"
+                               fetcher={() => api.inspectNetwork(modal.id)} onClose={onClose} />;
+    case 'imageInspect':
+      return <JsonInspectModal t={t} title={modal.reference} subtitle="container image inspect"
+                               fetcher={() => api.inspectImage(modal.reference)} onClose={onClose} />;
+    case 'runImage':
+      return <RunImageModal t={t} image={modal.image}
+                            onLaunched={(id) => toast(`launched ${id}`, 'info')}
+                            onClose={onClose} />;
+  }
+}

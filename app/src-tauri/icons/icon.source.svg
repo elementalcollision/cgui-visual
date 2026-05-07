@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- Plate gradient: light navy at the top falling to near-black at the
+         bottom. Three stops give a more sculptural surface than a 2-stop
+         linear, without slipping into glossy skeuomorphism. -->
+    <linearGradient id="bg" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0"    stop-color="#2A3344"/>
+      <stop offset="0.45" stop-color="#161B26"/>
+      <stop offset="1"    stop-color="#0B0E14"/>
+    </linearGradient>
+
+    <!-- Glyph fill — same hue as the in-app accent token (#58A6FF) so the
+         icon and UI feel related when seen side by side. Light at the top
+         to catch the implied "lit from above" of the plate. -->
+    <linearGradient id="accent" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0" stop-color="#9DCBFF"/>
+      <stop offset="1" stop-color="#3D88E8"/>
+    </linearGradient>
+
+    <!-- Soft glow under the cursor block — only shape that lights up,
+         mimicking a real terminal cursor. -->
+    <filter id="cursor-glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+
+    <!-- Subtle top rim — fakes a single-source overhead light without
+         resorting to a full glossy bevel. -->
+    <linearGradient id="rim" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0"   stop-color="#FFFFFF" stop-opacity="0.10"/>
+      <stop offset="0.3" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Plate: rx=232 sits between Apple's app-icon (≈184) and a softer
+       Tauri default — reads as "modern devtool" while still being a clear
+       squircle. The OS may apply its own mask at display time, so the
+       plate just needs to fill the canvas convincingly. -->
+  <rect width="1024" height="1024" rx="232" ry="232" fill="url(#bg)"/>
+  <rect x="2" y="2" width="1020" height="1020" rx="231" ry="231"
+        fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="2"/>
+  <rect width="1024" height="1024" rx="232" ry="232" fill="url(#rim)"/>
+
+  <!-- Glyph + cursor are the entire mark. Tight pairing (24px gap between
+       C's right edge and the cursor) so they read as a single unit at
+       small sizes rather than two floating shapes. -->
+  <text x="358" y="678" text-anchor="middle"
+        font-family="ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace"
+        font-size="560" font-weight="700"
+        fill="url(#accent)"
+        letter-spacing="-20">C</text>
+
+  <g filter="url(#cursor-glow)" opacity="0.45">
+    <rect x="572" y="588" width="148" height="92" rx="10" fill="#9DCBFF"/>
+  </g>
+  <rect x="572" y="588" width="148" height="92" rx="10" fill="url(#accent)"/>
+</svg>
