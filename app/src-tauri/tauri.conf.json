@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "cgui",
+  "version": "0.1.0",
+  "identifier": "dev.cgui.gui",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "cgui",
+        "width": 1480,
+        "height": 920,
+        "minWidth": 960,
+        "minHeight": 600
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "publisher": "elementalcollision",
+    "homepage": "https://github.com/elementalcollision/cgui",
+    "shortDescription": "Visual GUI for Apple's container runtime",
+    "longDescription": "cgui is a desktop GUI front-end for Apple's `container` CLI, with Docker-compatible support. Inspect containers, images, volumes, networks, and stacks; stream logs; pull images; run Trivy scans; and check for component updates.",
+    "category": "DeveloperTool",
+    "copyright": "Copyright (c) 2026 elementalcollision. MIT License.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns"
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://elementalcollision.github.io/cgui-visual/updates/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY2QTgyMzdFMkFDNjg5RDYKUldUV2ljWXFmaU9vWm9HK1kvSzhZcnJROFZFbnhnT2UxNGpLYmQ4UWNYalhvUmtDQ25oU2ZFazkK"
+    }
+  }
+}

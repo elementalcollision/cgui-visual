@@ -1,0 +1,98 @@
+name: Updater manifest
+
+# Publishes the Tauri-updater manifest (`latest.json`) to GitHub Pages
+# after a release is published. The app's `tauri.conf.json` points its
+# updater endpoint at this Pages URL.
+#
+# Manifest format:
+#   {
+#     "version": "0.2.0",
+#     "notes": "<release body>",
+#     "pub_date": "2026-05-02T18:00:00Z",
+#     "platforms": {
+#       "darwin-aarch64": { "signature": "<minisign sig>", "url": "<.app.tar.gz url>" },
+#       "darwin-x86_64":  { "signature": "<minisign sig>", "url": "<.app.tar.gz url>" }
+#     }
+#   }
+#
+# The `tauri-action` release job uploads `cgui_<ver>_universal.app.tar.gz`
+# and `cgui_<ver>_universal.app.tar.gz.sig` (the minisign signature) to
+# the GitHub Release. This workflow stitches them into the manifest.
+#
+# Setup:
+#   1. Repo Settings → Pages → Source: GitHub Actions
+#   2. The pubkey in tauri.conf.json must match the private key in the
+#      TAURI_SIGNING_PRIVATE_KEY secret used by release.yml.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build manifest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p public/updates
+          # Pull the latest published release.
+          REL=$(gh api repos/${{ github.repository }}/releases/latest)
+          TAG=$(echo "$REL" | jq -r .tag_name)
+          VER=${TAG#v}
+          NOTES=$(echo "$REL" | jq -r .body | head -c 8192)
+          PUBDATE=$(echo "$REL" | jq -r .published_at)
+
+          # Find the universal .app.tar.gz and its .sig sibling.
+          ASSETS=$(echo "$REL" | jq -r '.assets[] | "\(.name)\t\(.browser_download_url)"')
+          TARBALL_URL=$(echo "$ASSETS" | awk -F'\t' '/universal\.app\.tar\.gz$/ {print $2; exit}')
+          SIG_URL=$(echo     "$ASSETS" | awk -F'\t' '/universal\.app\.tar\.gz\.sig$/ {print $2; exit}')
+
+          if [ -z "$TARBALL_URL" ] || [ -z "$SIG_URL" ]; then
+            echo "::error::expected universal.app.tar.gz + .sig assets on release $TAG"
+            exit 1
+          fi
+
+          SIG=$(curl -sfL "$SIG_URL")
+
+          jq -n \
+            --arg version "$VER" \
+            --arg notes "$NOTES" \
+            --arg pub_date "$PUBDATE" \
+            --arg url "$TARBALL_URL" \
+            --arg sig "$SIG" '
+            {
+              version: $version,
+              notes: $notes,
+              pub_date: $pub_date,
+              platforms: {
+                "darwin-aarch64": { signature: $sig, url: $url },
+                "darwin-x86_64":  { signature: $sig, url: $url }
+              }
+            }' > public/updates/latest.json
+
+          cat public/updates/latest.json
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+      - id: deploy
+        uses: actions/deploy-pages@v4
