@@ -514,8 +514,18 @@ export function OnboardingModal({ t, onAvailable, onDismiss }: {
   );
 }
 
-export function SettingsModal({ t, onClose, runtime, setRuntime }: {
+export function SettingsModal({
+  t, onClose, runtime, setRuntime,
+  dark, setDark,
+  menubarMode, setMenubarMode,
+  globalHotkey, setGlobalHotkey,
+  notifyOnExit, setNotifyOnExit,
+}: {
   t: ThemeTokens; onClose: () => void; runtime: Runtime; setRuntime: (r: Runtime) => void;
+  dark: boolean; setDark: (b: boolean) => void;
+  menubarMode: boolean; setMenubarMode: (b: boolean) => void;
+  globalHotkey: string; setGlobalHotkey: (s: string) => void;
+  notifyOnExit: boolean; setNotifyOnExit: (b: boolean) => void;
 }) {
   const runtimes: { key: Runtime; path: string }[] = [
     { key: 'container', path: '/usr/local/bin/container' },
@@ -542,20 +552,91 @@ export function SettingsModal({ t, onClose, runtime, setRuntime }: {
               {key === runtime && <span style={{ fontSize: 10, color: t.success, fontFamily: t.mono }}>● ACTIVE</span>}
             </label>
           ))}
-          <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: t.fg3, margin: '20px 0 10px' }}>Resource alerts</div>
-          {[
-            { l: 'CPU warn', v: '60%' }, { l: 'CPU alert', v: '85%' },
-            { l: 'Memory warn', v: '70%' }, { l: 'Memory alert', v: '90%' },
-          ].map((row, i) => (
-            <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 0', borderBottom: `1px solid ${t.border}` }}>
-              <span style={{ fontSize: 13, color: t.fg2 }}>{row.l}</span>
-              <span style={{ fontSize: 12, color: t.fg1, fontFamily: t.mono, padding: '4px 10px', background: t.surfaceAlt, border: `1px solid ${t.border}`, borderRadius: 4 }}>{row.v}</span>
+          <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: t.fg3, margin: '20px 0 10px' }}>Appearance</div>
+          <SettingsToggle t={t} label="Dark mode" hint="Switch the UI to a light theme when off." value={dark} onChange={setDark} />
+
+          <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: t.fg3, margin: '20px 0 10px' }}>Menu bar</div>
+          <SettingsToggle
+            t={t}
+            label="Menu-bar mode"
+            hint="Closing the main window keeps cgui running in the menu bar. The tray icon shows the running container count."
+            value={menubarMode}
+            onChange={setMenubarMode}
+          />
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 0', borderBottom: `1px solid ${t.border}`, gap: 12 }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13, color: t.fg1 }}>Global summon hotkey</div>
+              <div style={{ fontSize: 11, color: t.fg3, marginTop: 2 }}>e.g. <span style={{ fontFamily: t.mono }}>CmdOrCtrl+Alt+Space</span>. Empty disables.</div>
             </div>
-          ))}
+            <input
+              value={globalHotkey}
+              onChange={e => setGlobalHotkey(e.target.value)}
+              placeholder="(disabled)"
+              spellCheck={false}
+              style={{
+                width: 220,
+                padding: '6px 10px',
+                background: t.surfaceAlt,
+                color: t.fg1,
+                border: `1px solid ${t.border}`,
+                borderRadius: 4,
+                fontFamily: t.mono,
+                fontSize: 12,
+                outline: 'none',
+              }}
+            />
+          </div>
+
+          <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: t.fg3, margin: '20px 0 10px' }}>Notifications</div>
+          <SettingsToggle
+            t={t}
+            label="Notify on container exit"
+            hint="Show a macOS notification when a running container exits. Non-zero exit codes are highlighted."
+            value={notifyOnExit}
+            onChange={setNotifyOnExit}
+          />
+
           <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: t.fg3, margin: '20px 0 10px' }}>State</div>
-          <div style={{ fontFamily: t.mono, fontSize: 11, color: t.fg3 }}>~/.config/cgui/state.json — auto-saved</div>
+          <div style={{ fontFamily: t.mono, fontSize: 11, color: t.fg3 }}>~/.config/cgui-gui/state.json — auto-saved</div>
         </div>
       </div>
     </Backdrop>
+  );
+}
+
+// Tiny labeled-toggle row used by SettingsModal. Pure CSS switch so the
+// modal stays a leaf chunk with no extra deps.
+function SettingsToggle({ t, label, hint, value, onChange }: {
+  t: ThemeTokens; label: string; hint?: string;
+  value: boolean; onChange: (v: boolean) => void;
+}) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      padding: '10px 0', borderBottom: `1px solid ${t.border}`, gap: 12,
+    }}>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 13, color: t.fg1 }}>{label}</div>
+        {hint && <div style={{ fontSize: 11, color: t.fg3, marginTop: 2 }}>{hint}</div>}
+      </div>
+      <button
+        onClick={() => onChange(!value)}
+        aria-pressed={value}
+        style={{
+          flex: '0 0 auto',
+          width: 38, height: 22, borderRadius: 999,
+          background: value ? t.accent : t.surfaceAlt,
+          border: `1px solid ${value ? t.accent : t.border}`,
+          position: 'relative', cursor: 'pointer', transition: 'background 120ms ease',
+        }}
+      >
+        <span style={{
+          position: 'absolute', top: 1, left: value ? 17 : 1,
+          width: 18, height: 18, borderRadius: '50%',
+          background: '#fff',
+          transition: 'left 120ms ease',
+        }} />
+      </button>
+    </div>
   );
 }

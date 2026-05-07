@@ -16,10 +16,14 @@ export type Prefs = {
   sidebarCollapsed: boolean;
   runtime: 'container' | 'docker' | 'podman';
   lastTab: string;
+  menubarMode: boolean;
+  globalHotkey: string;
+  notifyOnExit: boolean;
 };
 
 const PREFS_DEFAULT: Prefs = {
   dark: true, sidebarCollapsed: false, runtime: 'container', lastTab: 'containers',
+  menubarMode: false, globalHotkey: '', notifyOnExit: true,
 };
 
 async function call<T>(cmd: string, fallback: T, args?: Record<string, unknown>): Promise<T> {
@@ -132,4 +136,22 @@ export const api = {
   // Prefs persistence. Outside Tauri, hand back defaults / no-op save.
   loadPrefs: () => call<Prefs>('load_prefs', PREFS_DEFAULT),
   savePrefs: (p: Prefs) => inTauri ? invokeStrict<void>('save_prefs', { prefs: p }).catch(e => console.warn('save_prefs failed', e)) : Promise.resolve(),
+
+  // Apply / clear the global summon hotkey at runtime. Empty string clears.
+  // Surfaces parser / OS-conflict errors so Settings can show them.
+  setGlobalHotkey: (accelerator: string) =>
+    inTauri ? invokeStrict<void>('set_global_hotkey', { accelerator }) : Promise.resolve(),
+
+  // Last-poll wall-clock subscription (A12). Backend emits a single u64
+  // millis-since-epoch on each successful container poll. Used by the
+  // status bar to render "updated Ns ago".
+  onTickAt: async (cb: (ms: number) => void): Promise<UnlistenFn> => {
+    if (!inTauri) {
+      // In dev mode, fake a tick every 2 s so the indicator still moves.
+      const id = window.setInterval(() => cb(Date.now()), 2000);
+      cb(Date.now());
+      return () => window.clearInterval(id);
+    }
+    return listen<number>('containers:tickAt', e => cb(e.payload));
+  },
 };

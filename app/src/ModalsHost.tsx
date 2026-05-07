@@ -28,8 +28,21 @@ export default function ModalsHost(props: {
   onClose: () => void;
   onUpdateClosed: () => void;
   onOnboardingResolved: () => void;
+  // Settings-modal state, threaded so toggles round-trip via App's prefs.
+  menubarMode: boolean;
+  setMenubarMode: (b: boolean) => void;
+  globalHotkey: string;
+  setGlobalHotkey: (s: string) => void;
+  notifyOnExit: boolean;
+  setNotifyOnExit: (b: boolean) => void;
+  dark: boolean;
+  setDark: (b: boolean) => void;
 }) {
-  const { modal, t, runtime, setRuntime, pullReference, onClose, onUpdateClosed, onOnboardingResolved } = props;
+  const {
+    modal, t, runtime, setRuntime, pullReference, onClose, onUpdateClosed, onOnboardingResolved,
+    menubarMode, setMenubarMode, globalHotkey, setGlobalHotkey, notifyOnExit, setNotifyOnExit,
+    dark, setDark,
+  } = props;
   if (!modal) return null;
 
   switch (modal.type) {
@@ -46,7 +59,13 @@ export default function ModalsHost(props: {
     case 'doctor':
       return <DoctorModal t={t} onClose={onClose} />;
     case 'settings':
-      return <SettingsModal t={t} runtime={runtime} setRuntime={setRuntime} onClose={onClose} />;
+      return <SettingsModal
+        t={t} runtime={runtime} setRuntime={setRuntime} onClose={onClose}
+        dark={dark} setDark={setDark}
+        menubarMode={menubarMode} setMenubarMode={setMenubarMode}
+        globalHotkey={globalHotkey} setGlobalHotkey={setGlobalHotkey}
+        notifyOnExit={notifyOnExit} setNotifyOnExit={setNotifyOnExit}
+      />;
     case 'volumeInspect':
       return <JsonInspectModal t={t} title={modal.name} subtitle="container volume inspect"
                                fetcher={() => api.inspectVolume(modal.name)} onClose={onClose} />;

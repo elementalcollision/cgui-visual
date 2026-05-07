@@ -191,7 +191,9 @@ export function ImagesView({ t, search, onScan, onRun, onInspect }: {
 }
 
 // ─── Volumes ──────────────────────────────────────────────────────────
-export function VolumesView({ t, onInspect }: { t: ThemeTokens; onInspect: (v: Volume) => void }) {
+export function VolumesView({ t, search, onInspect }: {
+  t: ThemeTokens; search: string; onInspect: (v: Volume) => void;
+}) {
   const [items, setItems] = useState<Volume[]>([]);
   const reload = () => api.listVolumes().then(setItems);
   useEffect(() => { reload(); }, []);
@@ -199,10 +201,17 @@ export function VolumesView({ t, onInspect }: { t: ThemeTokens; onInspect: (v: V
     if (!confirm(`Delete volume ${v.name}?\nAll data in this volume will be lost.`)) return;
     withToast(`delete ${v.name}`, api.deleteVolume(v.name)).then(reload).catch(() => {});
   };
+  const q = search.trim().toLowerCase();
+  const rows = q
+    ? items.filter(v =>
+        v.name.toLowerCase().includes(q) ||
+        v.driver.toLowerCase().includes(q) ||
+        v.mountpoint.toLowerCase().includes(q))
+    : items;
   return (
     <div style={{ flex: 1, overflow: 'auto', background: t.bg, padding: 16 }}>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(380px, 1fr))', gap: 14 }}>
-        {items.map(v => {
+        {rows.map(v => {
           const pct = (v.used / v.size) * 100;
           return (
             <div key={v.name} style={{ background: t.surface, border: `1px solid ${t.border}`, borderRadius: 10, padding: 18 }}>
@@ -242,10 +251,19 @@ export function VolumesView({ t, onInspect }: { t: ThemeTokens; onInspect: (v: V
 // ─── Networks ─────────────────────────────────────────────────────────
 const COLS_NETWORKS = '32px 1fr 100px 100px 1.4fr 1.2fr 70px 80px';
 
-export function NetworksView({ t, onInspect }: { t: ThemeTokens; onInspect: (n: Network) => void }) {
+export function NetworksView({ t, search, onInspect }: {
+  t: ThemeTokens; search: string; onInspect: (n: Network) => void;
+}) {
   const [items, setItems] = useState<Network[]>([]);
   const reload = () => api.listNetworks().then(setItems);
   useEffect(() => { reload(); }, []);
+  const q = search.trim().toLowerCase();
+  const rows = q
+    ? items.filter(n =>
+        n.name.toLowerCase().includes(q) ||
+        n.mode.toLowerCase().includes(q) ||
+        n.subnet.toLowerCase().includes(q))
+    : items;
   const onDelete = (n: Network) => {
     // System networks (default/host/bridge) generally can't be deleted.
     if (['default', 'host', 'bridge'].includes(n.name)) {
@@ -260,7 +278,7 @@ export function NetworksView({ t, onInspect }: { t: ThemeTokens; onInspect: (n: 
       <div style={tableHeader(t, COLS_NETWORKS)}>
         <span></span><span>Name</span><span>Mode</span><span>State</span><span>Subnet</span><span>DNS</span><span style={{ textAlign: 'right' }}>Conn</span><span></span>
       </div>
-      {items.map(n => (
+      {rows.map(n => (
         <div key={n.id} style={tableRow(t, COLS_NETWORKS)}>
           <Icon name="network" size={16} color={t.fg3} />
           <div style={{ fontFamily: t.mono, fontSize: 13, color: t.fg1 }}>{n.name}</div>
@@ -286,7 +304,7 @@ export function NetworksView({ t, onInspect }: { t: ThemeTokens; onInspect: (n: 
 
 const HEALTH_POLL_MS = 5000;
 
-export function StacksView({ t }: { t: ThemeTokens }) {
+export function StacksView({ t, search }: { t: ThemeTokens; search: string }) {
   const [items, setItems] = useState<Stack[]>([]);
   // Per-stack live overlays. Health: { stackName: { service: state } }.
   // Logs: latest up/down output per stack, displayed as a footer strip.
@@ -392,7 +410,17 @@ export function StacksView({ t }: { t: ThemeTokens }) {
         </button>
       </div>
       <div style={{ display: 'grid', gap: 12 }}>
-        {items.map(s => {
+        {items
+          .filter(s => {
+            const q = search.trim().toLowerCase();
+            if (!q) return true;
+            return s.name.toLowerCase().includes(q)
+              || s.file.toLowerCase().includes(q)
+              || s.services.some(sv =>
+                  sv.name.toLowerCase().includes(q) ||
+                  sv.image.toLowerCase().includes(q));
+          })
+          .map(s => {
           const running = s.services.filter(sv => sv.state === 'running').length;
           const liveHealth = health[s.name] || {};
           const tail = logs[s.name];

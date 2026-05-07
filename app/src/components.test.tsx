@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { render } from '@testing-library/react';
-import { fmtBytes, Sparkline, StatusDot, Bar } from './components';
+import { fmtBytes, Sparkline, StatusDot, Bar, fmtAgo } from './components';
 import { getTheme } from './theme';
 
 const t = getTheme(true);
@@ -50,6 +50,23 @@ describe('StatusDot', () => {
     const { container } = render(<StatusDot status="exited" t={t} />);
     const dot = container.querySelector('span') as HTMLSpanElement;
     expect(dot.style.background).toBe('rgb(107, 115, 130)');
+  });
+});
+
+describe('fmtAgo', () => {
+  it("returns '—' when no tick has been received", () => {
+    expect(fmtAgo(0)).toBe('—');
+  });
+  it("uses 'just now' inside a tick window", () => {
+    const now = 100_000;
+    expect(fmtAgo(now - 500, now)).toBe('just now');
+    expect(fmtAgo(now - 1500, now)).toBe('just now');
+  });
+  it("uses seconds, minutes, hours buckets above the floor", () => {
+    const now = 10_000_000;
+    expect(fmtAgo(now - 30_000, now)).toBe('30s ago');
+    expect(fmtAgo(now - 90_000, now)).toBe('1m ago');
+    expect(fmtAgo(now - 3 * 3600_000, now)).toBe('3h ago');
   });
 });
 

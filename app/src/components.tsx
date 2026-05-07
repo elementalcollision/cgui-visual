@@ -249,7 +249,24 @@ export function TopBar({ tab, t, search, setSearch, onPull, onCollapse, runtime,
 }
 
 // ─── status bar ───────────────────────────────────────────────────────
-export function StatusBar({ t, runtime, tab }: { t: ThemeTokens; runtime: Runtime; tab: Tab }) {
+// Pretty-print elapsed seconds since the last container poll. Buckets to
+// "just now" inside a tick window so the label doesn't churn 1↔2 every
+// frame. Returns "—" when we haven't received a tick yet.
+export function fmtAgo(lastMs: number, nowMs: number = Date.now()): string {
+  if (!lastMs) return '—';
+  const s = Math.max(0, Math.floor((nowMs - lastMs) / 1000));
+  if (s < 2) return 'just now';
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  return `${h}h ago`;
+}
+
+export function StatusBar({ t, runtime, tab, lastTickAt }: {
+  t: ThemeTokens; runtime: Runtime; tab: Tab;
+  lastTickAt?: number;
+}) {
   return (
     <div style={{
       height: 26, borderTop: `1px solid ${t.border}`, background: t.surfaceAlt,
@@ -261,6 +278,14 @@ export function StatusBar({ t, runtime, tab }: { t: ThemeTokens; runtime: Runtim
       <span>runtime <span style={{ color: t.fg2 }}>{runtime}</span></span>
       <span style={{ color: t.fg3 }}>·</span>
       <span>tab <span style={{ color: t.fg2 }}>{tab}</span></span>
+      {lastTickAt !== undefined && (
+        <>
+          <span style={{ color: t.fg3 }}>·</span>
+          <span title="time since last container poll">
+            updated <span style={{ color: t.fg2 }}>{fmtAgo(lastTickAt)}</span>
+          </span>
+        </>
+      )}
       <div style={{ flex: 1 }} />
       <span style={{ color: t.fg3 }}>↑/↓ navigate</span>
       <span style={{ color: t.fg3 }}>↵ inspect</span>
