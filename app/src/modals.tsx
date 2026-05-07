@@ -1,8 +1,8 @@
 // Modals: Detail / Pull / Trivy / Update / Doctor / Settings.
 
-import { useEffect, useState, type ReactNode } from 'react';
+import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { ThemeTokens } from './theme';
-import type { Container, Severity, TrivyResult, Update, DoctorCheck, Runtime } from './types';
+import type { Container, Severity, TrivyFinding, TrivyResult, Update, DoctorCheck, Runtime } from './types';
 import { Icon, Bar, iconBtn, pillBtn } from './components';
 import { api } from './api';
 import { withToast } from './toast';
@@ -15,13 +15,282 @@ function Backdrop({ onClose, children }: { onClose: () => void; children: ReactN
   );
 }
 
+// Tabs available in the inspect drawer. Each maps to a different
+// projection of the inspect JSON; "raw" always falls back to the verbatim
+// blob so users can still grep odd fields the parser hasn't extracted.
+type InspectTab = 'env' | 'mounts' | 'network' | 'ports' | 'health' | 'raw';
+
+interface ParsedInspect {
+  env: { key: string; value: string }[];
+  mounts: { source: string; destination: string; type: string; readOnly?: boolean }[];
+  network: { name: string; ip: string; mac?: string }[];
+  ports: { container: string; host: string }[];
+  health?: { status: string; failingStreak?: number; log: { exitCode: number; output: string }[] };
+}
+
+// Permissive inspect-JSON parser. Apple's `container inspect` output isn't
+// 100% docker-compatible, so we look at both Docker's PascalCase keys and
+// Apple's camelCase variants. Missing fields are silently skipped — the
+// Raw tab is the safety net.
+export function parseInspect(text: string): ParsedInspect | null {
+  let root: any;
+  try {
+    const v = JSON.parse(text);
+    // `container inspect` returns an array; `docker inspect` returns either.
+    root = Array.isArray(v) ? v[0] : v;
+  } catch {
+    return null;
+  }
+  if (!root || typeof root !== 'object') return null;
+
+  const config = root.Config ?? root.config ?? {};
+  const ns = root.NetworkSettings ?? root.networkSettings ?? {};
+  const hostConfig = root.HostConfig ?? root.hostConfig ?? {};
+  const stateBlock = root.State ?? root.state ?? {};
+
+  // ── Env: ["KEY=value", ...] split once on first '='. Keys without '='
+  //         become bare keys with empty value rather than getting dropped.
+  const envList: string[] = config.Env ?? config.env ?? [];
+  const env = envList.map((line: string) => {
+    const i = line.indexOf('=');
+    return i === -1 ? { key: line, value: '' } : { key: line.slice(0, i), value: line.slice(i + 1) };
+  });
+
+  // ── Mounts: docker shape is {Source,Destination,Type,RW}; apple variant
+  //         exposes camelCase. Read-only is RW=false (docker) or
+  //         readOnly=true (apple).
+  const rawMounts: any[] = root.Mounts ?? root.mounts ?? [];
+  const mounts = rawMounts.map((m: any) => ({
+    source: m.Source ?? m.source ?? '',
+    destination: m.Destination ?? m.destination ?? '',
+    type: m.Type ?? m.type ?? '',
+    readOnly: typeof m.RW === 'boolean' ? !m.RW : (m.readOnly === true ? true : undefined),
+  }));
+
+  // ── Network: docker NetworkSettings.Networks is { netName: { IPAddress } };
+  //         older payloads have just IPAddress at top level.
+  const networks: { name: string; ip: string; mac?: string }[] = [];
+  const dockerNets = ns.Networks ?? ns.networks;
+  if (dockerNets && typeof dockerNets === 'object') {
+    for (const [name, info] of Object.entries(dockerNets as Record<string, any>)) {
+      networks.push({
+        name,
+        ip: info?.IPAddress ?? info?.ipAddress ?? '',
+        mac: info?.MacAddress ?? info?.macAddress,
+      });
+    }
+  } else if (ns.IPAddress || ns.ipAddress) {
+    networks.push({
+      name: 'default',
+      ip: ns.IPAddress ?? ns.ipAddress ?? '',
+      mac: ns.MacAddress ?? ns.macAddress,
+    });
+  }
+
+  // ── Ports: docker shape is { "8080/tcp": [{ HostPort: "8080" }, …] }.
+  //         A port with a null mapping is "exposed but not published".
+  const ports: { container: string; host: string }[] = [];
+  const portMap = ns.Ports ?? ns.ports ?? config.ExposedPorts ?? config.exposedPorts ?? {};
+  for (const [containerPort, bindings] of Object.entries(portMap as Record<string, any>)) {
+    if (Array.isArray(bindings) && bindings.length > 0) {
+      for (const b of bindings) {
+        const hp = b?.HostPort ?? b?.hostPort ?? '';
+        const hi = b?.HostIp ?? b?.hostIp ?? '';
+        ports.push({ container: containerPort, host: hi ? `${hi}:${hp}` : hp });
+      }
+    } else {
+      ports.push({ container: containerPort, host: '— (exposed)' });
+    }
+  }
+
+  // ── Health: only present when the image declared a HEALTHCHECK. The
+  //         log entries are kept short (last 3) since the modal is small.
+  const healthBlock = stateBlock.Health ?? stateBlock.health;
+  let health: ParsedInspect['health'];
+  if (healthBlock && typeof healthBlock === 'object') {
+    const log = (healthBlock.Log ?? healthBlock.log ?? []).slice(-3).map((entry: any) => ({
+      exitCode: entry?.ExitCode ?? entry?.exitCode ?? 0,
+      output: entry?.Output ?? entry?.output ?? '',
+    }));
+    health = {
+      status: healthBlock.Status ?? healthBlock.status ?? 'unknown',
+      failingStreak: healthBlock.FailingStreak ?? healthBlock.failingStreak,
+      log,
+    };
+  }
+
+  // Suppress unused-warning when restart policy parsing is added later;
+  // we keep the read here so the dependency is documented.
+  void hostConfig;
+
+  return { env, mounts, network: networks, ports, health };
+}
+
+// Compact tab-strip for the inspect modal. Disabled tabs (no data for
+// that projection) render dim and stay un-clickable.
+function InspectTabs({ t, tab, setTab, parsed }: {
+  t: ThemeTokens; tab: InspectTab; setTab: (v: InspectTab) => void; parsed: ParsedInspect | null;
+}) {
+  const tabs: { id: InspectTab; label: string; count: number; available: boolean }[] = [
+    { id: 'env',     label: 'Env',     count: parsed?.env.length ?? 0,     available: !!parsed?.env.length },
+    { id: 'mounts',  label: 'Mounts',  count: parsed?.mounts.length ?? 0,  available: !!parsed?.mounts.length },
+    { id: 'network', label: 'Network', count: parsed?.network.length ?? 0, available: !!parsed?.network.length },
+    { id: 'ports',   label: 'Ports',   count: parsed?.ports.length ?? 0,   available: !!parsed?.ports.length },
+    { id: 'health',  label: 'Health',  count: parsed?.health ? 1 : 0,      available: !!parsed?.health },
+    { id: 'raw',     label: 'Raw',     count: 0,                            available: true },
+  ];
+  return (
+    <div style={{ display: 'flex', gap: 4, padding: '8px 16px 0', borderBottom: `1px solid ${t.border}` }}>
+      {tabs.map(item => {
+        const active = tab === item.id;
+        const dim = !item.available && item.id !== 'raw';
+        return (
+          <button
+            key={item.id}
+            disabled={dim}
+            onClick={() => setTab(item.id)}
+            style={{
+              padding: '8px 12px',
+              fontSize: 12, fontWeight: 500, fontFamily: t.mono,
+              color: active ? t.fg1 : (dim ? t.fg3 : t.fg2),
+              background: 'transparent',
+              border: 'none',
+              borderBottom: `2px solid ${active ? t.accent : 'transparent'}`,
+              cursor: dim ? 'default' : 'pointer',
+              opacity: dim ? 0.5 : 1,
+              marginBottom: -1,
+            }}
+          >
+            {item.label}{item.count > 0 && <span style={{ marginLeft: 6, color: t.fg3, fontSize: 10 }}>{item.count}</span>}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function InspectPanel({ t, tab, parsed, json }: {
+  t: ThemeTokens; tab: InspectTab; parsed: ParsedInspect | null; json: string;
+}) {
+  if (tab === 'raw' || !parsed) {
+    return (
+      <pre style={{ margin: 0, fontFamily: t.mono, fontSize: 11, lineHeight: 1.6, color: t.fg2, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{json}</pre>
+    );
+  }
+  if (tab === 'env') {
+    return (
+      <KvList
+        t={t}
+        empty="No environment variables."
+        rows={parsed.env.map(e => ({ k: e.key, v: e.value }))}
+      />
+    );
+  }
+  if (tab === 'mounts') {
+    if (!parsed.mounts.length) return <Muted t={t}>No mounts.</Muted>;
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {parsed.mounts.map((m, i) => (
+          <div key={i} style={{
+            padding: '8px 12px', background: t.surfaceAlt, border: `1px solid ${t.border}`, borderRadius: 6,
+            display: 'grid', gridTemplateColumns: '1fr auto', gap: 8, alignItems: 'baseline',
+          }}>
+            <div style={{ fontFamily: t.mono, fontSize: 12, color: t.fg2, wordBreak: 'break-all' }}>
+              <span style={{ color: t.fg1 }}>{m.source}</span>
+              <span style={{ color: t.fg3, margin: '0 8px' }}>→</span>
+              <span style={{ color: t.fg1 }}>{m.destination}</span>
+            </div>
+            <span style={{ fontFamily: t.mono, fontSize: 10, color: t.fg3, padding: '2px 8px', background: t.bg, borderRadius: 4 }}>
+              {m.type}{m.readOnly ? ' · ro' : ''}
+            </span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  if (tab === 'network') {
+    if (!parsed.network.length) return <Muted t={t}>No network attachments.</Muted>;
+    return (
+      <KvList
+        t={t}
+        empty="No networks."
+        rows={parsed.network.flatMap(n => {
+          const out: { k: string; v: string }[] = [{ k: n.name, v: n.ip || '—' }];
+          if (n.mac) out.push({ k: `${n.name} (mac)`, v: n.mac });
+          return out;
+        })}
+      />
+    );
+  }
+  if (tab === 'ports') {
+    if (!parsed.ports.length) return <Muted t={t}>No ports exposed.</Muted>;
+    return (
+      <KvList
+        t={t}
+        empty="No ports."
+        rows={parsed.ports.map(p => ({ k: p.container, v: p.host }))}
+      />
+    );
+  }
+  if (tab === 'health') {
+    const h = parsed.health;
+    if (!h) return <Muted t={t}>No HEALTHCHECK configured.</Muted>;
+    const statusColor = h.status === 'healthy' ? t.success : h.status === 'unhealthy' ? t.danger : t.warning;
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ fontFamily: t.mono, fontSize: 12, color: t.fg2 }}>
+          status <span style={{ color: statusColor, fontWeight: 600 }}>{h.status}</span>
+          {typeof h.failingStreak === 'number' && (
+            <span style={{ color: t.fg3, marginLeft: 12 }}>failing streak: {h.failingStreak}</span>
+          )}
+        </div>
+        {h.log.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {h.log.map((entry, i) => (
+              <div key={i} style={{
+                padding: '8px 10px', background: t.bg, border: `1px solid ${t.border}`, borderRadius: 6,
+                fontFamily: t.mono, fontSize: 11, color: entry.exitCode === 0 ? t.fg2 : t.danger, whiteSpace: 'pre-wrap',
+              }}>
+                <span style={{ color: t.fg3 }}>exit {entry.exitCode}</span>{entry.output ? ` · ${entry.output}` : ''}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+  return null;
+}
+
+function KvList({ t, rows, empty }: { t: ThemeTokens; rows: { k: string; v: string }[]; empty: string }) {
+  if (!rows.length) return <Muted t={t}>{empty}</Muted>;
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '6px 14px', fontFamily: t.mono, fontSize: 12, alignItems: 'baseline' }}>
+      {rows.map((r, i) => (
+        <Fragment key={i}>
+          <div style={{ color: t.fg3, whiteSpace: 'nowrap' }}>{r.k}</div>
+          <div style={{ color: t.fg1, wordBreak: 'break-all' }}>{r.v || <span style={{ color: t.fg3 }}>—</span>}</div>
+        </Fragment>
+      ))}
+    </div>
+  );
+}
+
+function Muted({ t, children }: { t: ThemeTokens; children: ReactNode }) {
+  return <div style={{ fontSize: 12, color: t.fg3, fontStyle: 'italic' }}>{children}</div>;
+}
+
 export function DetailModal({ item, t, onClose }: { item: Container; t: ThemeTokens; onClose: () => void }) {
   const [json, setJson] = useState<string>('Loading…');
+  const [tab, setTab] = useState<InspectTab>('env');
   useEffect(() => { api.inspectContainer(item.id).then(setJson); }, [item.id]);
   const c = item;
+  // Parse once per JSON change. Errors are tolerated — the Raw tab still
+  // shows whatever came back, even when it isn't valid JSON.
+  const parsed = useMemo(() => parseInspect(json), [json]);
   return (
     <Backdrop onClose={onClose}>
-      <div style={{ width: 720, maxHeight: '85vh', background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 80px rgba(0,0,0,0.4)' }}>
+      <div style={{ width: 760, maxHeight: '85vh', background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 80px rgba(0,0,0,0.4)' }}>
         <div style={{ padding: '18px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'flex-start', gap: 12 }}>
           <Icon name="box" size={20} color={t.accent} />
           <div style={{ flex: 1 }}>
@@ -47,9 +316,9 @@ export function DetailModal({ item, t, onClose }: { item: Container; t: ThemeTok
           <div style={{ fontSize: 10, color: t.fg3, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6 }}>Command</div>
           <div style={{ fontFamily: t.mono, fontSize: 12, color: t.fg2, padding: '8px 10px', background: t.bg, border: `1px solid ${t.border}`, borderRadius: 6 }}>{c.cmd?.length ? c.cmd.join(' ') : '—'}</div>
         </div>
+        <InspectTabs t={t} tab={tab} setTab={setTab} parsed={parsed} />
         <div style={{ flex: 1, overflow: 'auto', padding: '14px 22px', minHeight: 200 }}>
-          <div style={{ fontSize: 10, color: t.fg3, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 8 }}>Inspect</div>
-          <pre style={{ margin: 0, fontFamily: t.mono, fontSize: 11, lineHeight: 1.6, color: t.fg2, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{json}</pre>
+          <InspectPanel t={t} tab={tab} parsed={parsed} json={json} />
         </div>
         <div style={{ padding: '12px 22px', borderTop: `1px solid ${t.border}`, display: 'flex', gap: 8, justifyContent: 'flex-end', background: t.surfaceAlt }}>
           <button style={pillBtn(t)} onClick={() => withToast(`restart ${c.name}`, api.restartContainer(c.id)).catch(() => {})}>Restart</button>
@@ -127,10 +396,18 @@ export function PullModal({ t, reference = 'mlcommons/inference:llama2-70b', onC
   );
 }
 
+// Synthesise a vendor-neutral lookup URL when trivy doesn't report any
+// References. NVD has the broadest CVE coverage and supports a stable
+// path scheme by id, so it makes a sane default link target.
+function nvdUrl(cve: string): string {
+  return `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(cve)}`;
+}
+
 export function TrivyModal({ t, image, onClose }: { t: ThemeTokens; image?: string; onClose: () => void }) {
   const [data, setData] = useState<TrivyResult | null>(null);
   const [filter, setFilter] = useState<Severity | null>(null);
   const [search, setSearch] = useState('');
+  const [selected, setSelected] = useState<TrivyFinding | null>(null);
   useEffect(() => { api.scanImage(image || '').then(setData); }, [image]);
   if (!data) return null;
   const sevColor: Record<Severity, string> = { CRITICAL: t.danger, HIGH: '#E5704A', MEDIUM: t.warning, LOW: t.fg3 };
@@ -140,7 +417,7 @@ export function TrivyModal({ t, image, onClose }: { t: ThemeTokens; image?: stri
   );
   return (
     <Backdrop onClose={onClose}>
-      <div style={{ width: 800, maxHeight: '85vh', background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+      <div style={{ width: 1000, maxHeight: '85vh', background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         <div style={{ padding: '16px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 12 }}>
           <Icon name="shield" size={18} color={t.warning} />
           <div style={{ flex: 1 }}>
@@ -160,21 +437,101 @@ export function TrivyModal({ t, image, onClose }: { t: ThemeTokens; image?: stri
           <input placeholder="Search CVE / package…" value={search} onChange={e => setSearch(e.target.value)}
             style={{ padding: '6px 10px', background: t.surfaceAlt, border: `1px solid ${t.border}`, borderRadius: 6, color: t.fg1, fontSize: 12, fontFamily: t.mono, width: 200, outline: 'none' }} />
         </div>
-        <div style={{ flex: 1, overflow: 'auto' }}>
-          {findings.map((f, i) => (
-            <div key={i} style={{ padding: '12px 22px', borderBottom: `1px solid ${t.border}`, display: 'grid', gridTemplateColumns: '80px 140px 1fr 110px', gap: 12, alignItems: 'center' }}>
-              <span style={{ padding: '2px 8px', borderRadius: 999, background: sevColor[f.sev], color: '#fff', fontSize: 10, fontWeight: 700, fontFamily: t.mono, textAlign: 'center', letterSpacing: '0.04em' }}>{f.sev}</span>
-              <span style={{ fontFamily: t.mono, fontSize: 12, color: t.fg1 }}>{f.cve}</span>
-              <div>
-                <div style={{ fontSize: 13, color: t.fg1 }}>{f.title}</div>
-                <div style={{ fontSize: 11, color: t.fg3, fontFamily: t.mono, marginTop: 2 }}>{f.pkg} · {f.installed} → {f.fixed}</div>
-              </div>
-              <button style={pillBtn(t)}>Upgrade</button>
-            </div>
-          ))}
+        {/* Findings table + slide-in drawer. The drawer is a simple flex
+            sibling rather than a separate overlay so it cooperates with the
+            modal's max-height + scrollbars. */}
+        <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+          <div style={{ flex: 1, overflow: 'auto', borderRight: selected ? `1px solid ${t.border}` : 'none' }}>
+            {findings.map((f, i) => {
+              const active = selected?.cve === f.cve && selected?.pkg === f.pkg;
+              return (
+                <button
+                  key={`${f.cve}-${f.pkg}-${i}`}
+                  onClick={() => setSelected(active ? null : f)}
+                  style={{
+                    width: '100%', textAlign: 'left',
+                    padding: '12px 22px', borderBottom: `1px solid ${t.border}`,
+                    background: active ? t.selected : 'transparent',
+                    border: 'none', borderLeft: `3px solid ${active ? sevColor[f.sev] : 'transparent'}`,
+                    display: 'grid', gridTemplateColumns: '80px 140px 1fr 60px', gap: 12, alignItems: 'center',
+                    cursor: 'pointer', color: 'inherit',
+                  }}
+                >
+                  <span style={{ padding: '2px 8px', borderRadius: 999, background: sevColor[f.sev], color: '#fff', fontSize: 10, fontWeight: 700, fontFamily: t.mono, textAlign: 'center', letterSpacing: '0.04em' }}>{f.sev}</span>
+                  <span style={{ fontFamily: t.mono, fontSize: 12, color: t.fg1 }}>{f.cve}</span>
+                  <div>
+                    <div style={{ fontSize: 13, color: t.fg1 }}>{f.title || '(no title)'}</div>
+                    <div style={{ fontSize: 11, color: t.fg3, fontFamily: t.mono, marginTop: 2 }}>{f.pkg} · {f.installed} → {f.fixed || '—'}</div>
+                  </div>
+                  <span style={{ fontFamily: t.mono, fontSize: 12, color: t.fg2, fontVariantNumeric: 'tabular-nums', textAlign: 'right' }}>
+                    {typeof f.cvss === 'number' ? f.cvss.toFixed(1) : '—'}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          {selected && (
+            <CveDrawer t={t} f={selected} sevColor={sevColor[selected.sev]} onClose={() => setSelected(null)} />
+          )}
         </div>
       </div>
     </Backdrop>
+  );
+}
+
+function CveDrawer({ t, f, sevColor, onClose }: {
+  t: ThemeTokens; f: TrivyFinding; sevColor: string; onClose: () => void;
+}) {
+  const refs = (f.refs && f.refs.length > 0) ? f.refs : [nvdUrl(f.cve)];
+  return (
+    <div style={{
+      width: 380, flex: '0 0 380px', overflow: 'auto',
+      background: t.surface, padding: '16px 18px',
+      display: 'flex', flexDirection: 'column', gap: 14,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+        <span style={{ padding: '3px 10px', borderRadius: 999, background: sevColor, color: '#fff', fontSize: 10, fontWeight: 700, fontFamily: t.mono, letterSpacing: '0.04em' }}>{f.sev}</span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontFamily: t.mono, fontSize: 13, fontWeight: 600, color: t.fg1, wordBreak: 'break-all' }}>{f.cve}</div>
+          {typeof f.cvss === 'number' && (
+            <div style={{ fontSize: 11, color: t.fg3, fontFamily: t.mono, marginTop: 2 }}>CVSS v3 · <span style={{ color: t.fg2 }}>{f.cvss.toFixed(1)}</span></div>
+          )}
+        </div>
+        <button onClick={onClose} style={iconBtn()}><Icon name="x" size={14} color={t.fg2} /></button>
+      </div>
+      {f.title && (
+        <div style={{ fontSize: 13, color: t.fg1, lineHeight: 1.5 }}>{f.title}</div>
+      )}
+      <div style={{
+        fontSize: 11, color: t.fg3, fontFamily: t.mono,
+        background: t.surfaceAlt, border: `1px solid ${t.border}`, borderRadius: 6,
+        padding: '8px 10px',
+      }}>
+        <div><span style={{ color: t.fg2 }}>package</span> {f.pkg}</div>
+        <div><span style={{ color: t.fg2 }}>installed</span> {f.installed}</div>
+        <div><span style={{ color: t.fg2 }}>fixed in</span> {f.fixed || '— (no fix yet)'}</div>
+      </div>
+      {f.description && (
+        <div>
+          <div style={{ fontSize: 10, color: t.fg3, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6 }}>Description</div>
+          <div style={{ fontSize: 12, color: t.fg2, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{f.description}</div>
+        </div>
+      )}
+      <div>
+        <div style={{ fontSize: 10, color: t.fg3, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6 }}>References</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {refs.map((u, i) => (
+            <a
+              key={i}
+              href={u}
+              target="_blank"
+              rel="noreferrer noopener"
+              style={{ fontFamily: t.mono, fontSize: 11, color: t.accent, wordBreak: 'break-all', textDecoration: 'none' }}
+            >{u}</a>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 

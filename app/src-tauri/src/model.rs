@@ -111,8 +111,8 @@ pub struct Stack {
     pub file: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct TrivyFinding {
     pub sev: String,
     pub cve: String,
@@ -120,6 +120,15 @@ pub struct TrivyFinding {
     pub installed: String,
     pub fixed: String,
     pub title: String,
+    /// CVSS v3 base score (0.0–10.0) when trivy reports one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cvss: Option<f64>,
+    /// Free-form description from trivy. Surfaced only by the detail drawer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Reference URLs (advisories, vendor pages, NVD) for the drawer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

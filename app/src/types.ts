@@ -84,6 +84,11 @@ export interface TrivyFinding {
   installed: string;
   fixed: string;
   title: string;
+  // Optional fields populated by the real trivy parser; absent on legacy
+  // fixtures and on findings where trivy didn't report the data.
+  cvss?: number;
+  description?: string;
+  refs?: string[];
 }
 
 export interface TrivyResult {
