@@ -128,6 +128,28 @@ pub async fn runtime_available() -> bool {
     runtime::available().await
 }
 
+// Per-binary availability probe (B8). Settings calls this once per
+// runtime option to render an availability badge so users can see at a
+// glance which runtimes are installed before flipping the active one.
+#[tauri::command]
+pub async fn probe_runtime(name: String) -> bool {
+    // Only allow probing the runtimes the UI actually offers, to avoid
+    // turning this into a generic "is this binary on PATH" oracle.
+    if !matches!(name.as_str(), "container" | "docker" | "podman") {
+        return false;
+    }
+    runtime::probe_bin(&name).await
+}
+
+// Render a stack as a docker-compose.yml string. Round-trips with
+// import_compose: convert(parse(export(s))) ≈ s for any importable
+// stack. The frontend writes the returned string to a file via the
+// browser's download flow, so we don't touch the filesystem here.
+#[tauri::command]
+pub fn export_compose(name: String) -> Result<String, String> {
+    crate::compose::export_named(&name).map_err(err_str)
+}
+
 // Convert a docker-compose.yml at `path` into a cgui stack TOML and write
 // it to ~/.config/cgui/stacks/<name>.toml. Returns the destination path
 // so the frontend can show it in a toast.

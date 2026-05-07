@@ -327,7 +327,9 @@ pub fn run() {
             commands::stack_down,
             commands::stack_health,
             commands::runtime_available,
+            commands::probe_runtime,
             commands::import_compose,
+            commands::export_compose,
             hotkey_cmd::set_global_hotkey,
         ])
         .run(tauri::generate_context!())

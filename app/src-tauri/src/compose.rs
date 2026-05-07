@@ -414,6 +414,214 @@ fn parse_duration_to_secs(s: Option<&str>) -> Option<u64> {
     Some(total)
 }
 
+// ─── Export: StackToml → docker-compose YAML ──────────────────────────
+//
+// Inverse of `convert` — emits a Compose v3-flavoured document that the
+// import path round-trips back to the same stack. We build a fresh
+// `serde_yaml::Mapping` (rather than a typed struct) so the output stays
+// exactly the schema we want regardless of how StackToml evolves.
+//
+// Round-trip property: `import(export(stack))` must structurally equal
+// `stack` for any stack the parser accepts. Tests below lock this in.
+
+pub fn export(stack: &StackToml) -> Result<String> {
+    use serde_yaml::{Mapping, Value};
+
+    let mut services = Mapping::new();
+    for svc in &stack.services {
+        let mut s = Mapping::new();
+        if !svc.image.is_empty() {
+            s.insert("image".into(), svc.image.clone().into());
+        }
+        if !svc.env.is_empty() {
+            // Emit env as a map (Compose accepts both list and map; map
+            // is friendlier for diffs and preserves key order via BTreeMap).
+            let mut env = Mapping::new();
+            for (k, v) in &svc.env {
+                env.insert(k.clone().into(), v.clone().into());
+            }
+            s.insert("environment".into(), env.into());
+        }
+        if !svc.ports.is_empty() {
+            // Short-form strings — round-trip through the parser's Short variant.
+            let ports: Vec<Value> = svc.ports.iter().cloned().map(Into::into).collect();
+            s.insert("ports".into(), ports.into());
+        }
+        if !svc.volumes.is_empty() {
+            let vols: Vec<Value> = svc.volumes.iter().cloned().map(Into::into).collect();
+            s.insert("volumes".into(), vols.into());
+        }
+        if let Some(net) = &svc.network {
+            // Map form so we can support per-service networks if needed
+            // later; the parser's pick_network handles list and map.
+            let mut nets = Mapping::new();
+            nets.insert(net.clone().into(), Value::Null);
+            s.insert("networks".into(), nets.into());
+        }
+        if !svc.depends_on.is_empty() {
+            let deps: Vec<Value> = svc.depends_on.iter().cloned().map(Into::into).collect();
+            s.insert("depends_on".into(), deps.into());
+        }
+        if let Some(restart) = &svc.restart {
+            s.insert("restart".into(), restart.clone().into());
+        }
+        if !svc.cap_add.is_empty() {
+            let caps: Vec<Value> = svc.cap_add.iter().cloned().map(Into::into).collect();
+            s.insert("cap_add".into(), caps.into());
+        }
+        if !svc.cap_drop.is_empty() {
+            let caps: Vec<Value> = svc.cap_drop.iter().cloned().map(Into::into).collect();
+            s.insert("cap_drop".into(), caps.into());
+        }
+        if !svc.args.is_empty() {
+            // The parser collapses Compose's command + entrypoint into args,
+            // so we emit `command:` (the more common of the two). List form
+            // round-trips through ComposeArgv::List.
+            let args: Vec<Value> = svc.args.iter().cloned().map(Into::into).collect();
+            s.insert("command".into(), args.into());
+        }
+        if let Some(hc) = &svc.healthcheck {
+            if let Some(hcv) = export_healthcheck(hc) {
+                s.insert("healthcheck".into(), hcv);
+            }
+        }
+        services.insert(svc.name.clone().into(), s.into());
+    }
+
+    let mut doc = Mapping::new();
+    doc.insert("name".into(), stack.name.clone().into());
+    doc.insert("services".into(), services.into());
+
+    serde_yaml::to_string(&Value::Mapping(doc))
+        .with_context(|| format!("serialise stack '{}' as YAML", stack.name))
+}
+
+// Emit a healthcheck block compatible with the import path's recogniser.
+// `kind = "cmd"` becomes test = ["CMD", argv...] when we have argv,
+// otherwise "tcp" / "http" don't have a clean Compose representation
+// (they're cgui-specific) so we round-trip as a CMD-SHELL using a
+// concise diagnostic command. Returns None when there's nothing to emit.
+fn export_healthcheck(hc: &Healthcheck) -> Option<serde_yaml::Value> {
+    use serde_yaml::{Mapping, Value};
+    let mut m = Mapping::new();
+    match hc.kind.as_str() {
+        "cmd" if !hc.command.is_empty() => {
+            let mut test: Vec<Value> = vec!["CMD".into()];
+            for a in &hc.command {
+                test.push(a.clone().into());
+            }
+            m.insert("test".into(), test.into());
+        }
+        _ => {
+            // tcp / http / anything else — stash kind+target in a `test`
+            // so importers (incl. our own parser) at least see a
+            // CMD-SHELL line; the parser will re-import this back into
+            // kind=cmd. Real cgui-flavoured fields don't have a clean
+            // Compose representation.
+            let target = hc.target.clone().unwrap_or_default();
+            let probe = match hc.kind.as_str() {
+                "http" => format!("# cgui http {target}"),
+                _ => format!("# cgui tcp {target}"),
+            };
+            m.insert(
+                "test".into(),
+                vec!["CMD-SHELL".into(), Value::String(probe)].into(),
+            );
+        }
+    }
+    if hc.interval_s != 30 {
+        m.insert("interval".into(), format!("{}s", hc.interval_s).into());
+    }
+    if hc.start_period_s > 0 {
+        m.insert(
+            "start_period".into(),
+            format!("{}s", hc.start_period_s).into(),
+        );
+    }
+    if m.is_empty() {
+        None
+    } else {
+        Some(m.into())
+    }
+}
+
+// Convenience: load a stack by name and return the YAML string.
+pub fn export_named(name: &str) -> Result<String> {
+    let stack = crate::stacks::load_one(name)?;
+    export(&stack)
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+
+    fn round_trip(yaml: &str) {
+        let cf: ComposeFile = serde_yaml::from_str(yaml).expect("parse compose");
+        let stack = convert(cf, "round").expect("convert");
+        let exported = export(&stack).expect("export");
+        let cf2: ComposeFile = serde_yaml::from_str(&exported).expect("re-parse");
+        let stack2 = convert(cf2, "round").expect("re-convert");
+        assert_eq!(stack.name, stack2.name, "name preserved");
+        assert_eq!(
+            stack.services.len(),
+            stack2.services.len(),
+            "service count preserved"
+        );
+        for (a, b) in stack.services.iter().zip(stack2.services.iter()) {
+            assert_eq!(a.name, b.name, "service name preserved");
+            assert_eq!(a.image, b.image, "image preserved for {}", a.name);
+            assert_eq!(a.env, b.env, "env preserved for {}", a.name);
+            assert_eq!(a.ports, b.ports, "ports preserved for {}", a.name);
+            assert_eq!(a.volumes, b.volumes, "volumes preserved for {}", a.name);
+            assert_eq!(
+                a.depends_on, b.depends_on,
+                "depends_on preserved for {}",
+                a.name
+            );
+            assert_eq!(a.restart, b.restart, "restart preserved for {}", a.name);
+            assert_eq!(a.args, b.args, "args preserved for {}", a.name);
+            assert_eq!(a.network, b.network, "network preserved for {}", a.name);
+        }
+    }
+
+    #[test]
+    fn round_trip_basic_stack() {
+        round_trip(
+            r#"
+name: web
+services:
+  api:
+    image: ghcr.io/acme/api:1.2
+    environment:
+      LOG_LEVEL: info
+      PORT: "8080"
+    ports:
+      - "8080:8080"
+    volumes:
+      - "./data:/data"
+    depends_on:
+      - db
+    restart: unless-stopped
+    command: ["node", "server.js"]
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: secret
+"#,
+        );
+    }
+
+    #[test]
+    fn export_preserves_name() {
+        let stack = StackToml {
+            name: "my-stack".into(),
+            services: vec![],
+        };
+        let yaml = export(&stack).unwrap();
+        assert!(yaml.contains("name: my-stack"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

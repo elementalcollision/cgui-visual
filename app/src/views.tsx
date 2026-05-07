@@ -505,6 +505,28 @@ export function StacksView({ t, search }: { t: ThemeTokens; search: string }) {
     return t.fg3;
   };
 
+  // Render a stack as docker-compose.yml and trigger a download. Uses
+  // the same blob-URL pattern as the logs export — works in both Tauri
+  // and browser-dev mode.
+  const exportStack = async (name: string) => {
+    try {
+      const yaml = await api.exportCompose(name);
+      const blob = new Blob([yaml], { type: 'text/yaml;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const safe = name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${safe}.compose.yml`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      withToast(`Exported ${name}`, Promise.resolve()).catch(() => {});
+    } catch (err: any) {
+      withToast(`export ${name}`, Promise.reject(err)).catch(() => {});
+    }
+  };
+
   // Open the native file picker, run the import, surface the result.
   // Confirms before overwriting an existing stack of the same name.
   const importCompose = async () => {
@@ -599,6 +621,11 @@ export function StacksView({ t, search }: { t: ThemeTokens; search: string }) {
                             runAction(s.name, 'down');
                           }}>
                     <Icon name="stop" size={12} color={t.fg2} />Down
+                  </button>
+                  <button style={pillBtn(t)}
+                          onClick={() => exportStack(s.name)}
+                          title="Export this stack as docker-compose.yml">
+                    <Icon name="download" size={12} color={t.fg2} />Export
                   </button>
                 </div>
               </div>
