@@ -52,10 +52,16 @@ export default function App() {
   // isn't installed and the user hasn't dismissed the modal this session,
   // open it. The 5s re-poll auto-closes the modal once they install +
   // we detect the CLI on a subsequent check, sparing them a relaunch.
+  // Dev-only override: append `?onboarding=1` to force the modal even
+  // when the CLI is detected, so the visual can be QA'd without
+  // uninstalling `container`.
   useEffect(() => {
     let cancelled = false;
+    const forceOnboarding =
+      typeof location !== 'undefined' &&
+      new URLSearchParams(location.search).get('onboarding') === '1';
     const check = async () => {
-      const ok = await api.runtimeAvailable();
+      const ok = forceOnboarding ? false : await api.runtimeAvailable();
       if (cancelled) return;
       if (ok) {
         setModal(m => (m?.type === 'onboarding' ? null : m));
