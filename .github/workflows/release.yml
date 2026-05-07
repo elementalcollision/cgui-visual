@@ -21,6 +21,10 @@ on:
 
 permissions:
   contents: write
+  # Needed by `publish-release` to fire `workflow_dispatch` on the
+  # updater-manifest workflow. Without this, the dispatch step gets
+  # HTTP 403 "Resource not accessible by integration".
+  actions: write
 
 jobs:
   draft-release:
