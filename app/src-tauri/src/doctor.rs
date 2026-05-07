@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use tokio::process::Command;
 
-use crate::model::DoctorCheck;
+use crate::model::{DoctorCheck, DoctorFix};
 
 const RUNTIME_BIN: &str = "container";
 
@@ -21,7 +21,14 @@ pub async fn run() -> Vec<DoctorCheck> {
             let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
             out.push(ok(format!("`{RUNTIME_BIN}` resolves to {path}")));
         }
-        _ => out.push(err(format!("`{RUNTIME_BIN}` not on PATH"))),
+        _ => {
+            let mut c = err(format!("`{RUNTIME_BIN}` not on PATH"));
+            c.fix = Some(DoctorFix::Url {
+                label: "Open Apple container releases".into(),
+                url: "https://github.com/apple/container/releases".into(),
+            });
+            out.push(c);
+        }
     }
 
     // 3. Runtime --version.
@@ -44,12 +51,24 @@ pub async fn run() -> Vec<DoctorCheck> {
             if body.lines().any(|l| l.contains("running")) {
                 out.push(ok("container system status: running".into()));
             } else {
-                out.push(warn(
+                let mut c = warn(
                     "container system status not running — try `container system start`".into(),
-                ));
+                );
+                c.fix = Some(DoctorFix::Copy {
+                    label: "Copy `container system start`".into(),
+                    command: "container system start".into(),
+                });
+                out.push(c);
             }
         }
-        _ => out.push(warn("could not query `container system status`".into())),
+        _ => {
+            let mut c = warn("could not query `container system status`".into());
+            c.fix = Some(DoctorFix::Copy {
+                label: "Copy `container system start`".into(),
+                command: "container system start".into(),
+            });
+            out.push(c);
+        }
     }
 
     // 5. profiles.toml present.
@@ -86,9 +105,15 @@ pub async fn run() -> Vec<DoctorCheck> {
             let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
             out.push(ok(format!("trivy: {path} (image scan available)")));
         }
-        _ => out.push(warn(
-            "trivy not on PATH (image scan disabled — `brew install trivy`)".into(),
-        )),
+        _ => {
+            let mut c =
+                warn("trivy not on PATH (image scan disabled — `brew install trivy`)".into());
+            c.fix = Some(DoctorFix::Copy {
+                label: "Copy `brew install trivy`".into(),
+                command: "brew install trivy".into(),
+            });
+            out.push(c);
+        }
     }
 
     // 8. runtime API socket.
@@ -107,6 +132,7 @@ fn ok(text: String) -> DoctorCheck {
         ok: true,
         text,
         warn: None,
+        fix: None,
     }
 }
 fn warn(text: String) -> DoctorCheck {
@@ -114,6 +140,7 @@ fn warn(text: String) -> DoctorCheck {
         ok: false,
         text,
         warn: Some(true),
+        fix: None,
     }
 }
 fn err(text: String) -> DoctorCheck {
@@ -121,6 +148,7 @@ fn err(text: String) -> DoctorCheck {
         ok: false,
         text,
         warn: Some(false),
+        fix: None,
     }
 }
 

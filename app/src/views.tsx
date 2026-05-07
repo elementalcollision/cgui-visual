@@ -645,11 +645,24 @@ function classifyLevel(line: string): 'info' | 'warn' | 'error' {
   return 'info';
 }
 
+// Strip CSI / OSC ANSI escape sequences. Covers \x1b[…m colour codes,
+// cursor movement, and the 8-bit CSI variant some shells emit. Used
+// when the user opts into "no colour" rendering and on download.
+// Regex anchored to the patterns docker / podman / bash actually emit;
+// not a full state machine but enough for log streams.
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\))/g;
+
+export function stripAnsi(s: string): string {
+  return s.replace(ANSI_RE, '');
+}
+
 export function LogsView({ t, target }: { t: ThemeTokens; target?: string }) {
   const [lines, setLines] = useState<string[]>([]);
   const [paused, setPaused] = useState(false);
   const [level, setLevel] = useState<LogLevel>('all');
   const [search, setSearch] = useState('');
+  const [stripColors, setStripColors] = useState(false);
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
 
@@ -670,12 +683,34 @@ export function LogsView({ t, target }: { t: ThemeTokens; target?: string }) {
   const visible = useMemo(() => {
     const q = search.toLowerCase();
     return lines
-      .map((line, idx) => ({ line, idx, lvl: classifyLevel(line) }))
+      .map((line, idx) => {
+        const display = stripColors ? stripAnsi(line) : line;
+        return { line: display, idx, lvl: classifyLevel(display) };
+      })
       .filter(({ line, lvl }) =>
         (level === 'all' || lvl === level) &&
         (!q || line.toLowerCase().includes(q))
       );
-  }, [lines, level, search]);
+  }, [lines, level, search, stripColors]);
+
+  // Stamped filename so multiple downloads from the same container don't
+  // clobber each other and the file is sortable by capture time.
+  const downloadLogs = () => {
+    const text = visible.map(v => stripAnsi(v.line)).join('\n');
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const ts = new Date().toISOString().replace(/[:T]/g, '-').replace(/\..+/, '');
+    const safeTarget = (target ?? 'all').replace(/[^a-zA-Z0-9._-]/g, '_');
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `cgui-${safeTarget}-${ts}.log`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Free the blob after the click handler; setTimeout 0 keeps it alive
+    // long enough for Chromium and Safari.
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
 
   const levelPill = (key: LogLevel, label: string, color?: string) => (
     <button onClick={() => setLevel(level === key ? 'all' : key)}
@@ -701,9 +736,20 @@ export function LogsView({ t, target }: { t: ThemeTokens; target?: string }) {
         <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search…"
           style={{ padding: '5px 10px', background: t.surfaceAlt, border: `1px solid ${t.border}`, borderRadius: 6, color: t.fg1, fontSize: 12, fontFamily: t.mono, width: 200, outline: 'none' }} />
         <div style={{ flex: 1 }} />
+        <button
+          style={{
+            ...pillBtn(t),
+            background: stripColors ? t.selected : t.surfaceAlt,
+            borderColor: stripColors ? t.accent : t.border,
+            color: stripColors ? t.fg1 : t.fg2,
+          }}
+          onClick={() => setStripColors(s => !s)}
+          title="Strip ANSI escape sequences from rendered + copied + downloaded output"
+        >No colour</button>
         <button style={pillBtn(t)} onClick={() => setPaused(p => !p)}>{paused ? 'Resume' : 'Pause'}</button>
         <button style={pillBtn(t)} onClick={() => setLines([])}>Clear</button>
         <button style={pillBtn(t)} onClick={() => navigator.clipboard?.writeText(visible.map(v => v.line).join('\n'))}>Copy</button>
+        <button style={pillBtn(t)} onClick={downloadLogs} title="Download visible lines as .log">Download</button>
       </div>
       <div style={{ fontFamily: t.mono, fontSize: 12, lineHeight: 1.6, padding: 16 }}>
         {visible.map(({ line, idx, lvl }) => (
