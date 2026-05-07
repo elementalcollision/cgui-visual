@@ -14,10 +14,11 @@ import {
   JsonInspectModal,
   RunImageModal,
   OnboardingModal,
+  CommandPaletteModal,
 } from './modals';
 import { toast } from './toast';
 import type { ThemeTokens } from './theme';
-import type { Modal, Runtime } from './types';
+import type { Container, Image, Modal, Runtime, Stack, Tab } from './types';
 
 export default function ModalsHost(props: {
   modal: Modal;
@@ -37,11 +38,18 @@ export default function ModalsHost(props: {
   setNotifyOnExit: (b: boolean) => void;
   dark: boolean;
   setDark: (b: boolean) => void;
+  // Command palette inputs + dispatch
+  containers: Container[];
+  images: Image[];
+  stacks: Stack[];
+  setTab: (t: Tab) => void;
+  setModal: (m: Modal) => void;
+  setLogTarget: (id: string | undefined) => void;
 }) {
   const {
     modal, t, runtime, setRuntime, pullReference, onClose, onUpdateClosed, onOnboardingResolved,
     menubarMode, setMenubarMode, globalHotkey, setGlobalHotkey, notifyOnExit, setNotifyOnExit,
-    dark, setDark,
+    dark, setDark, containers, images, stacks, setTab, setModal, setLogTarget,
   } = props;
   if (!modal) return null;
 
@@ -79,5 +87,29 @@ export default function ModalsHost(props: {
       return <RunImageModal t={t} image={modal.image}
                             onLaunched={(id) => toast(`launched ${id}`, 'info')}
                             onClose={onClose} />;
+    case 'commandPalette':
+      return <CommandPaletteModal
+        t={t}
+        containers={containers}
+        images={images}
+        stacks={stacks}
+        onClose={onClose}
+        onTab={tab => { setTab(tab); }}
+        onAction={id => {
+          if (id === 'settings') setModal({ type: 'settings' });
+          else if (id === 'doctor') setModal({ type: 'doctor' });
+          else if (id === 'pull') setModal({ type: 'pull' });
+        }}
+        onContainer={c => setModal({ type: 'detail', payload: c })}
+        onImage={img => setModal({ type: 'imageInspect', reference: img.ref })}
+        onStack={s => {
+          // No dedicated stack inspect modal — switch to Stacks tab and
+          // route the search bar to surface the picked stack name. The
+          // search filter already plumbs through StacksView.
+          setTab('stacks');
+          setLogTarget(undefined);
+          void s;
+        }}
+      />;
   }
 }

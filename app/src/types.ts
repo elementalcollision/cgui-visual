@@ -126,4 +126,5 @@ export type Modal =
   | { type: 'imageInspect'; reference: string }
   | { type: 'runImage'; image: string }
   | { type: 'onboarding' }
+  | { type: 'commandPalette' }
   | null;

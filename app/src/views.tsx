@@ -4,7 +4,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import type { ThemeTokens } from './theme';
 import type { Container, Image, Volume, Network, Stack } from './types';
-import { Icon, Sparkline, Bar, StatusDot, iconBtn, pillBtn, tableHeader, tableRow } from './components';
+import { Icon, Sparkline, Bar, StatusDot, BulkActionBar, SelectCheckbox, iconBtn, pillBtn, tableHeader, tableRow } from './components';
 import { api } from './api';
 import { withToast } from './toast';
 
@@ -46,6 +46,58 @@ export function ContainersView({ t, search, selected, setSelected, onInspect, on
 
   const kpis = useMemo(() => buildKPIs(containers), [containers]);
 
+  // Bulk selection state (A5). Stored as a Set of ids; pruned to live ids
+  // on every container poll so a stopped+removed container can't be
+  // targeted by an action it can no longer satisfy.
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const live = new Set(containers.map(c => c.id));
+    setPicked(prev => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (live.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [containers]);
+  const pickedRows = useMemo(
+    () => rows.filter(c => picked.has(c.id)),
+    [rows, picked],
+  );
+  const allChecked = rows.length > 0 && rows.every(c => picked.has(c.id));
+  const someChecked = picked.size > 0 && !allChecked;
+  const toggleId = (id: string) => setPicked(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    return next;
+  });
+  const toggleAll = () => setPicked(prev => {
+    if (rows.every(c => prev.has(c.id))) return new Set();
+    return new Set(rows.map(c => c.id));
+  });
+
+  // Bulk action runner. Wraps the per-id call set in a single confirm,
+  // settles in parallel, and toasts pass/fail counts.
+  const bulkRun = async (verb: string, ids: string[], op: (id: string) => Promise<unknown>) => {
+    if (!ids.length) return;
+    if (!confirm(`${verb} ${ids.length} container${ids.length === 1 ? '' : 's'}?`)) return;
+    const results = await Promise.allSettled(ids.map(op));
+    const ok = results.filter(r => r.status === 'fulfilled').length;
+    const fail = results.length - ok;
+    if (fail === 0) {
+      withToast(`${verb} ${ok}`, Promise.resolve()).catch(() => {});
+    } else if (ok === 0) {
+      withToast(`${verb} ${ids.length}`, Promise.reject(new Error('all calls failed'))).catch(() => {});
+    } else {
+      withToast(`${verb} ${ok}/${ids.length}`,
+        Promise.reject(new Error(`${fail} failed`))).catch(() => {});
+    }
+    setPicked(new Set());
+  };
+
   const grouped = useMemo(() => {
     const m = new Map<string, Container[]>();
     rows.forEach(c => {
@@ -77,12 +129,40 @@ export function ContainersView({ t, search, selected, setSelected, onInspect, on
       </div>
 
       <div style={{ ...tableHeader(t, COLS_CONTAINERS) }}>
-        <span></span><span>Name</span><span>Image</span><span>Status</span>
+        <SelectCheckbox
+          t={t}
+          checked={allChecked}
+          indeterminate={someChecked}
+          onChange={toggleAll}
+          title={allChecked ? 'Clear selection' : 'Select all visible'}
+        />
+        <span>Name</span><span>Image</span><span>Status</span>
         <span style={{ textAlign: 'right' }}>CPU</span>
         <span style={{ textAlign: 'right' }}>Memory</span>
         <span>Ports</span>
         <span style={{ textAlign: 'right' }}>Uptime</span>
       </div>
+
+      <BulkActionBar t={t} count={pickedRows.length} onClear={() => setPicked(new Set())}>
+        <button style={pillBtn(t, t.fg2)}
+                disabled={!pickedRows.some(c => c.status === 'running')}
+                onClick={() => bulkRun('Stop', pickedRows.filter(c => c.status === 'running').map(c => c.id), api.stopContainer)}>
+          <Icon name="stop" size={11} color={t.fg2} />Stop
+        </button>
+        <button style={pillBtn(t, t.success)}
+                disabled={!pickedRows.some(c => c.status !== 'running')}
+                onClick={() => bulkRun('Start', pickedRows.filter(c => c.status !== 'running').map(c => c.id), api.startContainer)}>
+          <Icon name="play" size={11} color={t.success} />Start
+        </button>
+        <button style={pillBtn(t)}
+                onClick={() => bulkRun('Restart', pickedRows.map(c => c.id), api.restartContainer)}>
+          <Icon name="play" size={11} color={t.fg2} />Restart
+        </button>
+        <button style={pillBtn(t, t.danger)}
+                onClick={() => bulkRun('Delete', pickedRows.map(c => c.id), api.deleteContainer)}>
+          <Icon name="trash" size={11} color={t.danger} />Delete
+        </button>
+      </BulkActionBar>
 
       {grouped.map((g, gi) => (
         <Fragment key={gi}>
@@ -95,17 +175,24 @@ export function ContainersView({ t, search, selected, setSelected, onInspect, on
           )}
           {g.items.map(c => {
             const sel = selected === c.id;
+            const isPicked = picked.has(c.id);
             return (
               <div key={c.id} onClick={() => setSelected(c.id)}
                 style={{
                   ...tableRow(t, COLS_CONTAINERS),
-                  background: sel ? t.selected : 'transparent',
+                  background: sel ? t.selected : (isPicked ? t.hover : 'transparent'),
                   borderLeft: sel ? `2px solid ${t.accent}` : '2px solid transparent',
                 }}
-                onMouseEnter={e => { if (!sel) (e.currentTarget as HTMLDivElement).style.background = t.hover; }}
-                onMouseLeave={e => { if (!sel) (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
+                onMouseEnter={e => { if (!sel && !isPicked) (e.currentTarget as HTMLDivElement).style.background = t.hover; }}
+                onMouseLeave={e => { if (!sel && !isPicked) (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
               >
-                <Icon name="box" size={16} color={t.fg3} />
+                <SelectCheckbox
+                  t={t}
+                  checked={isPicked}
+                  onChange={() => toggleId(c.id)}
+                  onClick={e => e.stopPropagation()}
+                  title={isPicked ? 'Deselect' : 'Select'}
+                />
                 <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   <div style={{ fontWeight: 500, color: t.fg1 }}>{c.name}</div>
                   <div style={{ fontSize: 11, color: t.fg3, fontFamily: t.mono, marginTop: 1 }}>{c.id}</div>
@@ -158,17 +245,78 @@ export function ImagesView({ t, search, onScan, onRun, onInspect }: {
     if (!confirm(`Delete image ${img.ref}?\nThis cannot be undone.`)) return;
     withToast(`delete ${img.ref}`, api.deleteImage(img.ref)).then(reload).catch(() => {});
   };
+
+  // Bulk selection (A5). Identical pattern to ContainersView; pruned to
+  // visible refs whenever the underlying list refreshes.
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const live = new Set(items.map(i => i.ref));
+    setPicked(prev => {
+      const next = new Set<string>();
+      let changed = false;
+      for (const r of prev) {
+        if (live.has(r)) next.add(r);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [items]);
+  const allChecked = rows.length > 0 && rows.every(r => picked.has(r.ref));
+  const someChecked = picked.size > 0 && !allChecked;
+  const toggleRef = (ref: string) => setPicked(prev => {
+    const next = new Set(prev);
+    if (next.has(ref)) next.delete(ref); else next.add(ref);
+    return next;
+  });
+  const toggleAll = () => setPicked(prev => {
+    if (rows.every(r => prev.has(r.ref))) return new Set();
+    return new Set(rows.map(r => r.ref));
+  });
+  const bulkDelete = async () => {
+    const refs = [...picked];
+    if (!refs.length) return;
+    if (!confirm(`Delete ${refs.length} image${refs.length === 1 ? '' : 's'}?\nThis cannot be undone.`)) return;
+    const results = await Promise.allSettled(refs.map(r => api.deleteImage(r)));
+    const ok = results.filter(r => r.status === 'fulfilled').length;
+    const fail = results.length - ok;
+    if (fail === 0) withToast(`Delete ${ok}`, Promise.resolve()).catch(() => {});
+    else if (ok === 0) withToast(`Delete ${refs.length}`, Promise.reject(new Error('all calls failed'))).catch(() => {});
+    else withToast(`Delete ${ok}/${refs.length}`, Promise.reject(new Error(`${fail} failed`))).catch(() => {});
+    setPicked(new Set());
+    reload();
+  };
+
   return (
     <div style={{ flex: 1, overflow: 'auto', background: t.bg }}>
       <div style={tableHeader(t, COLS_IMAGES)}>
-        <span></span><span>Reference</span>
+        <SelectCheckbox
+          t={t}
+          checked={allChecked}
+          indeterminate={someChecked}
+          onChange={toggleAll}
+          title={allChecked ? 'Clear selection' : 'Select all visible'}
+        />
+        <span>Reference</span>
         <span style={{ textAlign: 'right' }}>Size</span>
         <span style={{ textAlign: 'right' }}>Layers</span>
         <span>Created</span><span style={{ textAlign: 'right' }}>Actions</span>
       </div>
+      <BulkActionBar t={t} count={picked.size} onClear={() => setPicked(new Set())}>
+        <button style={pillBtn(t, t.danger)} onClick={bulkDelete}>
+          <Icon name="trash" size={11} color={t.danger} />Delete
+        </button>
+      </BulkActionBar>
       {rows.map(img => (
-        <div key={img.id} style={tableRow(t, COLS_IMAGES)}>
-          <Icon name="image" size={16} color={t.fg3} />
+        <div key={img.id} style={{
+          ...tableRow(t, COLS_IMAGES),
+          background: picked.has(img.ref) ? t.hover : undefined,
+        }}>
+          <SelectCheckbox
+            t={t}
+            checked={picked.has(img.ref)}
+            onChange={() => toggleRef(img.ref)}
+            title={picked.has(img.ref) ? 'Deselect' : 'Select'}
+          />
           <div>
             <div style={{ fontFamily: t.mono, fontSize: 13, color: t.fg1 }}>{img.ref}</div>
             <div style={{ fontFamily: t.mono, fontSize: 11, color: t.fg3, marginTop: 2 }}>{img.digest}</div>

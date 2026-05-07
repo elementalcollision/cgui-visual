@@ -3,7 +3,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 // `decorations: true`. Frameless chrome and platform detection were removed
 // when the project's scope was locked to Apple's container runtime.
 import { getTheme } from './theme';
-import type { Tab, Modal, Runtime, Container, Image } from './types';
+import type { Tab, Modal, Runtime, Container, Image, Stack } from './types';
 import { api, type Prefs } from './api';
 import { FramelessChrome, Sidebar, TopBar, StatusBar } from './components';
 import { ContainersView, ImagesView, VolumesView, NetworksView, StacksView, LogsView } from './views';
@@ -115,6 +115,23 @@ export default function App() {
     });
   }, [globalHotkey]);
 
+  // Slow background fetches so the Cmd-K palette has something to match
+  // against without the user opening the corresponding tab first. Refreshes
+  // on a 30 s timer + whenever the palette is opened.
+  const [paletteImages, setPaletteImages] = useState<Image[]>([]);
+  const [paletteStacks, setPaletteStacks] = useState<Stack[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      api.listImages().then(v => { if (!cancelled) setPaletteImages(v); });
+      api.listStacks().then(v => { if (!cancelled) setPaletteStacks(v); });
+    };
+    refresh();
+    if (modal?.type === 'commandPalette') refresh();
+    const id = window.setInterval(refresh, 30_000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [modal?.type]);
+
   const [containers, setContainers] = useState<Container[]>([]);
   useEffect(() => {
     let cancelled = false;
@@ -131,9 +148,27 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // Tabs in display order — kept here so ⌘1..⌘6 mirrors the Sidebar.
+    const tabsOrder: Tab[] = ['containers', 'images', 'volumes', 'networks', 'stacks', 'logs'];
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setModal(null);
-      if (e.key === '/' && !modal && (document.activeElement as HTMLElement | null)?.tagName !== 'INPUT') {
+      const inInput = (document.activeElement as HTMLElement | null)?.tagName === 'INPUT';
+      // Cmd/Ctrl-K → command palette. Suppress when typing in inputs so
+      // search fields can still use ⌘K for word delete on macOS — wait,
+      // ⌘K is a noop in inputs by default, safe to intercept globally.
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        setModal(m => m?.type === 'commandPalette' ? null : { type: 'commandPalette' });
+        return;
+      }
+      // Cmd/Ctrl-1..6 → switch tabs in Sidebar order.
+      if ((e.metaKey || e.ctrlKey) && /^[1-6]$/.test(e.key)) {
+        e.preventDefault();
+        const idx = Number(e.key) - 1;
+        if (tabsOrder[idx]) setTab(tabsOrder[idx]);
+        return;
+      }
+      if (e.key === '/' && !modal && !inInput) {
         e.preventDefault();
         document.querySelector<HTMLInputElement>('input[placeholder^="Filter"]')?.focus();
       }
@@ -235,6 +270,8 @@ export default function App() {
               menubarMode={menubarMode} setMenubarMode={setMenubarMode}
               globalHotkey={globalHotkey} setGlobalHotkey={setGlobalHotkey}
               notifyOnExit={notifyOnExit} setNotifyOnExit={setNotifyOnExit}
+              containers={containers} images={paletteImages} stacks={paletteStacks}
+              setTab={setTab} setModal={setModal} setLogTarget={setLogTarget}
             />
           </Suspense>
         )}
