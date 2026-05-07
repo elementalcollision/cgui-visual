@@ -71,7 +71,20 @@ cgui-visual targets a specific niche: **devs on Apple Silicon who want a GUI for
 
 The bulk of the project documentation is in [`app/README.md`](./app/README.md).
 
-## Quickstart
+## Install
+
+```sh
+brew tap elementalcollision/cgui-visual
+brew install --cask cgui-visual
+```
+
+Or grab the signed `.dmg` directly from the [latest release](https://github.com/elementalcollision/cgui-visual/releases/latest).
+
+The app auto-updates via the bundled [tauri-plugin-updater](./app/README.md#self-update) — no manual brew upgrade needed once installed.
+
+You'll also need Apple's `container` runtime; the app's first-run dialog walks you through installing it.
+
+## Quickstart (development)
 
 ```sh
 cd app
@@ -79,7 +92,7 @@ npm install
 npm run tauri dev
 ```
 
-Apple's `container` CLI is optional — when absent, the app falls back to
+Apple's `container` CLI is optional during development — when absent, the app falls back to
 fixture data so the UI is fully usable for design work.
 
 ## License
