@@ -1,7 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { TrivyModal, DoctorModal } from './modals';
+import { TrivyModal, DoctorModal, OnboardingModal } from './modals';
 import { getTheme } from './theme';
 
 const t = getTheme(true);
@@ -48,5 +48,50 @@ describe('DoctorModal', () => {
     await screen.findByText(/active profile/);
     // 6 ok + 2 warn + 0 fail in fixtures
     expect(screen.getByText(/6 passed · 2 warnings · 0 failures/)).toBeInTheDocument();
+  });
+});
+
+describe('OnboardingModal', () => {
+  it('renders both install paths with Apple as the primary CTA', () => {
+    render(<OnboardingModal t={t} onAvailable={() => {}} onDismiss={() => {}} />);
+    expect(screen.getByText(/CLI not detected/i)).toBeInTheDocument();
+    // Apple's signed installer is the prominent action.
+    expect(screen.getByRole('button', { name: /Download from apple\/container releases/i })).toBeInTheDocument();
+    // Homebrew alternative is present but secondary.
+    expect(screen.getByText(/brew install container/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Copy$/ })).toBeInTheDocument();
+  });
+
+  it('Copy button writes the brew command to the clipboard', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText }, writable: true, configurable: true,
+    });
+    render(<OnboardingModal t={t} onAvailable={() => {}} onDismiss={() => {}} />);
+    await user.click(screen.getByRole('button', { name: /^Copy$/ }));
+    expect(writeText).toHaveBeenCalledWith('brew install container');
+    // The button label flips to confirm the copy.
+    expect(await screen.findByText(/✓ Copied/)).toBeInTheDocument();
+  });
+
+  it('Continue with sample data calls onDismiss', async () => {
+    const user = userEvent.setup();
+    const onDismiss = vi.fn();
+    render(<OnboardingModal t={t} onAvailable={() => {}} onDismiss={onDismiss} />);
+    await user.click(screen.getByRole('button', { name: /Continue with sample data/i }));
+    expect(onDismiss).toHaveBeenCalled();
+  });
+
+  it('Re-check fires onAvailable when the runtime is available', async () => {
+    const user = userEvent.setup();
+    const onAvailable = vi.fn();
+    // Browser-dev mode: api.runtimeAvailable falls back to true, so the
+    // re-check path resolves to "available" without needing to mock invoke.
+    render(<OnboardingModal t={t} onAvailable={onAvailable} onDismiss={() => {}} />);
+    await user.click(screen.getByRole('button', { name: /Re-check/i }));
+    // findBy waits for the async setState after api.runtimeAvailable resolves.
+    await screen.findByRole('button', { name: /Re-check/i });
+    expect(onAvailable).toHaveBeenCalled();
   });
 });

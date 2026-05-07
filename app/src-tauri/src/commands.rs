@@ -120,6 +120,14 @@ pub async fn run_image(args: runtime::RunArgs) -> Result<String, String> {
     runtime::run_image(args).await.map_err(err_str)
 }
 
+// Probe used by first-run onboarding. Frontend calls this on mount and
+// shows the OnboardingModal when it returns false. Cheap (single fork +
+// `container --version`), so re-running on a timer is fine.
+#[tauri::command]
+pub async fn runtime_available() -> bool {
+    runtime::available().await
+}
+
 // ─── Actions (return Result so the frontend can surface errors) ───────
 
 #[tauri::command]

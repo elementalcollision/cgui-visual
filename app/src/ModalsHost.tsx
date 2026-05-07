@@ -13,6 +13,7 @@ import {
   SettingsModal,
   JsonInspectModal,
   RunImageModal,
+  OnboardingModal,
 } from './modals';
 import { toast } from './toast';
 import type { ThemeTokens } from './theme';
@@ -26,11 +27,14 @@ export default function ModalsHost(props: {
   pullReference: string;
   onClose: () => void;
   onUpdateClosed: () => void;
+  onOnboardingResolved: () => void;
 }) {
-  const { modal, t, runtime, setRuntime, pullReference, onClose, onUpdateClosed } = props;
+  const { modal, t, runtime, setRuntime, pullReference, onClose, onUpdateClosed, onOnboardingResolved } = props;
   if (!modal) return null;
 
   switch (modal.type) {
+    case 'onboarding':
+      return <OnboardingModal t={t} onAvailable={onOnboardingResolved} onDismiss={onClose} />;
     case 'detail':
       return <DetailModal item={modal.payload} t={t} onClose={onClose} />;
     case 'pull':

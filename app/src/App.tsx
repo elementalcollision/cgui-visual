@@ -27,6 +27,11 @@ export default function App() {
   const [pullReference] = useState('mlcommons/inference:llama2-70b');
   const [logTarget, setLogTarget] = useState<string | undefined>(undefined);
   const prefsLoaded = useRef(false);
+  // First-run onboarding: when the `container` CLI isn't on PATH we
+  // surface a modal explaining what's happening and how to install it.
+  // `onboardingDismissed` makes the dismissal sticky for this session
+  // so dismiss → close doesn't immediately re-open the modal next tick.
+  const [onboardingDismissed, setOnboardingDismissed] = useState(false);
 
   const t = useMemo(() => getTheme(dark), [dark]);
 
@@ -42,6 +47,26 @@ export default function App() {
       prefsLoaded.current = true;
     });
   }, []);
+
+  // First-run runtime probe. Runs once on mount; if the `container` CLI
+  // isn't installed and the user hasn't dismissed the modal this session,
+  // open it. The 5s re-poll auto-closes the modal once they install +
+  // we detect the CLI on a subsequent check, sparing them a relaunch.
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      const ok = await api.runtimeAvailable();
+      if (cancelled) return;
+      if (ok) {
+        setModal(m => (m?.type === 'onboarding' ? null : m));
+      } else if (!onboardingDismissed) {
+        setModal(m => (m ? m : { type: 'onboarding' }));
+      }
+    };
+    check();
+    const id = window.setInterval(check, 5000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [onboardingDismissed]);
 
   // Persist on change (skip the first render before load completes).
   useEffect(() => {
@@ -160,8 +185,12 @@ export default function App() {
               runtime={runtime}
               setRuntime={setRuntime}
               pullReference={pullReference}
-              onClose={() => setModal(null)}
+              onClose={() => {
+                if (modal.type === 'onboarding') setOnboardingDismissed(true);
+                setModal(null);
+              }}
               onUpdateClosed={() => { setModal(null); setShowUpdateBadge(false); }}
+              onOnboardingResolved={() => setModal(null)}
             />
           </Suspense>
         )}

@@ -76,6 +76,7 @@ pub fn run() {
             commands::stack_up,
             commands::stack_down,
             commands::stack_health,
+            commands::runtime_available,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

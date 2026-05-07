@@ -120,4 +120,5 @@ export type Modal =
   | { type: 'networkInspect'; id: string; name: string }
   | { type: 'imageInspect'; reference: string }
   | { type: 'runImage'; image: string }
+  | { type: 'onboarding' }
   | null;

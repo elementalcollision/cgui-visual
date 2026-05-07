@@ -77,6 +77,11 @@ export const api = {
   runImage: (args: { image: string; name?: string; ports?: string[]; env?: string[]; command?: string }) =>
     inTauri ? invokeStrict<string>('run_image', { args }) : Promise.resolve('dev-mode-no-op'),
 
+  // First-run onboarding probe. Outside Tauri (browser dev mode) the
+  // fallback returns true so the OnboardingModal doesn't trigger when the
+  // entire data layer is fixtures by design.
+  runtimeAvailable: () => call<boolean>('runtime_available', true),
+
   // Stacks: up/down return per-line log output; health returns
   // [serviceName, "healthy"|"unhealthy"|"—"|"unsupported:<kind>"].
   stackUp:     (name: string) => inTauri ? invokeStrict<string[]>('stack_up',     { name }) : Promise.resolve(['(dev-mode no-op)']),
