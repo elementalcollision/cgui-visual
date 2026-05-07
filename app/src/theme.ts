@@ -1,5 +1,4 @@
-// Workbench theme tokens (locked variation per design handoff).
-// Source: design_handoff_cgui/prototype/theme.js — `workbench` block.
+// Workbench theme tokens — the locked variation chosen during design handoff.
 
 export type ThemeTokens = {
   bg: string; surface: string; surfaceAlt: string;

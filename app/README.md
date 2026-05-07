@@ -6,8 +6,6 @@ Apple's [`container`](https://github.com/apple/container) CLI.
 **macOS-only.** The host runtime (`container`) is Apple-specific, so this
 GUI only ships for macOS — Windows/Linux paths were intentionally removed.
 
-Built from the [Workbench design variation](../design_handoff_cgui/README.md).
-
 ## Quickstart
 
 ```sh
@@ -125,10 +123,3 @@ updates that existing installs will accept.
 - Updater public key in `tauri.conf.json` is currently a placeholder
   generated for development. Regenerate before the first real release
   and update the matching `TAURI_SIGNING_PRIVATE_KEY` secret in CI.
-
-## Design source
-
-The clickable HTML prototype, screenshots, and design tokens are in
-[`../design_handoff_cgui/`](../design_handoff_cgui/README.md). The Workbench
-variation was selected; other variations (Editorial, Terminal) are documented
-there but not shipped.

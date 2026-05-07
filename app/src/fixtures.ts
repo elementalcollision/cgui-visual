@@ -1,4 +1,4 @@
-// Fixture data ported from design_handoff_cgui/prototype/data.js.
+// Fixture data ported from the original Workbench design prototype.
 // Used by the Rust backend stubs and as the dev fallback when running outside Tauri.
 
 import type {

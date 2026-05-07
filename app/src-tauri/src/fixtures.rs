@@ -1,6 +1,6 @@
 // Fixture data — same shape as src/fixtures.ts. Used as a fallback when the
 // runtime CLI isn't available (dev machines without Apple's `container`).
-// Hand-keyed from design_handoff_cgui/prototype/data.js.
+// Hand-keyed from the original Workbench design prototype.
 
 #![allow(dead_code)]
 

@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="design_handoff_cgui/screenshots/01-containers.png" alt="cgui-visual containers tab — workbench variation, dark mode" width="820"/>
+  <img src="docs/screenshots/01-containers.png" alt="cgui-visual containers tab — workbench variation, dark mode" width="820"/>
 </p>
 
 <p align="center">
@@ -63,19 +63,13 @@ cgui-visual targets a specific niche: **devs on Apple Silicon who want a GUI for
 │   ├── src/                Frontend
 │   ├── src-tauri/          Rust backend
 │   └── …
-├── design_handoff_cgui/    Original clickable HTML prototype + screenshots
-│   ├── README.md
-│   ├── prototype/
-│   └── screenshots/
+├── docs/screenshots/       Screenshots used in this README
 ├── CHANGELOG.md
 ├── CONTRIBUTING.md
 └── LICENSE                 MIT
 ```
 
 The bulk of the project documentation is in [`app/README.md`](./app/README.md).
-The [design handoff](./design_handoff_cgui/README.md) documents the three
-variations (Workbench, Editorial, Terminal) the prototype carried; the
-shipping app uses the **Workbench** variation.
 
 ## Quickstart
 
