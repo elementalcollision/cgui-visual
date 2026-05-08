@@ -667,11 +667,13 @@ pub fn updates() -> Vec<Update> {
             component: "container".into(), installed: "0.13.0".into(), latest: "0.14.2".into(),
             published: "2026-04-28".into(),
             notes: "## What's new in container 0.14.2\n\n### Performance\n- Reduced cold-start latency by 18% on Apple Silicon hosts.\n- Lazy snapshotting now stable and on by default.\n\n### Security\n- Updated runc to 1.1.12 (addresses CVE-2024-21626).\n- New `--no-new-privileges` default for `container run`.\n\n### Bug fixes\n- Fixed race in volume cleanup that could leak sparse images on `container delete -v`.\n- `container stats` now reports correct memory limits when cgroup v2 hierarchy is partial.".into(),
+            url: String::new(),
         },
         Update {
             component: "cgui".into(), installed: "0.13.0".into(), latest: "0.14.2".into(),
             published: "2026-05-01".into(),
             notes: "## cgui 0.14.2\n\n- Per-tab refresh cadence (skip 2s tick on Logs + follow).\n- `y` copies pull/build/log buffer to pbcopy.\n- `--profile <name>` one-shot CLI override (no persist).\n- Stack `cap_add` / `cap_drop` passthrough.\n- Healthcheck `start_period_s` startup grace.".into(),
+            url: String::new(),
         },
     ]
 }

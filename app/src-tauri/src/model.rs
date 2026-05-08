@@ -151,6 +151,10 @@ pub struct Update {
     pub latest: String,
     pub published: String,
     pub notes: String,
+    /// Direct link to the companion's GitHub release page. Empty when
+    /// unknown so the UI can fall back to a label-only display.
+    #[serde(default)]
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
