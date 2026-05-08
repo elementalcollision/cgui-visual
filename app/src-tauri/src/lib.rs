@@ -2,6 +2,7 @@ mod commands;
 pub mod compose;
 mod doctor;
 mod fixtures;
+pub mod history;
 pub mod model;
 mod prefs;
 pub mod pty;
@@ -134,6 +135,12 @@ pub fn run() {
             let initial_prefs = prefs::Prefs::load();
             runtime::set_bin(&initial_prefs.runtime);
 
+            // Open the long-form history sidecar (B6). Failures only mean
+            // the trends tab will be empty; the live UI keeps working.
+            if let Err(e) = history::init() {
+                eprintln!("history::init failed (trends will be empty): {e:#}");
+            }
+
             // Register the global summon hotkey if one is configured. Failures
             // (bad accelerator string, hotkey already taken by another app) are
             // logged but non-fatal — the user can fix it from Settings.
@@ -231,6 +238,9 @@ pub fn run() {
                     }
                     match state::poll_once(&history).await {
                         Ok(cs) => {
+                            // Persist this tick before any other side effects
+                            // so a crash mid-tick still gets the data on disk.
+                            crate::history::record(&cs);
                             let running = cs
                                 .iter()
                                 .filter(|c| c.status.eq_ignore_ascii_case("running"))
@@ -329,6 +339,7 @@ pub fn run() {
             commands::stack_health,
             commands::runtime_available,
             commands::probe_runtime,
+            commands::container_history,
             commands::pty_open,
             commands::pty_write,
             commands::pty_resize,

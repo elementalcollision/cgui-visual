@@ -5,7 +5,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   Container, Image, Volume, Network, Stack,
-  TrivyResult, Update, DoctorCheck,
+  TrivyResult, Update, DoctorCheck, HistoryPoint,
 } from './types';
 import * as fixtures from './fixtures';
 
@@ -105,6 +105,12 @@ export const api = {
   probeRuntime: (name: string) =>
     inTauri ? invokeStrict<boolean>('probe_runtime', { name }) :
               Promise.resolve(true),
+
+  // Long-form per-container metrics (B6). Returns ascending-by-ts
+  // points within the last `sinceSecs` seconds. Empty when the
+  // sidecar DB hasn't recorded any rows for this id yet.
+  containerHistory: (id: string, sinceSecs: number) =>
+    call<HistoryPoint[]>('container_history', [], { id, sinceSecs }),
 
   // Embedded terminal (B5). Open returns a session id used to address
   // subsequent write/resize/close calls. The frontend subscribes to
