@@ -8,6 +8,9 @@ import { api } from './api';
 
 // Lazy-load TerminalModal so xterm.js (~250 KB) isn't in the initial bundle.
 const TerminalModal = lazy(() => import('./Terminal'));
+// StackGraph is light, but lazy-loading keeps the SVG layout code out
+// of the main chunk for users who never open Stacks.
+const StackGraphModal = lazy(() => import('./StackGraph'));
 
 import {
   DetailModal,
@@ -99,6 +102,12 @@ export default function ModalsHost(props: {
       return (
         <Suspense fallback={null}>
           <TerminalModal container={modal.container} t={t} onClose={onClose} />
+        </Suspense>
+      );
+    case 'stackGraph':
+      return (
+        <Suspense fallback={null}>
+          <StackGraphModal stack={modal.stack} t={t} onClose={onClose} />
         </Suspense>
       );
     case 'commandPalette':

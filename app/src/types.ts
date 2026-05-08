@@ -65,6 +65,8 @@ export interface Service {
   image: string;
   state: ContainerStatus;
   health: string;
+  /** Names of services this one depends on, mirrored from the stack TOML. */
+  dependsOn?: string[];
 }
 
 export interface Stack {
@@ -161,4 +163,5 @@ export type Modal =
   | { type: 'onboarding' }
   | { type: 'commandPalette' }
   | { type: 'terminal'; container: Container }
+  | { type: 'stackGraph'; stack: Stack }
   | null;

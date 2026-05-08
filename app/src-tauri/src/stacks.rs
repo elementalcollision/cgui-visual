@@ -166,6 +166,7 @@ fn stack_to_ui(s: StackToml, path: &std::path::Path, containers: &[Container]) -
                 image: svc.image.clone(),
                 state,
                 health,
+                depends_on: svc.depends_on.clone(),
             }
         })
         .collect();
