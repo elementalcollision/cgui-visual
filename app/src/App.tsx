@@ -23,7 +23,15 @@ export default function App() {
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<string>('');
   const [modal, setModal] = useState<Modal>(null);
-  const [showUpdateBadge, setShowUpdateBadge] = useState(true);
+  // Companion-update badge state. `count` is the actual number returned
+  // from the backend's listUpdates probe (not a hardcoded literal); the
+  // badge stays clickable for the lifetime of the session so the user
+  // can re-open the modal. `seen` flips after first dismiss so the
+  // colour mutes from warning-orange to a subtle muted frame — keeps
+  // the affordance visible without the constant glare. State resets on
+  // app restart by design — fresh poll, fresh attention.
+  const [updateCount, setUpdateCount] = useState(0);
+  const [updatesSeen, setUpdatesSeen] = useState(false);
   const [logTarget, setLogTarget] = useState<string | undefined>(undefined);
   const [menubarMode, setMenubarMode] = useState(false);
   const [globalHotkey, setGlobalHotkey] = useState('');
@@ -116,7 +124,9 @@ export default function App() {
 
   // Slow background fetches so the Cmd-K palette has something to match
   // against without the user opening the corresponding tab first. Refreshes
-  // on a 30 s timer + whenever the palette is opened.
+  // on a 30 s timer + whenever the palette is opened. Same loop also
+  // refreshes the topbar update-badge count so newly-published companion
+  // releases surface without a relaunch.
   const [paletteImages, setPaletteImages] = useState<Image[]>([]);
   const [paletteStacks, setPaletteStacks] = useState<Stack[]>([]);
   useEffect(() => {
@@ -124,6 +134,7 @@ export default function App() {
     const refresh = () => {
       api.listImages().then(v => { if (!cancelled) setPaletteImages(v); });
       api.listStacks().then(v => { if (!cancelled) setPaletteStacks(v); });
+      api.listUpdates().then(v => { if (!cancelled) setUpdateCount(v.length); });
     };
     refresh();
     if (modal?.type === 'commandPalette') refresh();
@@ -226,7 +237,9 @@ export default function App() {
                 runtime={runtime}
                 dark={dark}
                 setDark={setDark}
-                onUpdate={showUpdateBadge ? () => setModal({ type: 'update' }) : null}
+                onUpdate={updateCount > 0 ? () => setModal({ type: 'update' }) : null}
+                updateCount={updateCount}
+                updatesSeen={updatesSeen}
                 headings={headings}
               />
               {tab === 'containers' && (
@@ -262,7 +275,7 @@ export default function App() {
                 if (modal.type === 'onboarding') setOnboardingDismissed(true);
                 setModal(null);
               }}
-              onUpdateClosed={() => { setModal(null); setShowUpdateBadge(false); }}
+              onUpdateClosed={() => { setModal(null); setUpdatesSeen(true); }}
               onOnboardingResolved={() => setModal(null)}
               dark={dark} setDark={setDark}
               menubarMode={menubarMode} setMenubarMode={setMenubarMode}
