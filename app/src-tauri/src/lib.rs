@@ -7,6 +7,7 @@ pub mod model;
 mod prefs;
 pub mod pty;
 pub mod runtime;
+pub mod snapshot;
 pub mod stacks;
 pub mod state;
 pub mod trivy;
@@ -348,6 +349,9 @@ pub fn run() {
             commands::pty_close,
             commands::import_compose,
             commands::export_compose,
+            commands::snapshot_stack,
+            commands::restore_stack,
+            commands::restore_stack_from_path,
             hotkey_cmd::set_global_hotkey,
         ])
         .run(tauri::generate_context!())

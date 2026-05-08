@@ -194,6 +194,33 @@ pub async fn probe_runtime(name: String) -> bool {
     runtime::probe_bin(&name).await
 }
 
+// ─── Stack snapshot / restore (B11) ───────────────────────────────────
+//
+// Snapshot scope is the stack *configuration* only: the TOML body
+// wrapped in a self-describing JSON envelope. Volume *data* is out of
+// scope — see snapshot.rs for the rationale. The frontend writes the
+// returned string to a file via the browser's download flow; restore
+// is the inverse and accepts the JSON contents directly.
+
+#[tauri::command]
+pub fn snapshot_stack(name: String, note: Option<String>) -> Result<String, String> {
+    crate::snapshot::create(&name, note.as_deref().unwrap_or("")).map_err(err_str)
+}
+
+#[tauri::command]
+pub fn restore_stack(json: String, overwrite: bool) -> Result<String, String> {
+    crate::snapshot::restore(&json, overwrite).map_err(err_str)
+}
+
+// Convenience: restore by reading the file ourselves so the frontend
+// only needs the picked path (no fs plugin required). Mirrors the
+// import_compose UX.
+#[tauri::command]
+pub fn restore_stack_from_path(path: String, overwrite: bool) -> Result<String, String> {
+    let json = std::fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))?;
+    crate::snapshot::restore(&json, overwrite).map_err(err_str)
+}
+
 // Render a stack as a docker-compose.yml string. Round-trips with
 // import_compose: convert(parse(export(s))) ≈ s for any importable
 // stack. The frontend writes the returned string to a file via the
