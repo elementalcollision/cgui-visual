@@ -697,6 +697,14 @@ export function LogsView({ t, target }: { t: ThemeTokens; target?: string }) {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
     setLines([]);
+    // Seed with persisted history so the view isn't blank between
+    // restarts (B12). Live tail then appends as usual on top.
+    if (target) {
+      api.loadLogs(target, 500).then(rows => {
+        if (cancelled) return;
+        if (rows.length) setLines(rows.map(r => r.line));
+      }).catch(() => { /* sidecar empty / not yet init'd */ });
+    }
     api.onLogLine(line => {
       if (cancelled || pausedRef.current) return;
       setLines(prev => prev.length >= LOG_BUFFER_MAX ? [...prev.slice(-LOG_BUFFER_MAX + 1), line] : [...prev, line]);

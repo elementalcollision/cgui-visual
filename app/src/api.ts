@@ -117,6 +117,12 @@ export const api = {
   vulnHistory: (image: string, limit?: number) =>
     call<VulnHistory>('vuln_history', { points: [], newSinceLast: [] }, { image, limit }),
 
+  // Persisted log lines for a container (B12). Returned ascending-by-ts
+  // so the LogsView can append them to its render buffer as if they
+  // arrived live. `query` is an optional substring filter.
+  loadLogs: (containerId: string, limit?: number, query?: string) =>
+    call<{ ts: number; line: string }[]>('load_logs', [], { containerId, limit, query }),
+
   // Embedded terminal (B5). Open returns a session id used to address
   // subsequent write/resize/close calls. The frontend subscribes to
   // pty:tick:<id> events and feeds them straight into xterm.js.

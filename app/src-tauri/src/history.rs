@@ -94,11 +94,30 @@ fn open_with_schema(path: &std::path::Path) -> Result<Connection> {
         );
         CREATE INDEX IF NOT EXISTS idx_trivy_scans_image
             ON trivy_scans (image, scanned_at);
+
+        -- Per-container log persistence (B12). Append-only line buffer.
+        -- Trimmed by record_log when row count for a container exceeds
+        -- LOGS_PER_CONTAINER. Indexed by (container_id, ts) so loading
+        -- the most-recent N lines for one container is a fast tail-scan.
+        CREATE TABLE IF NOT EXISTS container_logs (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            container_id  TEXT    NOT NULL,
+            ts            INTEGER NOT NULL,
+            line          TEXT    NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_logs_container_ts
+            ON container_logs (container_id, ts);
         "#,
     )
     .context("init schema")?;
     Ok(conn)
 }
+
+/// Cap on persisted log lines per container. Avoids the DB ballooning
+/// when a chatty service runs for days. Old lines fall off; live tail
+/// is always preserved. 50k lines × ~100 B average ≈ 5 MiB per
+/// container, plenty for "what happened five minutes ago" use cases.
+const LOGS_PER_CONTAINER: i64 = 50_000;
 
 /// Record one tick's worth of samples. Called from the container poll
 /// loop — silently no-ops when init() hasn't been called or fails.
@@ -301,6 +320,123 @@ pub fn load_scans(image: &str, limit: i64) -> VulnHistory {
     }
 }
 
+// ─── Per-container log persistence (B12) ──────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogLine {
+    pub ts: i64,
+    pub line: String,
+}
+
+/// Persist a single log line. Best-effort — silently no-ops when the
+/// DB isn't initialised. Trims oldest rows for this container in the
+/// same transaction whenever the row count would otherwise grow past
+/// LOGS_PER_CONTAINER × 1.05 (the 5% slack avoids running the DELETE
+/// on every single insert at the cap).
+pub fn record_log(container_id: &str, line: &str) {
+    let Some(db) = DB.get() else { return };
+    let ts = Utc::now().timestamp();
+    if let Ok(conn) = db.lock() {
+        let res = conn.execute(
+            "INSERT INTO container_logs (container_id, ts, line) VALUES (?, ?, ?)",
+            params![container_id, ts, line],
+        );
+        if let Err(e) = res {
+            eprintln!("logs record: {e}");
+            return;
+        }
+        // Cheap trim: only fire when the count meaningfully exceeds the
+        // cap. Cuts the per-line cost from O(insert+count+maybe-delete)
+        // down to ~O(insert) for the steady state.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM container_logs WHERE container_id = ?",
+                params![container_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let slack = LOGS_PER_CONTAINER + LOGS_PER_CONTAINER / 20;
+        if count > slack {
+            let to_keep = LOGS_PER_CONTAINER;
+            let _ = conn.execute(
+                "DELETE FROM container_logs
+                 WHERE container_id = ?
+                   AND id NOT IN (
+                       SELECT id FROM container_logs
+                       WHERE container_id = ?
+                       ORDER BY id DESC
+                       LIMIT ?
+                   )",
+                params![container_id, container_id, to_keep],
+            );
+        }
+    }
+}
+
+/// Load the most recent `limit` lines for one container, optionally
+/// filtered by a substring `query`. Returned in ascending-by-ts order
+/// so the LogsView can append them to its render buffer as if they
+/// arrived live.
+pub fn load_logs(container_id: &str, limit: i64, query: Option<&str>) -> Vec<LogLine> {
+    let Some(db) = DB.get() else { return vec![] };
+    let conn = match db.lock() {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    let limit = limit.clamp(1, 5000);
+    // Pull most-recent N then reverse — much cheaper than ORDER BY ASC
+    // with a tail offset, since the (container_id, ts) index is descending-
+    // friendly via id DESC LIMIT.
+    let mut rows: Vec<LogLine> = match query {
+        Some(q) if !q.is_empty() => {
+            let pat = format!("%{}%", q);
+            let mut stmt = match conn.prepare(
+                "SELECT ts, line FROM container_logs
+                 WHERE container_id = ? AND line LIKE ?
+                 ORDER BY id DESC LIMIT ?",
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("logs load prepare (query): {e}");
+                    return vec![];
+                }
+            };
+            stmt.query_map(params![container_id, pat, limit], |r| {
+                Ok(LogLine {
+                    ts: r.get(0)?,
+                    line: r.get(1)?,
+                })
+            })
+            .map(|it| it.flatten().collect())
+            .unwrap_or_default()
+        }
+        _ => {
+            let mut stmt = match conn.prepare(
+                "SELECT ts, line FROM container_logs
+                 WHERE container_id = ?
+                 ORDER BY id DESC LIMIT ?",
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("logs load prepare: {e}");
+                    return vec![];
+                }
+            };
+            stmt.query_map(params![container_id, limit], |r| {
+                Ok(LogLine {
+                    ts: r.get(0)?,
+                    line: r.get(1)?,
+                })
+            })
+            .map(|it| it.flatten().collect())
+            .unwrap_or_default()
+        }
+    };
+    rows.reverse();
+    rows
+}
+
 /// Return points for a container within the last `since_secs`. Ordered
 /// ascending by ts so consumers can stream into a sparkline as-is.
 /// Empty when the DB isn't initialised or has no rows for `id`.
@@ -490,6 +626,43 @@ mod tests {
         let new_cves: Vec<&String> = latest.iter().filter(|c| !prior_set.contains(c)).collect();
         assert_eq!(new_cves.len(), 1);
         assert_eq!(new_cves[0], "CVE-NEW-1");
+    }
+
+    #[test]
+    fn log_query_returns_most_recent_first_then_chronological() {
+        // Mirrors the DESC-then-reverse strategy used by load_logs.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE container_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                container_id TEXT NOT NULL,
+                ts INTEGER NOT NULL,
+                line TEXT NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+        for (i, line) in ["a", "b", "c", "d", "e"].iter().enumerate() {
+            conn.execute(
+                "INSERT INTO container_logs (container_id, ts, line) VALUES (?, ?, ?)",
+                params!["x", 100 + i as i64, line],
+            )
+            .unwrap();
+        }
+        let mut stmt = conn
+            .prepare(
+                "SELECT line FROM container_logs WHERE container_id = ?
+                 ORDER BY id DESC LIMIT ?",
+            )
+            .unwrap();
+        let mut rows: Vec<String> = stmt
+            .query_map(params!["x", 3], |r| r.get(0))
+            .unwrap()
+            .flatten()
+            .collect();
+        rows.reverse();
+        assert_eq!(rows, vec!["c", "d", "e"]);
     }
 
     #[test]

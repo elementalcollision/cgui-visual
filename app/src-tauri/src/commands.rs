@@ -297,14 +297,30 @@ pub async fn start_log_stream(app: AppHandle, id: String) -> Result<(), String> 
     }
     let child = runtime::spawn(&["logs", "-f", &id]).map_err(err_str)?;
     let app2 = app.clone();
+    let id_for_persist = id.clone();
     tauri::async_runtime::spawn(async move {
         let _ = runtime::drain_lines(child, move |line| {
+            // Persist before emitting so a crash mid-tick still gets the
+            // line on disk. record_log no-ops when the DB isn't init'd.
+            crate::history::record_log(&id_for_persist, &line);
             let _ = app2.emit("logs:tick", line);
         })
         .await;
         let _ = app.emit("logs:tick", "[follow ended]".to_string());
     });
     Ok(())
+}
+
+// Retrospective log view (B12). Returns the last `limit` persisted
+// lines for a container, optionally filtered by substring. Empty when
+// the sidecar DB hasn't recorded any lines yet.
+#[tauri::command]
+pub fn load_logs(
+    container_id: String,
+    limit: Option<i64>,
+    query: Option<String>,
+) -> Vec<crate::history::LogLine> {
+    crate::history::load_logs(&container_id, limit.unwrap_or(500), query.as_deref())
 }
 
 // ─── Streaming pull ───────────────────────────────────────────────────
