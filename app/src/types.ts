@@ -109,6 +109,18 @@ export type DoctorFix =
   | { kind: 'url'; label: string; url: string }
   | { kind: 'copy'; label: string; command: string };
 
+export interface HistoryPoint {
+  /** Unix-epoch seconds of the sample. */
+  ts: number;
+  cpu: number;
+  /** GiB used at the sample. */
+  memUsed: number;
+  /** Bytes/sec at the sample. */
+  netBps: number;
+  diskBps: number;
+  status: string;
+}
+
 export interface DoctorCheck {
   ok: boolean;
   text: string;

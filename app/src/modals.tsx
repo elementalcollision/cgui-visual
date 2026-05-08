@@ -2,8 +2,8 @@
 
 import React, { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ThemeTokens } from './theme';
-import type { Container, Image, Severity, Stack, Tab, TrivyFinding, TrivyResult, Update, DoctorCheck, DoctorFix, Runtime } from './types';
-import { Icon, Bar, iconBtn, pillBtn } from './components';
+import type { Container, Image, Severity, Stack, Tab, TrivyFinding, TrivyResult, Update, DoctorCheck, DoctorFix, HistoryPoint, Runtime } from './types';
+import { Icon, Bar, Sparkline, iconBtn, pillBtn } from './components';
 import { api } from './api';
 import { withToast } from './toast';
 
@@ -18,7 +18,7 @@ function Backdrop({ onClose, children }: { onClose: () => void; children: ReactN
 // Tabs available in the inspect drawer. Each maps to a different
 // projection of the inspect JSON; "raw" always falls back to the verbatim
 // blob so users can still grep odd fields the parser hasn't extracted.
-type InspectTab = 'env' | 'mounts' | 'network' | 'ports' | 'health' | 'raw';
+type InspectTab = 'trends' | 'env' | 'mounts' | 'network' | 'ports' | 'health' | 'raw';
 
 interface ParsedInspect {
   env: { key: string; value: string }[];
@@ -132,6 +132,7 @@ function InspectTabs({ t, tab, setTab, parsed }: {
   t: ThemeTokens; tab: InspectTab; setTab: (v: InspectTab) => void; parsed: ParsedInspect | null;
 }) {
   const tabs: { id: InspectTab; label: string; count: number; available: boolean }[] = [
+    { id: 'trends',  label: 'Trends',  count: 0,                            available: true },
     { id: 'env',     label: 'Env',     count: parsed?.env.length ?? 0,     available: !!parsed?.env.length },
     { id: 'mounts',  label: 'Mounts',  count: parsed?.mounts.length ?? 0,  available: !!parsed?.mounts.length },
     { id: 'network', label: 'Network', count: parsed?.network.length ?? 0, available: !!parsed?.network.length },
@@ -169,9 +170,13 @@ function InspectTabs({ t, tab, setTab, parsed }: {
   );
 }
 
-function InspectPanel({ t, tab, parsed, json }: {
+function InspectPanel({ t, tab, parsed, json, container }: {
   t: ThemeTokens; tab: InspectTab; parsed: ParsedInspect | null; json: string;
+  container: Container;
 }) {
+  if (tab === 'trends') {
+    return <TrendsPanel t={t} container={container} />;
+  }
   if (tab === 'raw' || !parsed) {
     return (
       <pre style={{ margin: 0, fontFamily: t.mono, fontSize: 11, lineHeight: 1.6, color: t.fg2, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{json}</pre>
@@ -276,6 +281,113 @@ function KvList({ t, rows, empty }: { t: ThemeTokens; rows: { k: string; v: stri
   );
 }
 
+// Long-form metric trends (B6). Loads a configurable time window from
+// the SQLite sidecar and plots CPU / Memory / Net / Disk as sparklines.
+// Re-fetches whenever the user picks a different window or when the
+// modal is re-opened.
+function TrendsPanel({ t, container }: { t: ThemeTokens; container: Container }) {
+  type Window = { label: string; secs: number };
+  const windows: Window[] = [
+    { label: '1h',  secs: 3600 },
+    { label: '6h',  secs: 6 * 3600 },
+    { label: '24h', secs: 24 * 3600 },
+    { label: '7d',  secs: 7 * 24 * 3600 },
+  ];
+  const [windowSecs, setWindowSecs] = useState(windows[2].secs);
+  const [points, setPoints] = useState<HistoryPoint[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setPoints(null);
+    api.containerHistory(container.id, windowSecs).then(p => {
+      if (!cancelled) setPoints(p);
+    });
+    return () => { cancelled = true; };
+  }, [container.id, windowSecs]);
+
+  if (points === null) {
+    return <Muted t={t}>Loading history…</Muted>;
+  }
+  if (points.length < 2) {
+    return (
+      <div>
+        <WindowChips t={t} windows={windows} active={windowSecs} setActive={setWindowSecs} />
+        <Muted t={t}>
+          No history yet for this container. Samples accumulate every 2 s while cgui is running; come back in a few minutes.
+        </Muted>
+      </div>
+    );
+  }
+  const cpu = points.map(p => p.cpu);
+  const mem = points.map(p => p.memUsed);
+  const net = points.map(p => p.netBps / 1024 / 1024);   // MB/s
+  const disk = points.map(p => p.diskBps / 1024 / 1024); // MB/s
+  const last = points[points.length - 1];
+  const first = points[0];
+  const fmtTs = (s: number) => new Date(s * 1000).toLocaleTimeString();
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <WindowChips t={t} windows={windows} active={windowSecs} setActive={setWindowSecs} />
+        <span style={{ flex: 1 }} />
+        <span style={{ fontFamily: t.mono, fontSize: 11, color: t.fg3 }}>
+          {points.length} samples · {fmtTs(first.ts)} → {fmtTs(last.ts)}
+        </span>
+      </div>
+      <TrendCard t={t} label="CPU"     unit="%"    series={cpu}  current={`${last.cpu.toFixed(1)}%`} />
+      <TrendCard t={t} label="Memory"  unit="GiB"  series={mem}  current={`${last.memUsed.toFixed(2)} GiB`} />
+      <TrendCard t={t} label="Network" unit="MB/s" series={net}  current={`${(last.netBps / 1024 / 1024).toFixed(2)} MB/s`} />
+      <TrendCard t={t} label="Disk"    unit="MB/s" series={disk} current={`${(last.diskBps / 1024 / 1024).toFixed(2)} MB/s`} />
+    </div>
+  );
+}
+
+function WindowChips({ t, windows, active, setActive }: {
+  t: ThemeTokens; windows: { label: string; secs: number }[];
+  active: number; setActive: (s: number) => void;
+}) {
+  return (
+    <div style={{ display: 'flex', gap: 4 }}>
+      {windows.map(w => {
+        const sel = w.secs === active;
+        return (
+          <button
+            key={w.secs}
+            onClick={() => setActive(w.secs)}
+            style={{
+              padding: '4px 10px',
+              fontSize: 11, fontFamily: t.mono, fontWeight: 600,
+              color: sel ? t.fg1 : t.fg3,
+              background: sel ? t.selected : t.surfaceAlt,
+              border: `1px solid ${sel ? t.accent : t.border}`,
+              borderRadius: 4, cursor: 'pointer',
+            }}
+          >{w.label}</button>
+        );
+      })}
+    </div>
+  );
+}
+
+function TrendCard({ t, label, unit, series, current }: {
+  t: ThemeTokens; label: string; unit: string; series: number[]; current: string;
+}) {
+  const max = Math.max(0.0001, ...series);
+  return (
+    <div style={{
+      padding: '12px 14px',
+      background: t.surfaceAlt, border: `1px solid ${t.border}`, borderRadius: 8,
+      display: 'grid', gridTemplateColumns: '120px 1fr', gap: 14, alignItems: 'center',
+    }}>
+      <div>
+        <div style={{ fontSize: 10, color: t.fg3, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase' }}>{label}</div>
+        <div style={{ fontFamily: t.mono, fontSize: 18, fontWeight: 600, color: t.fg1, fontVariantNumeric: 'tabular-nums', marginTop: 2 }}>{current}</div>
+        <div style={{ fontSize: 10, color: t.fg3, fontFamily: t.mono, marginTop: 2 }}>peak {max.toFixed(2)} {unit}</div>
+      </div>
+      <Sparkline data={series} w={420} h={50} color={t.sparkline} max={max * 1.1} />
+    </div>
+  );
+}
+
 function Muted({ t, children }: { t: ThemeTokens; children: ReactNode }) {
   return <div style={{ fontSize: 12, color: t.fg3, fontStyle: 'italic' }}>{children}</div>;
 }
@@ -287,7 +399,7 @@ export function DetailModal({ item, t, onClose, onExec }: {
   onExec: (c: Container) => void;
 }) {
   const [json, setJson] = useState<string>('Loading…');
-  const [tab, setTab] = useState<InspectTab>('env');
+  const [tab, setTab] = useState<InspectTab>('trends');
   useEffect(() => { api.inspectContainer(item.id).then(setJson); }, [item.id]);
   const c = item;
   // Parse once per JSON change. Errors are tolerated — the Raw tab still
@@ -323,7 +435,7 @@ export function DetailModal({ item, t, onClose, onExec }: {
         </div>
         <InspectTabs t={t} tab={tab} setTab={setTab} parsed={parsed} />
         <div style={{ flex: 1, overflow: 'auto', padding: '14px 22px', minHeight: 200 }}>
-          <InspectPanel t={t} tab={tab} parsed={parsed} json={json} />
+          <InspectPanel t={t} tab={tab} parsed={parsed} json={json} container={c} />
         </div>
         <div style={{ padding: '12px 22px', borderTop: `1px solid ${t.border}`, display: 'flex', gap: 8, justifyContent: 'flex-end', background: t.surfaceAlt }}>
           <button style={pillBtn(t)} onClick={() => withToast(`restart ${c.name}`, api.restartContainer(c.id)).catch(() => {})}>Restart</button>

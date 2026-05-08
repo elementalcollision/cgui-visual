@@ -128,6 +128,17 @@ pub async fn runtime_available() -> bool {
     runtime::available().await
 }
 
+// ─── Long-form metric history (B6) ────────────────────────────────────
+//
+// Returns persisted CPU/mem/net/disk samples for one container within
+// the last `since_secs` seconds. Empty when the sidecar DB hasn't
+// recorded any rows for this id (yet) or init failed.
+
+#[tauri::command]
+pub fn container_history(id: String, since_secs: i64) -> Vec<crate::history::HistoryPoint> {
+    crate::history::load(&id, since_secs)
+}
+
 // ─── Embedded terminal (B5) ───────────────────────────────────────────
 //
 // Open a pty that runs `<runtime> exec -it <id> <shell>` and stream the
