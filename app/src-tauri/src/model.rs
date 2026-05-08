@@ -92,13 +92,17 @@ pub struct Network {
     pub containers: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct Service {
     pub name: String,
     pub image: String,
     pub state: String,
     pub health: String,
+    /// Names of services this service depends on, mirrored from the
+    /// stack TOML. Used by the StackGraph to draw dependency edges.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

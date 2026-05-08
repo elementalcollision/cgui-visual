@@ -107,7 +107,7 @@ export const stacks: Stack[] = [
     services: [
       { name: 'pgvector', image: 'pgvector/pgvector:pg16', state: 'running', health: 'healthy' },
       { name: 'redis', image: 'redis:7.2-alpine', state: 'running', health: 'healthy' },
-      { name: 'inference', image: 'mlcommons/inference:llama2-70b', state: 'running', health: 'healthy' },
+      { name: 'inference', image: 'mlcommons/inference:llama2-70b', state: 'running', health: 'healthy', dependsOn: ['pgvector', 'redis'] },
     ],
     restart: 'always:3', health: '✓ healthy (3)', file: '~/.config/cgui/stacks/mlperf-inference.toml',
   },

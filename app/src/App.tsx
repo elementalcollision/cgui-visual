@@ -245,7 +245,7 @@ export default function App() {
                                        onInspect={(img: Image) => setModal({ type: 'imageInspect', reference: img.ref })} />}
               {tab === 'volumes'  && <VolumesView  t={t} search={search} onInspect={(v) => setModal({ type: 'volumeInspect', name: v.name })} />}
               {tab === 'networks' && <NetworksView t={t} search={search} onInspect={(n) => setModal({ type: 'networkInspect', id: n.id, name: n.name })} />}
-              {tab === 'stacks'   && <StacksView   t={t} search={search} />}
+              {tab === 'stacks'   && <StacksView   t={t} search={search} onGraph={s => setModal({ type: 'stackGraph', stack: s })} />}
               {tab === 'logs'     && <LogsView     t={t} target={logTarget ?? containers.find(c => c.status === 'running')?.id} />}
               <StatusBar t={t} runtime={runtime} tab={tab} lastTickAt={lastTickAt} />
             </div>

@@ -433,6 +433,14 @@ pub fn stacks() -> Vec<Stack> {
         image: i.into(),
         state: st.into(),
         health: h.into(),
+        ..Service::default()
+    };
+    let svc_dep = |n: &str, i: &str, st: &str, h: &str, deps: &[&str]| Service {
+        name: n.into(),
+        image: i.into(),
+        state: st.into(),
+        health: h.into(),
+        depends_on: deps.iter().map(|s| s.to_string()).collect(),
     };
     vec![
         Stack {
@@ -440,11 +448,12 @@ pub fn stacks() -> Vec<Stack> {
             services: vec![
                 svc("pgvector", "pgvector/pgvector:pg16", "running", "healthy"),
                 svc("redis", "redis:7.2-alpine", "running", "healthy"),
-                svc(
+                svc_dep(
                     "inference",
                     "mlcommons/inference:llama2-70b",
                     "running",
                     "healthy",
+                    &["pgvector", "redis"],
                 ),
             ],
             restart: "always:3".into(),

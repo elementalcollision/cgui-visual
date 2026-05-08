@@ -452,7 +452,10 @@ export function NetworksView({ t, search, onInspect }: {
 
 const HEALTH_POLL_MS = 5000;
 
-export function StacksView({ t, search }: { t: ThemeTokens; search: string }) {
+export function StacksView({ t, search, onGraph }: {
+  t: ThemeTokens; search: string;
+  onGraph: (stack: Stack) => void;
+}) {
   const [items, setItems] = useState<Stack[]>([]);
   // Per-stack live overlays. Health: { stackName: { service: state } }.
   // Logs: latest up/down output per stack, displayed as a footer strip.
@@ -626,6 +629,11 @@ export function StacksView({ t, search }: { t: ThemeTokens; search: string }) {
                           onClick={() => exportStack(s.name)}
                           title="Export this stack as docker-compose.yml">
                     <Icon name="download" size={12} color={t.fg2} />Export
+                  </button>
+                  <button style={pillBtn(t)}
+                          onClick={() => onGraph(s)}
+                          title="Visualise service dependencies">
+                    <Icon name="layers" size={12} color={t.fg2} />Graph
                   </button>
                 </div>
               </div>
