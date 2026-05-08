@@ -1162,14 +1162,29 @@ export function RunImageModal({ t, image, onLaunched, onClose }: {
 
   const submit = () => {
     setBusy(true);
-    api.runImage({
-      image,
-      name: name.trim() || undefined,
-      ports: ports.split('\n').map(l => l.trim()).filter(Boolean),
-      env: env.split('\n').map(l => l.trim()).filter(Boolean),
-      command: command.trim() || undefined,
-    }).then(id => { onLaunched(id); onClose(); })
-      .catch(() => { setBusy(false); /* toast via withToast wrapper at call-site */ });
+    // `withToast` surfaces backend errors (image-pull failure, port
+    // already in use, container_system not running, etc.) — previously
+    // these were silently swallowed and the user just saw the modal
+    // dim and recover with no feedback.
+    withToast(
+      `run ${image}`,
+      api.runImage({
+        image,
+        name: name.trim() || undefined,
+        ports: ports.split('\n').map(l => l.trim()).filter(Boolean),
+        env: env.split('\n').map(l => l.trim()).filter(Boolean),
+        command: command.trim() || undefined,
+      }),
+    )
+      .then(id => {
+        onLaunched(id);
+        onClose();
+      })
+      .catch(() => {
+        // Error already toasted by withToast. Drop the busy flag so
+        // the user can edit the form and retry without re-opening.
+        setBusy(false);
+      });
   };
 
   const inputStyle = {

@@ -113,6 +113,14 @@ pub struct StatRow {
 
 const RUN_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// Timeout for `container run` invocations. Even with `-d` (detach),
+/// Apple's `container` may need to pull a missing image and stand up
+/// the lightweight VM, which is comfortably out of the 8 s envelope
+/// the rest of `run` uses for fast inspect-style queries. 3 minutes
+/// is generous enough for a first-pull of a small base image like
+/// alpine on a slow connection.
+const RUN_LONG_TIMEOUT: Duration = Duration::from_secs(180);
+
 fn bin() -> String {
     slot().read().unwrap().clone()
 }
@@ -148,15 +156,22 @@ pub async fn probe_bin(name: &str) -> bool {
 }
 
 async fn run(args: &[&str]) -> Result<Vec<u8>> {
+    run_with_timeout(args, RUN_TIMEOUT).await
+}
+
+/// Variant of `run` with a caller-chosen timeout for operations that
+/// are inherently slower than fast inspect / list queries (image pull,
+/// `container run`, etc.). Same error envelope as `run`.
+async fn run_with_timeout(args: &[&str], timeout: Duration) -> Result<Vec<u8>> {
     let fut = Command::new(bin()).args(args).output();
-    let out = tokio::time::timeout(RUN_TIMEOUT, fut)
+    let out = tokio::time::timeout(timeout, fut)
         .await
         .map_err(|_| {
             anyhow!(
                 "`{} {}` timed out after {}s",
                 bin(),
                 args.join(" "),
-                RUN_TIMEOUT.as_secs()
+                timeout.as_secs()
             )
         })?
         .with_context(|| format!("failed to spawn `{} {}`", bin(), args.join(" ")))?;
@@ -674,7 +689,10 @@ pub async fn run_image(args: RunArgs) -> Result<String> {
         }
     }
     let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
-    let bytes = run(&argv_ref).await?;
+    // First-run image pulls + VM provisioning blow past the default
+    // inspect-sized timeout; use the long envelope so the modal isn't
+    // killed out from under the user mid-pull.
+    let bytes = run_with_timeout(&argv_ref, RUN_LONG_TIMEOUT).await?;
     Ok(String::from_utf8_lossy(&bytes).trim().to_string())
 }
 
