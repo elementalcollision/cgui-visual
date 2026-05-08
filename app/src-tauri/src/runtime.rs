@@ -27,6 +27,60 @@ pub fn set_bin(name: &str) {
     *slot().write().unwrap() = name.to_string();
 }
 
+/// Prepend the standard macOS install locations to our process's PATH
+/// so spawned children can resolve `container` / `docker` / `podman` /
+/// `trivy` regardless of how the app was launched.
+///
+/// **Why this is needed:** when a Tauri app is launched from Finder,
+/// Spotlight, the Dock, or Launch Services, child processes inherit
+/// the launchd PATH (`/usr/bin:/bin:/usr/sbin:/sbin`) — *not* the
+/// user's interactive shell PATH. Apple's `container` installer drops
+/// the binary at `/usr/local/bin/container`, and Homebrew on Apple
+/// Silicon installs to `/opt/homebrew/bin`; both of those are absent
+/// from the inherited PATH, so `Command::new("container")` fails with
+/// "No such file or directory" even though `which container` works
+/// fine in Terminal.
+///
+/// We deduplicate against existing PATH entries so this is idempotent
+/// and safe to call from `setup()`. Called once at boot from lib.rs.
+pub fn ensure_user_path() {
+    let current = std::env::var("PATH").unwrap_or_default();
+    if let Some(patched) = patch_path(&current, COMMON_BIN_DIRS) {
+        // Safe: this runs single-threaded during `setup()`, before any
+        // tokio worker spawns or pty thread launches.
+        std::env::set_var("PATH", patched);
+    }
+}
+
+const COMMON_BIN_DIRS: &[&str] = &[
+    "/usr/local/bin",
+    "/usr/local/sbin",
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+];
+
+/// Pure helper for `ensure_user_path` so it can be unit-tested without
+/// touching process-global env state. Returns the new PATH when at
+/// least one entry needs prepending; returns None when every needed
+/// dir is already present (so the caller can skip the env mutation).
+fn patch_path(current: &str, needed: &[&str]) -> Option<String> {
+    let existing: std::collections::HashSet<&str> =
+        current.split(':').filter(|s| !s.is_empty()).collect();
+    let prepend: Vec<&str> = needed
+        .iter()
+        .copied()
+        .filter(|p| !existing.contains(p))
+        .collect();
+    if prepend.is_empty() {
+        return None;
+    }
+    Some(if current.is_empty() {
+        prepend.join(":")
+    } else {
+        format!("{}:{}", prepend.join(":"), current)
+    })
+}
+
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
 pub struct StatRow {
@@ -728,6 +782,38 @@ where
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn patch_path_prepends_missing_dirs() {
+        let bare = "/usr/bin:/bin"; // launchd default minus a couple
+        let patched = patch_path(bare, &["/usr/local/bin", "/opt/homebrew/bin"]).unwrap();
+        // Both prepended in declaration order, original PATH preserved at the tail.
+        assert_eq!(patched, "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin");
+    }
+
+    #[test]
+    fn patch_path_skips_already_present_dirs() {
+        let already = "/opt/homebrew/bin:/usr/local/bin:/usr/bin";
+        // Both needed dirs are already there — no change required.
+        assert_eq!(
+            patch_path(already, &["/usr/local/bin", "/opt/homebrew/bin"]),
+            None,
+        );
+    }
+
+    #[test]
+    fn patch_path_partial_overlap() {
+        // Only /usr/local/bin is missing; /opt/homebrew/bin already present.
+        let mixed = "/opt/homebrew/bin:/usr/bin";
+        let patched = patch_path(mixed, &["/usr/local/bin", "/opt/homebrew/bin"]).unwrap();
+        assert_eq!(patched, "/usr/local/bin:/opt/homebrew/bin:/usr/bin");
+    }
+
+    #[test]
+    fn patch_path_handles_empty_current() {
+        let patched = patch_path("", &["/usr/local/bin"]).unwrap();
+        assert_eq!(patched, "/usr/local/bin");
+    }
 
     #[test]
     fn parse_size_to_gib_handles_units() {

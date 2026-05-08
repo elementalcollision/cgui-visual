@@ -132,6 +132,13 @@ pub fn run() {
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .manage(Arc::new(state::History::new()))
         .setup(|app| {
+            // Patch PATH first so every subsequent runtime probe / child
+            // spawn (container, docker, podman, trivy) can find binaries
+            // installed at /usr/local/bin or /opt/homebrew/bin even when
+            // the app was launched from Finder / Spotlight / Dock with
+            // the bare launchd PATH.
+            runtime::ensure_user_path();
+
             // Load prefs once: seed runtime + register optional global hotkey.
             let initial_prefs = prefs::Prefs::load();
             runtime::set_bin(&initial_prefs.runtime);
