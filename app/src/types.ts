@@ -105,6 +105,8 @@ export interface Update {
   latest: string;
   published: string;
   notes: string;
+  /** GitHub release page for the new version. May be empty on legacy payloads. */
+  url?: string;
 }
 
 export type DoctorFix =

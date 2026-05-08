@@ -753,14 +753,33 @@ export function UpdateModal({ t, onClose }: { t: ThemeTokens; onClose: () => voi
   useEffect(() => { api.listUpdates().then(setItems); }, []);
   if (!items.length) return null;
   const u = items[idx];
+
+  // Open the companion's GitHub release page through the opener plugin
+  // when available, falling back to window.open in browser-dev mode.
+  const openRelease = async () => {
+    if (!u.url) return;
+    try {
+      const { openUrl } = await import('@tauri-apps/plugin-opener');
+      await openUrl(u.url);
+    } catch {
+      window.open(u.url, '_blank', 'noopener,noreferrer');
+    }
+  };
+
   return (
     <Backdrop onClose={onClose}>
       <div style={{ width: 640, maxHeight: '85vh', background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         <div style={{ padding: '16px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 12 }}>
           <Icon name="download" size={18} color={t.warning} />
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 15, fontWeight: 600, color: t.fg1 }}>Update available</div>
-            <div style={{ fontSize: 12, color: t.fg3, fontFamily: t.mono }}>{u.component} {u.installed} → {u.latest} · {u.published}</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            {/* Header now leads with the companion name so users don't
+                read this as a cgui-visual self-update prompt. */}
+            <div style={{ fontSize: 15, fontWeight: 600, color: t.fg1 }}>
+              {u.component} update available
+            </div>
+            <div style={{ fontSize: 12, color: t.fg3, fontFamily: t.mono, marginTop: 2 }}>
+              {u.installed} → {u.latest} · {u.published}
+            </div>
           </div>
           <div style={{ display: 'flex', gap: 4 }}>
             {items.map((_, i) => (
@@ -772,75 +791,28 @@ export function UpdateModal({ t, onClose }: { t: ThemeTokens; onClose: () => voi
         <div style={{ flex: 1, overflow: 'auto', padding: '16px 22px', maxHeight: 360 }}>
           <pre style={{ margin: 0, fontFamily: t.mono, fontSize: 12, lineHeight: 1.6, color: t.fg2, whiteSpace: 'pre-wrap' }}>{u.notes}</pre>
         </div>
-        <UpdateActions t={t} onClose={onClose} />
+        <div style={{ padding: '12px 22px', borderTop: `1px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 8, background: t.surfaceAlt }}>
+          {/* Disambiguation footnote: cgui-visual self-updates via a
+              different surface (the in-app updater banner). */}
+          <span style={{ fontSize: 11, color: t.fg3, fontFamily: t.mono }}>
+            cgui-visual updates separately via the in-app updater.
+          </span>
+          <div style={{ flex: 1 }} />
+          <button style={{ ...pillBtn(t), padding: '6px 14px' }} onClick={onClose}>Dismiss</button>
+          <button
+            onClick={openRelease}
+            disabled={!u.url}
+            style={{
+              padding: '6px 14px',
+              background: t.fg1, color: t.bg, border: 'none', borderRadius: 6,
+              fontSize: 12, fontWeight: 500,
+              cursor: u.url ? 'pointer' : 'default',
+              opacity: u.url ? 1 : 0.5,
+            }}
+          >View release ↗</button>
+        </div>
       </div>
     </Backdrop>
-  );
-}
-
-// Self-update flow via tauri-plugin-updater. The check() call hits the
-// configured manifest endpoint; if a newer signed release exists, the
-// download → install → relaunch sequence is triggered. If the endpoint
-// isn't reachable (no manifest hosted yet, offline, etc.) we surface the
-// error in-modal rather than via a toast — the user is here specifically
-// for this action.
-function UpdateActions({ t, onClose }: { t: ThemeTokens; onClose: () => void }) {
-  const [phase, setPhase] = useState<'idle' | 'checking' | 'downloading' | 'ready' | 'error' | 'none'>('idle');
-  const [progress, setProgress] = useState<{ downloaded: number; total: number } | null>(null);
-  const [errMsg, setErrMsg] = useState<string>('');
-  const inTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-
-  const install = async () => {
-    if (!inTauri) {
-      setPhase('error');
-      setErrMsg('not running in Tauri (browser-dev mode)');
-      return;
-    }
-    setPhase('checking');
-    try {
-      const { check } = await import('@tauri-apps/plugin-updater');
-      const { relaunch } = await import('@tauri-apps/plugin-process');
-      const update = await check();
-      if (!update) { setPhase('none'); return; }
-      setPhase('downloading');
-      let downloaded = 0;
-      let total = 0;
-      await update.downloadAndInstall(event => {
-        if (event.event === 'Started') { total = event.data.contentLength ?? 0; }
-        else if (event.event === 'Progress') {
-          downloaded += event.data.chunkLength;
-          setProgress({ downloaded, total });
-        }
-        else if (event.event === 'Finished') { setPhase('ready'); }
-      });
-      // The relaunch typically happens before this resolves on macOS.
-      await relaunch();
-    } catch (e: any) {
-      setPhase('error');
-      setErrMsg(typeof e === 'string' ? e : (e?.message ?? String(e)));
-    }
-  };
-
-  const status = phase === 'idle' ? null
-    : phase === 'checking'    ? 'Checking for updates…'
-    : phase === 'downloading' ? `Downloading ${progress ? Math.round(progress.downloaded / 1024) + ' KiB' : ''}${progress?.total ? ' / ' + Math.round(progress.total / 1024) + ' KiB' : ''}`
-    : phase === 'ready'       ? 'Installed — relaunching…'
-    : phase === 'none'        ? 'Already on the latest version.'
-    : `Error: ${errMsg}`;
-
-  return (
-    <div style={{ padding: '12px 22px', borderTop: `1px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 8, background: t.surfaceAlt }}>
-      {status && (
-        <span style={{ fontSize: 11, color: phase === 'error' ? t.danger : t.fg3, fontFamily: t.mono }}>{status}</span>
-      )}
-      <div style={{ flex: 1 }} />
-      <button style={{ ...pillBtn(t), padding: '6px 14px' }} onClick={onClose}>Later</button>
-      <button onClick={install}
-              disabled={phase === 'checking' || phase === 'downloading'}
-              style={{ padding: '6px 14px', background: t.fg1, color: t.bg, border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: phase === 'idle' || phase === 'error' || phase === 'none' ? 'pointer' : 'wait', opacity: phase === 'checking' || phase === 'downloading' ? 0.6 : 1 }}>
-        {phase === 'downloading' ? 'Installing…' : phase === 'ready' ? 'Done' : 'Install'}
-      </button>
-    </div>
   );
 }
 

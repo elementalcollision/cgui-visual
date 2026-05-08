@@ -24,64 +24,78 @@ struct GhRelease {
 }
 
 struct Component {
+    /// Display label shown in the UpdateModal. Phrased so users don't
+    /// confuse a *companion-component* update with a cgui-visual
+    /// self-update — the latter goes through tauri-plugin-updater
+    /// + the latest.json manifest, not this code path.
     label: &'static str,
     repo: &'static str,
-    installed_version_cmd: Option<(&'static str, &'static [&'static str])>,
-    fallback_installed: &'static str,
+    /// Local probe used to detect the installed version. The first
+    /// member is the binary to spawn; the second is the argv tail.
+    /// Components whose probe doesn't return a parseable version are
+    /// skipped entirely — surfacing `? → X` made users think the GUI
+    /// itself was out of date.
+    installed_version_cmd: (&'static str, &'static [&'static str]),
 }
 
 const COMPONENTS: &[Component] = &[
     Component {
-        label: "container",
+        label: "Apple container CLI",
         repo: "apple/container",
-        installed_version_cmd: Some(("container", &["--version"])),
-        fallback_installed: "?",
+        installed_version_cmd: ("container", &["--version"]),
     },
     Component {
-        label: "cgui",
+        label: "cgui TUI (companion)",
         repo: "elementalcollision/cgui",
-        installed_version_cmd: Some(("cgui", &["--version"])),
-        fallback_installed: "?",
+        installed_version_cmd: ("cgui", &["--version"]),
     },
 ];
 
 pub async fn check() -> Vec<Update> {
     let mut out = Vec::new();
     for c in COMPONENTS {
-        let installed = installed_version(c).await;
+        // Skip silently when the companion isn't installed locally.
+        // The in-app self-updater handles cgui-visual's own updates
+        // separately; this list is purely for companions on the host.
+        let Some(installed) = installed_version(c).await else {
+            continue;
+        };
         let Some(release) = fetch_release(c.repo).await else {
             continue;
         };
         let latest = strip_v_prefix(&release.tag_name);
-        if installed != "?" && installed == latest {
+        if installed == latest {
             continue;
         } // up to date
         out.push(Update {
             component: c.label.to_string(),
             installed,
-            latest,
+            latest: latest.clone(),
             published: release.published_at,
             notes: trim_body(&release.body),
+            // Deep-link to the specific tag, not just /releases, so the
+            // user lands on the notes for the version we're advertising.
+            url: format!("https://github.com/{}/releases/tag/v{latest}", c.repo),
         });
     }
     out
 }
 
-async fn installed_version(c: &Component) -> String {
-    let Some((bin, args)) = c.installed_version_cmd else {
-        return c.fallback_installed.into();
-    };
-    let Ok(out) = Command::new(bin).args(args).output().await else {
-        return c.fallback_installed.into();
-    };
+/// Resolve the installed version of a component, or None when the
+/// probe doesn't return something parseable as a version. Distinct
+/// failure modes (binary missing, non-zero exit, garbled output) all
+/// collapse into None — callers don't need to distinguish.
+async fn installed_version(c: &Component) -> Option<String> {
+    let (bin, args) = c.installed_version_cmd;
+    let out = Command::new(bin).args(args).output().await.ok()?;
     if !out.status.success() {
-        return c.fallback_installed.into();
+        return None;
     }
     let s = String::from_utf8_lossy(&out.stdout);
-    // Pull the first version-looking token out of the line. `--version` output
-    // varies: "container CLI version 0.12.3 (build: release, ...)" or just
-    // "0.13.0", etc.
-    extract_version(&s).unwrap_or_else(|| c.fallback_installed.into())
+    // Pull the first version-looking token out of the line. `--version`
+    // output varies: "container CLI version 0.12.3 (build: release, ...)"
+    // or just "0.13.0", etc.
+    extract_version(&s)
 }
 
 fn extract_version(s: &str) -> Option<String> {
