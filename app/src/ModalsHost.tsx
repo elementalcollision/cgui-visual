@@ -34,7 +34,6 @@ export default function ModalsHost(props: {
   t: ThemeTokens;
   runtime: Runtime;
   setRuntime: (r: Runtime) => void;
-  pullReference: string;
   onClose: () => void;
   onUpdateClosed: () => void;
   onOnboardingResolved: () => void;
@@ -56,7 +55,7 @@ export default function ModalsHost(props: {
   setLogTarget: (id: string | undefined) => void;
 }) {
   const {
-    modal, t, runtime, setRuntime, pullReference, onClose, onUpdateClosed, onOnboardingResolved,
+    modal, t, runtime, setRuntime, onClose, onUpdateClosed, onOnboardingResolved,
     menubarMode, setMenubarMode, globalHotkey, setGlobalHotkey, notifyOnExit, setNotifyOnExit,
     dark, setDark, containers, images, stacks, setTab, setModal, setLogTarget,
   } = props;
@@ -71,7 +70,7 @@ export default function ModalsHost(props: {
         onExec={c => setModal({ type: 'terminal', container: c })}
       />;
     case 'pull':
-      return <PullModal t={t} reference={pullReference} onClose={onClose} />;
+      return <PullModal t={t} onClose={onClose} />;
     case 'trivy':
       return <TrivyModal t={t} image={modal.image} onClose={onClose} />;
     case 'update':

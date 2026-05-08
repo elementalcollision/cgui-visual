@@ -24,7 +24,6 @@ export default function App() {
   const [selected, setSelected] = useState<string>('');
   const [modal, setModal] = useState<Modal>(null);
   const [showUpdateBadge, setShowUpdateBadge] = useState(true);
-  const [pullReference] = useState('mlcommons/inference:llama2-70b');
   const [logTarget, setLogTarget] = useState<string | undefined>(undefined);
   const [menubarMode, setMenubarMode] = useState(false);
   const [globalHotkey, setGlobalHotkey] = useState('');
@@ -259,7 +258,6 @@ export default function App() {
               t={t}
               runtime={runtime}
               setRuntime={setRuntime}
-              pullReference={pullReference}
               onClose={() => {
                 if (modal.type === 'onboarding') setOnboardingDismissed(true);
                 setModal(null);

@@ -36,11 +36,17 @@ describe('App integration', () => {
     expect(screen.queryByText('cgui doctor')).not.toBeInTheDocument();
   });
 
-  it('Pull image button opens the pull modal', async () => {
+  it('Pull image button opens the pull modal in idle state', async () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByText('mlperf-inference-llama2');
     await user.click(screen.getByRole('button', { name: /Pull image/ }));
-    expect(await screen.findByText(/Pulling image|Pulled|Pull failed/)).toBeInTheDocument();
+    // Modal opens idle now (no auto-pull on mount). The header reads
+    // "Pull image" and an input field is present for the user to type
+    // the reference. Pull doesn't fire until the Pull button is clicked.
+    expect(await screen.findByPlaceholderText(/alpine:latest/)).toBeInTheDocument();
+    // Pull button is present but disabled while the input is empty.
+    const pullBtn = screen.getByRole('button', { name: /^Pull$/ });
+    expect(pullBtn).toBeDisabled();
   });
 });
