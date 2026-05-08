@@ -216,6 +216,19 @@ export default function App() {
         ::-webkit-scrollbar-thumb { background: ${t.border}; border-radius: 999px; }
         ::-webkit-scrollbar-thumb:hover { background: ${t.borderStrong}; }
         input::placeholder { color: ${t.fg3}; }
+
+        /* Focus ring. WKWebView's default outline draws a hard rectangle
+           that ignores border-radius, so tabbing through the sidebar
+           shows a sharp box around rounded buttons — looks like the
+           ring "tears away" from the row. Replace with a box-shadow
+           ring that automatically follows the element's border-radius
+           on every browser engine. :focus-visible scopes it to keyboard
+           navigation so mouse clicks don't leave a lingering halo. */
+        :focus { outline: none; }
+        :focus-visible {
+          outline: none;
+          box-shadow: 0 0 0 2px ${t.accent};
+        }
       `}</style>
 
       <div style={{ width: '100%', height: '100%', maxWidth: 1480, maxHeight: 920, position: 'relative' }}>
