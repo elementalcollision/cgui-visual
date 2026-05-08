@@ -76,6 +76,24 @@ fn open_with_schema(path: &std::path::Path) -> Result<Connection> {
             PRIMARY KEY (id, ts)
         );
         CREATE INDEX IF NOT EXISTS idx_history_ts ON container_history (ts);
+
+        -- Image vulnerability scan log (B7). Each row is the summary of a
+        -- single trivy run; per-finding CVE detail lives in trivy_findings.
+        -- We keep the JSON of cve ids so "new CVEs since last scan" is
+        -- a cheap set-diff without a join.
+        CREATE TABLE IF NOT EXISTS trivy_scans (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            image       TEXT    NOT NULL,
+            scanned_at  INTEGER NOT NULL,
+            critical    INTEGER NOT NULL DEFAULT 0,
+            high        INTEGER NOT NULL DEFAULT 0,
+            medium      INTEGER NOT NULL DEFAULT 0,
+            low         INTEGER NOT NULL DEFAULT 0,
+            total       INTEGER NOT NULL DEFAULT 0,
+            cve_ids     TEXT    NOT NULL DEFAULT '[]'
+        );
+        CREATE INDEX IF NOT EXISTS idx_trivy_scans_image
+            ON trivy_scans (image, scanned_at);
         "#,
     )
     .context("init schema")?;
@@ -149,6 +167,138 @@ pub struct HistoryPoint {
     pub net_bps: f64,
     pub disk_bps: f64,
     pub status: String,
+}
+
+// ─── Trivy scan history (B7) ──────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanPoint {
+    pub scanned_at: i64,
+    pub critical: u32,
+    pub high: u32,
+    pub medium: u32,
+    pub low: u32,
+    pub total: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VulnHistory {
+    /// Most-recent-first list of summary points for the trend strip.
+    pub points: Vec<ScanPoint>,
+    /// CVE ids that appeared in the latest scan but not the previous
+    /// one. Empty when there's only one scan (or none) on record.
+    pub new_since_last: Vec<String>,
+}
+
+/// Persist the result of a single trivy scan. Best-effort — silently
+/// no-ops when the DB isn't initialised. Per-severity counts are derived
+/// from the finding list; we also store the set of CVE ids so the next
+/// "new CVEs since last scan" diff doesn't require re-running trivy.
+pub fn record_scan(image: &str, findings: &[crate::model::TrivyFinding]) {
+    let Some(db) = DB.get() else { return };
+    let scanned_at = Utc::now().timestamp();
+    let mut critical = 0u32;
+    let mut high = 0u32;
+    let mut medium = 0u32;
+    let mut low = 0u32;
+    let mut ids = Vec::with_capacity(findings.len());
+    for f in findings {
+        match f.sev.as_str() {
+            "CRITICAL" => critical += 1,
+            "HIGH" => high += 1,
+            "MEDIUM" => medium += 1,
+            _ => low += 1,
+        }
+        ids.push(f.cve.clone());
+    }
+    let total = findings.len() as u32;
+    let cve_ids = serde_json::to_string(&ids).unwrap_or_else(|_| "[]".into());
+    if let Ok(conn) = db.lock() {
+        let res = conn.execute(
+            "INSERT INTO trivy_scans
+             (image, scanned_at, critical, high, medium, low, total, cve_ids)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            params![image, scanned_at, critical, high, medium, low, total, cve_ids],
+        );
+        if let Err(e) = res {
+            eprintln!("trivy_scans record: {e}");
+        }
+    }
+}
+
+/// Load scan history for one image plus the new-CVEs diff vs the
+/// previous scan. Empty when no scans are recorded for `image` yet.
+pub fn load_scans(image: &str, limit: i64) -> VulnHistory {
+    let Some(db) = DB.get() else {
+        return VulnHistory {
+            points: vec![],
+            new_since_last: vec![],
+        };
+    };
+    let conn = match db.lock() {
+        Ok(c) => c,
+        Err(_) => {
+            return VulnHistory {
+                points: vec![],
+                new_since_last: vec![],
+            };
+        }
+    };
+
+    let mut stmt = match conn.prepare(
+        "SELECT scanned_at, critical, high, medium, low, total, cve_ids
+         FROM trivy_scans
+         WHERE image = ?
+         ORDER BY scanned_at DESC
+         LIMIT ?",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("trivy_scans prepare: {e}");
+            return VulnHistory {
+                points: vec![],
+                new_since_last: vec![],
+            };
+        }
+    };
+    let rows: Vec<(ScanPoint, String)> = stmt
+        .query_map(params![image, limit.max(2)], |row| {
+            Ok((
+                ScanPoint {
+                    scanned_at: row.get(0)?,
+                    critical: row.get(1)?,
+                    high: row.get(2)?,
+                    medium: row.get(3)?,
+                    low: row.get(4)?,
+                    total: row.get(5)?,
+                },
+                row.get(6)?,
+            ))
+        })
+        .map(|it| it.flatten().collect())
+        .unwrap_or_default();
+
+    // Compute the new-CVEs diff: CVEs in the latest scan that weren't
+    // in the prior one. Keeps the diff scoped to consecutive scans
+    // (regression detection) rather than against the all-time set.
+    let mut new_since_last = Vec::new();
+    if rows.len() >= 2 {
+        let latest: Vec<String> = serde_json::from_str(&rows[0].1).unwrap_or_default();
+        let prior: Vec<String> = serde_json::from_str(&rows[1].1).unwrap_or_default();
+        let prior_set: std::collections::HashSet<&String> = prior.iter().collect();
+        for cve in latest {
+            if !prior_set.contains(&cve) {
+                new_since_last.push(cve);
+            }
+        }
+    }
+
+    VulnHistory {
+        points: rows.into_iter().map(|(p, _)| p).collect(),
+        new_since_last,
+    }
 }
 
 /// Return points for a container within the last `since_secs`. Ordered
@@ -281,6 +431,65 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM container_history", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn trivy_scan_diff_finds_new_cves() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE trivy_scans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                image TEXT NOT NULL,
+                scanned_at INTEGER NOT NULL,
+                critical INTEGER NOT NULL DEFAULT 0,
+                high INTEGER NOT NULL DEFAULT 0,
+                medium INTEGER NOT NULL DEFAULT 0,
+                low INTEGER NOT NULL DEFAULT 0,
+                total INTEGER NOT NULL DEFAULT 0,
+                cve_ids TEXT NOT NULL DEFAULT '[]'
+            );
+            "#,
+        )
+        .unwrap();
+
+        // Two scans for the same image, second introduces CVE-NEW-1.
+        let prior = r#"["CVE-A","CVE-B"]"#;
+        let latest = r#"["CVE-A","CVE-B","CVE-NEW-1"]"#;
+        conn.execute(
+            "INSERT INTO trivy_scans
+             (image, scanned_at, critical, high, medium, low, total, cve_ids)
+             VALUES ('alpine:3', 1000, 0, 1, 1, 0, 2, ?)",
+            params![prior],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO trivy_scans
+             (image, scanned_at, critical, high, medium, low, total, cve_ids)
+             VALUES ('alpine:3', 2000, 1, 1, 1, 0, 3, ?)",
+            params![latest],
+        )
+        .unwrap();
+
+        // Mimic the diff logic from load_scans.
+        let mut stmt = conn
+            .prepare(
+                "SELECT cve_ids FROM trivy_scans WHERE image = 'alpine:3'
+                 ORDER BY scanned_at DESC LIMIT 2",
+            )
+            .unwrap();
+        let rows: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(rows.len(), 2);
+        let latest: Vec<String> = serde_json::from_str(&rows[0]).unwrap();
+        let prior: Vec<String> = serde_json::from_str(&rows[1]).unwrap();
+        let prior_set: std::collections::HashSet<&String> = prior.iter().collect();
+        let new_cves: Vec<&String> = latest.iter().filter(|c| !prior_set.contains(c)).collect();
+        assert_eq!(new_cves.len(), 1);
+        assert_eq!(new_cves[0], "CVE-NEW-1");
     }
 
     #[test]

@@ -109,6 +109,22 @@ export type DoctorFix =
   | { kind: 'url'; label: string; url: string }
   | { kind: 'copy'; label: string; command: string };
 
+export interface ScanPoint {
+  scannedAt: number;
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  total: number;
+}
+
+export interface VulnHistory {
+  /** Most-recent-first list of summary points. */
+  points: ScanPoint[];
+  /** CVE ids that appeared in the latest scan but not the previous one. */
+  newSinceLast: string[];
+}
+
 export interface HistoryPoint {
   /** Unix-epoch seconds of the sample. */
   ts: number;

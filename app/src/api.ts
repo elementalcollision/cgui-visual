@@ -5,7 +5,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   Container, Image, Volume, Network, Stack,
-  TrivyResult, Update, DoctorCheck, HistoryPoint,
+  TrivyResult, Update, DoctorCheck, HistoryPoint, VulnHistory,
 } from './types';
 import * as fixtures from './fixtures';
 
@@ -111,6 +111,11 @@ export const api = {
   // sidecar DB hasn't recorded any rows for this id yet.
   containerHistory: (id: string, sinceSecs: number) =>
     call<HistoryPoint[]>('container_history', [], { id, sinceSecs }),
+
+  // Per-image trivy scan history (B7). `limit` caps the number of
+  // points returned; defaults to 60 backend-side (~last 60 scans).
+  vulnHistory: (image: string, limit?: number) =>
+    call<VulnHistory>('vuln_history', { points: [], newSinceLast: [] }, { image, limit }),
 
   // Embedded terminal (B5). Open returns a session id used to address
   // subsequent write/resize/close calls. The frontend subscribes to
