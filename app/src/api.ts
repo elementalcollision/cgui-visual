@@ -100,6 +100,25 @@ export const api = {
     inTauri ? invokeStrict<string>('export_compose', { name }) :
               Promise.resolve(`name: ${name}\nservices: {}\n`),
 
+  // Stack snapshot / restore (B11). Snapshot returns the JSON envelope
+  // string the frontend then saves via blob download. Restore takes
+  // the JSON content (read from a user-picked file) and writes the
+  // contained TOML to ~/.config/cgui/stacks/<name>.toml.
+  snapshotStack: (name: string, note?: string) =>
+    inTauri ? invokeStrict<string>('snapshot_stack', { name, note }) :
+              Promise.resolve(JSON.stringify({
+                kind: 'cgui-snapshot', version: 1,
+                createdAt: new Date().toISOString(),
+                cguiVersion: '0.0.0-dev',
+                stack: { name, toml: `name = "${name}"\n` },
+              }, null, 2)),
+  restoreStack: (json: string, overwrite = false) =>
+    inTauri ? invokeStrict<string>('restore_stack', { json, overwrite }) :
+              Promise.resolve('(dev-mode no-op)'),
+  restoreStackFromPath: (path: string, overwrite = false) =>
+    inTauri ? invokeStrict<string>('restore_stack_from_path', { path, overwrite }) :
+              Promise.resolve('(dev-mode no-op)'),
+
   // Per-runtime availability probe (B8). Outside Tauri we report all
   // three as available so the Settings UI exercises every state.
   probeRuntime: (name: string) =>

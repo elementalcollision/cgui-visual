@@ -508,6 +508,68 @@ export function StacksView({ t, search, onGraph }: {
     return t.fg3;
   };
 
+  // Snapshot a stack's TOML to a downloadable JSON envelope (B11).
+  // Volume *data* is intentionally out of scope — see snapshot.rs.
+  const snapshotStack = async (name: string) => {
+    try {
+      const json = await api.snapshotStack(name);
+      const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const safe = name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const ts = new Date().toISOString().replace(/[:T]/g, '-').replace(/\..+/, '');
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${safe}.${ts}.cgui-snapshot.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      withToast(`Snapshot ${name} saved`, Promise.resolve()).catch(() => {});
+    } catch (err: any) {
+      withToast(`snapshot ${name}`, Promise.reject(err)).catch(() => {});
+    }
+  };
+
+  // Restore a snapshot by picking a .cgui-snapshot.json file. The
+  // backend reads + parses; we just route the picked path through.
+  // Mirrors the import_compose flow.
+  const restoreSnapshot = async () => {
+    let path: string | null = null;
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const picked = await open({
+        title: 'Restore a cgui snapshot',
+        multiple: false,
+        directory: false,
+        filters: [{ name: 'cgui snapshot', extensions: ['json'] }],
+      });
+      path = typeof picked === 'string' ? picked : null;
+    } catch {
+      path = window.prompt('Path to .cgui-snapshot.json');
+    }
+    if (!path) return;
+    try {
+      const dest = await api.restoreStackFromPath(path, false);
+      withToast(`Restored to ${dest}`, Promise.resolve()).catch(() => {});
+      await reload();
+    } catch (err: any) {
+      const msg = String(err?.message ?? err);
+      if (msg.includes('already exists')) {
+        if (confirm(`${msg}\n\nOverwrite?`)) {
+          try {
+            const dest = await api.restoreStackFromPath(path, true);
+            withToast(`Restored to ${dest}`, Promise.resolve()).catch(() => {});
+            await reload();
+          } catch (e2: any) {
+            withToast(`restore`, Promise.reject(e2)).catch(() => {});
+          }
+        }
+      } else {
+        withToast(`restore`, Promise.reject(err)).catch(() => {});
+      }
+    }
+  };
+
   // Render a stack as docker-compose.yml and trigger a download. Uses
   // the same blob-URL pattern as the logs export — works in both Tauri
   // and browser-dev mode.
@@ -578,6 +640,10 @@ export function StacksView({ t, search, onGraph }: {
           {items.length} stack{items.length === 1 ? '' : 's'}
         </span>
         <div style={{ flex: 1 }} />
+        <button onClick={restoreSnapshot} style={pillBtn(t)}
+                title="Restore a stack from a .cgui-snapshot.json file">
+          <Icon name="download" size={12} color={t.fg2} />Restore snapshot
+        </button>
         <button onClick={importCompose} style={pillBtn(t, t.accent)}>
           <Icon name="download" size={12} color={t.accent} />Import compose
         </button>
@@ -634,6 +700,11 @@ export function StacksView({ t, search, onGraph }: {
                           onClick={() => onGraph(s)}
                           title="Visualise service dependencies">
                     <Icon name="layers" size={12} color={t.fg2} />Graph
+                  </button>
+                  <button style={pillBtn(t)}
+                          onClick={() => snapshotStack(s.name)}
+                          title="Save this stack's TOML as a portable snapshot (volume data not included)">
+                    <Icon name="download" size={12} color={t.fg2} />Snapshot
                   </button>
                 </div>
               </div>
