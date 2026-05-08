@@ -163,7 +163,10 @@ export function Sidebar({ tab, setTab, collapsed, t, onSettings, onDoctor, runni
         <div style={{ padding: '4px 8px 12px', display: 'flex', alignItems: 'center', gap: 10 }}>
           <div style={{ width: 22, height: 22, borderRadius: 5, background: t.fg1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: t.bg, fontFamily: t.mono, fontSize: 11, fontWeight: 700 }}>C</div>
           <div style={{ fontSize: 14, fontWeight: 600, color: t.fg1 }}>cgui</div>
-          <div style={{ marginLeft: 'auto', fontSize: 10, color: t.fg3, fontFamily: t.mono }}>0.13.0</div>
+          {/* App version pulled from package.json at build time via the
+              Vite `define` (__APP_VERSION__). Matches the version on
+              the macOS About panel and on GitHub Releases. */}
+          <div style={{ marginLeft: 'auto', fontSize: 10, color: t.fg3, fontFamily: t.mono }}>{__APP_VERSION__}</div>
         </div>
       )}
       {!collapsed && <Eyebrow t={t}>Resources</Eyebrow>}
