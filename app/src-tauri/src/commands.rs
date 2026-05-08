@@ -348,14 +348,26 @@ pub async fn doctor() -> Vec<DoctorCheck> {
 
 #[tauri::command]
 pub async fn scan_image(image: String) -> TrivyResult {
-    crate::trivy::scan(&image).await.unwrap_or_else(|| {
+    let result = crate::trivy::scan(&image).await.unwrap_or_else(|| {
         // Either trivy isn't on PATH or the scan failed; surface fixtures so
         // the modal still has something to show. Doctor already flags the
         // missing binary.
         let mut fb = fixtures::trivy();
-        fb.image = image;
+        fb.image = image.clone();
         fb
-    })
+    });
+    // Persist a scan summary for the trend strip + new-CVEs diff (B7).
+    // Best-effort — record_scan no-ops if the DB isn't initialised.
+    crate::history::record_scan(&result.image, &result.findings);
+    result
+}
+
+// Trivy scan history for one image (B7). Returns the most-recent-first
+// list of scan summaries plus the CVEs that appeared in the latest scan
+// but not the previous one. Empty when no scans are recorded for image.
+#[tauri::command]
+pub fn vuln_history(image: String, limit: Option<i64>) -> crate::history::VulnHistory {
+    crate::history::load_scans(&image, limit.unwrap_or(60))
 }
 
 #[tauri::command]

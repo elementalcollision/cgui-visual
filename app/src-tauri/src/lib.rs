@@ -340,6 +340,7 @@ pub fn run() {
             commands::runtime_available,
             commands::probe_runtime,
             commands::container_history,
+            commands::vuln_history,
             commands::pty_open,
             commands::pty_write,
             commands::pty_resize,
