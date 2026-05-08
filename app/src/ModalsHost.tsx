@@ -3,7 +3,12 @@
 // pays the import cost on the first modal open, which is async-fine
 // (modals already do an `api.invoke()` before rendering content).
 
+import { lazy, Suspense } from 'react';
 import { api } from './api';
+
+// Lazy-load TerminalModal so xterm.js (~250 KB) isn't in the initial bundle.
+const TerminalModal = lazy(() => import('./Terminal'));
+
 import {
   DetailModal,
   PullModal,
@@ -58,7 +63,10 @@ export default function ModalsHost(props: {
     case 'onboarding':
       return <OnboardingModal t={t} onAvailable={onOnboardingResolved} onDismiss={onClose} />;
     case 'detail':
-      return <DetailModal item={modal.payload} t={t} onClose={onClose} />;
+      return <DetailModal
+        item={modal.payload} t={t} onClose={onClose}
+        onExec={c => setModal({ type: 'terminal', container: c })}
+      />;
     case 'pull':
       return <PullModal t={t} reference={pullReference} onClose={onClose} />;
     case 'trivy':
@@ -87,6 +95,12 @@ export default function ModalsHost(props: {
       return <RunImageModal t={t} image={modal.image}
                             onLaunched={(id) => toast(`launched ${id}`, 'info')}
                             onClose={onClose} />;
+    case 'terminal':
+      return (
+        <Suspense fallback={null}>
+          <TerminalModal container={modal.container} t={t} onClose={onClose} />
+        </Suspense>
+      );
     case 'commandPalette':
       return <CommandPaletteModal
         t={t}

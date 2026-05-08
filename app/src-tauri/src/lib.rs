@@ -4,6 +4,7 @@ mod doctor;
 mod fixtures;
 pub mod model;
 mod prefs;
+pub mod pty;
 pub mod runtime;
 pub mod stacks;
 pub mod state;
@@ -328,6 +329,10 @@ pub fn run() {
             commands::stack_health,
             commands::runtime_available,
             commands::probe_runtime,
+            commands::pty_open,
+            commands::pty_write,
+            commands::pty_resize,
+            commands::pty_close,
             commands::import_compose,
             commands::export_compose,
             hotkey_cmd::set_global_hotkey,

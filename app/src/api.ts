@@ -106,6 +106,37 @@ export const api = {
     inTauri ? invokeStrict<boolean>('probe_runtime', { name }) :
               Promise.resolve(true),
 
+  // Embedded terminal (B5). Open returns a session id used to address
+  // subsequent write/resize/close calls. The frontend subscribes to
+  // pty:tick:<id> events and feeds them straight into xterm.js.
+  ptyOpen: (id: string, cols: number, rows: number, shell?: string) =>
+    inTauri ? invokeStrict<string>('pty_open', { id, shell, cols, rows }) :
+              Promise.resolve('dev-mode-session'),
+  ptyWrite: (sessionId: string, data: string) =>
+    inTauri ? invokeStrict<void>('pty_write', { sessionId, data }) :
+              Promise.resolve(),
+  ptyResize: (sessionId: string, cols: number, rows: number) =>
+    inTauri ? invokeStrict<void>('pty_resize', { sessionId, cols, rows }) :
+              Promise.resolve(),
+  ptyClose: (sessionId: string) =>
+    inTauri ? invokeStrict<void>('pty_close', { sessionId }) :
+              Promise.resolve(),
+  // Subscribe to one specific pty session's tick events. Payloads are
+  // base64-encoded raw bytes (binary-safe).
+  onPtyTick: async (sessionId: string, cb: (b64: string) => void): Promise<UnlistenFn> => {
+    if (!inTauri) {
+      // Print a friendly stub line in dev mode so the modal isn't blank.
+      const enc = btoa(`[dev mode: pty session ${sessionId}]\r\n$ `);
+      window.setTimeout(() => cb(enc), 50);
+      return () => {};
+    }
+    return listen<string>(`pty:tick:${sessionId}`, e => cb(e.payload));
+  },
+  onPtyDone: async (sessionId: string, cb: () => void): Promise<UnlistenFn> => {
+    if (!inTauri) return () => {};
+    return listen<boolean>(`pty:done:${sessionId}`, () => cb());
+  },
+
   // Stacks: up/down return per-line log output; health returns
   // [serviceName, "healthy"|"unhealthy"|"—"|"unsupported:<kind>"].
   stackUp:     (name: string) => inTauri ? invokeStrict<string[]>('stack_up',     { name }) : Promise.resolve(['(dev-mode no-op)']),
