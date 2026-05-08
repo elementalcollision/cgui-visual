@@ -291,6 +291,22 @@ export function StatusBar({ t, runtime, tab, lastTickAt }: {
   t: ThemeTokens; runtime: Runtime; tab: Tab;
   lastTickAt?: number;
 }) {
+  // Hints are scoped to whichever shortcuts are actually wired for the
+  // active tab. The handler lives in App.tsx — keep this list in sync
+  // with the branches there. `?` is global so it appears on every tab.
+  const hints: { keys: string; label: string }[] = (() => {
+    if (tab === 'containers') {
+      return [
+        { keys: '↑/↓', label: 'navigate' },
+        { keys: '↵',   label: 'inspect' },
+        { keys: 'L',   label: 'logs' },
+      ];
+    }
+    if (tab === 'images') {
+      return [{ keys: 'S', label: 'scan' }];
+    }
+    return [];
+  })();
   return (
     <div style={{
       height: 26, borderTop: `1px solid ${t.border}`, background: t.surfaceAlt,
@@ -311,11 +327,14 @@ export function StatusBar({ t, runtime, tab, lastTickAt }: {
         </>
       )}
       <div style={{ flex: 1 }} />
-      <span style={{ color: t.fg3 }}>↑/↓ navigate</span>
-      <span style={{ color: t.fg3 }}>↵ inspect</span>
-      <span style={{ color: t.fg3 }}>L logs</span>
-      <span style={{ color: t.fg3 }}>S scan</span>
-      <span style={{ color: t.fg3 }}>? help</span>
+      {hints.map(h => (
+        <span key={h.keys} style={{ color: t.fg3 }}>
+          <span style={{ color: t.fg2 }}>{h.keys}</span> {h.label}
+        </span>
+      ))}
+      <span style={{ color: t.fg3 }}>
+        <span style={{ color: t.fg2 }}>?</span> help
+      </span>
     </div>
   );
 }

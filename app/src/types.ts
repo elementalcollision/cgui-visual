@@ -166,4 +166,5 @@ export type Modal =
   | { type: 'commandPalette' }
   | { type: 'terminal'; container: Container }
   | { type: 'stackGraph'; stack: Stack }
+  | { type: 'help' }
   | null;

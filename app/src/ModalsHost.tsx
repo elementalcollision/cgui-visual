@@ -24,6 +24,7 @@ import {
   OnboardingModal,
   CommandPaletteModal,
   ImageInspectModal,
+  HelpModal,
 } from './modals';
 import { toast } from './toast';
 import type { ThemeTokens } from './theme';
@@ -109,6 +110,8 @@ export default function ModalsHost(props: {
           <StackGraphModal stack={modal.stack} t={t} onClose={onClose} />
         </Suspense>
       );
+    case 'help':
+      return <HelpModal t={t} onClose={onClose} />;
     case 'commandPalette':
       return <CommandPaletteModal
         t={t}

@@ -203,9 +203,24 @@ export default function App() {
   useEffect(() => {
     // Tabs in display order — kept here so ⌘1..⌘6 mirrors the Sidebar.
     const tabsOrder: Tab[] = ['containers', 'images', 'volumes', 'networks', 'stacks', 'logs'];
+
+    // Mirror the search filter ContainersView applies internally so the
+    // ↑/↓ navigation steps through the same set of rows the user sees.
+    const filteredContainers = (() => {
+      if (!search) return containers;
+      const q = search.toLowerCase();
+      return containers.filter(c =>
+        c.name.toLowerCase().includes(q) ||
+        c.image.toLowerCase().includes(q) ||
+        c.id.toLowerCase().includes(q)
+      );
+    })();
+
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setModal(null);
-      const inInput = (document.activeElement as HTMLElement | null)?.tagName === 'INPUT';
+      const inInput = (document.activeElement as HTMLElement | null)?.tagName === 'INPUT' ||
+        (document.activeElement as HTMLElement | null)?.tagName === 'TEXTAREA';
+
       // Cmd/Ctrl-K → command palette. Suppress when typing in inputs so
       // search fields can still use ⌘K for word delete on macOS — wait,
       // ⌘K is a noop in inputs by default, safe to intercept globally.
@@ -224,11 +239,74 @@ export default function App() {
       if (e.key === '/' && !modal && !inInput) {
         e.preventDefault();
         document.querySelector<HTMLInputElement>('input[placeholder^="Filter"]')?.focus();
+        return;
+      }
+
+      // Below this line: shortcuts that target the active tab's row
+      // selection. Suppressed while a modal is open or the user is
+      // typing in a form field — both would steal letter keys.
+      if (modal || inInput) return;
+
+      // Help — single-key '?' on shifted '/' keys produces e.key === '?'
+      // on most layouts. Open from any tab.
+      if (e.key === '?') {
+        e.preventDefault();
+        setModal({ type: 'help' });
+        return;
+      }
+
+      // Tab-specific affordances. Each branch only fires on its tab so
+      // letters like 'L' don't intercept random typing on other surfaces.
+      if (tab === 'containers') {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          if (filteredContainers.length === 0) return;
+          e.preventDefault();
+          const idx = filteredContainers.findIndex(c => c.id === selected);
+          // -1 (no selection yet) → step to first row regardless of direction.
+          const next = idx < 0
+            ? 0
+            : (e.key === 'ArrowDown'
+                ? Math.min(filteredContainers.length - 1, idx + 1)
+                : Math.max(0, idx - 1));
+          setSelected(filteredContainers[next].id);
+          return;
+        }
+        if (e.key === 'Enter') {
+          const c = filteredContainers.find(x => x.id === selected) ?? filteredContainers[0];
+          if (c) {
+            e.preventDefault();
+            setModal({ type: 'detail', payload: c });
+          }
+          return;
+        }
+        if (e.key === 'l' || e.key === 'L') {
+          const c = filteredContainers.find(x => x.id === selected) ?? filteredContainers[0];
+          if (c) {
+            e.preventDefault();
+            setLogTarget(c.id);
+            setTab('logs');
+          }
+          return;
+        }
+      }
+
+      if (tab === 'images') {
+        if (e.key === 's' || e.key === 'S') {
+          // Per-row image selection isn't tracked yet — operate on the
+          // first visible image. Honest for now; can be extended once
+          // ImagesView grows a selection cursor.
+          const img = paletteImages[0];
+          if (img) {
+            e.preventDefault();
+            setModal({ type: 'trivy', image: img.ref });
+          }
+          return;
+        }
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [modal]);
+  }, [modal, tab, search, containers, selected, paletteImages]);
 
   const desktopBg = dark
     ? 'radial-gradient(ellipse at 30% 20%, #2A2D3A 0%, #14161D 60%, #0A0B10 100%)'
