@@ -142,6 +142,49 @@ export default function App() {
     return () => { cancelled = true; window.clearInterval(id); };
   }, [modal?.type]);
 
+  // Subscribe to events fired by the macOS app menu (lib.rs setup).
+  // The Rust side just emits — actual UI flow lives here so we don't
+  // have to plumb modal state through the backend.
+  useEffect(() => {
+    const inTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+    if (!inTauri) return;
+    let unlistenSettings: (() => void) | null = null;
+    let unlistenCheck: (() => void) | null = null;
+    (async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      unlistenSettings = await listen('menu:settings', () => {
+        setModal({ type: 'settings' });
+      });
+      unlistenCheck = await listen('menu:check-updates', async () => {
+        // Self-updater path: hits the latest.json manifest, asks the
+        // user before downloading, then installs + relaunches. No
+        // dedicated modal — the in-app updater does its own progress
+        // chrome via Tauri's plugin. Toast handles the no-update +
+        // error cases so the menu click never feels like a no-op.
+        try {
+          const { check } = await import('@tauri-apps/plugin-updater');
+          const update = await check();
+          const { toast } = await import('./toast');
+          if (!update) {
+            toast(`You're on the latest version (${__APP_VERSION__})`, 'info');
+            return;
+          }
+          if (!confirm(`cgui-visual ${update.version} is available. Install now?\n\n${update.body ?? ''}`)) {
+            return;
+          }
+          toast(`Downloading ${update.version}…`, 'info');
+          await update.downloadAndInstall();
+          const { relaunch } = await import('@tauri-apps/plugin-process');
+          await relaunch();
+        } catch (e: any) {
+          const { toast } = await import('./toast');
+          toast(`Update check failed: ${typeof e === 'string' ? e : (e?.message ?? String(e))}`);
+        }
+      });
+    })();
+    return () => { unlistenSettings?.(); unlistenCheck?.(); };
+  }, []);
+
   const [containers, setContainers] = useState<Container[]>([]);
   useEffect(() => {
     let cancelled = false;

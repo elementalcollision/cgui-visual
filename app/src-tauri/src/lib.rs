@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{
     image::Image,
-    menu::{Menu, MenuItem, PredefinedMenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem, SubmenuBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager,
 };
@@ -160,6 +160,77 @@ pub fn run() {
                     );
                 }
             }
+
+            // macOS app menu. Tauri's default menu is fine but doesn't
+            // include the two affordances users expect from the
+            // application menu — Check for Updates and Settings — so we
+            // build a custom one. Menu items emit Tauri events that the
+            // frontend listens for in App.tsx; that keeps menu wiring
+            // in Rust and behaviour wiring in TS without a backend
+            // round-trip per click.
+            //
+            // The Edit submenu is critical for any text-input UX (cut /
+            // copy / paste in form fields and the embedded terminal),
+            // so we always include it. Window submenu rounds out the
+            // standard macOS conventions users expect from a Cocoa app.
+            let app_submenu = SubmenuBuilder::new(app, "cgui")
+                .about(None)
+                .separator()
+                .item(&MenuItem::with_id(
+                    app,
+                    "menu:check-updates",
+                    "Check for Updates…",
+                    true,
+                    None::<&str>,
+                )?)
+                .item(&MenuItem::with_id(
+                    app,
+                    "menu:settings",
+                    "Settings…",
+                    true,
+                    Some("CmdOrCtrl+,"),
+                )?)
+                .separator()
+                .services()
+                .separator()
+                .hide()
+                .hide_others()
+                .show_all()
+                .separator()
+                .quit()
+                .build()?;
+            let edit_submenu = SubmenuBuilder::new(app, "Edit")
+                .undo()
+                .redo()
+                .separator()
+                .cut()
+                .copy()
+                .paste()
+                .select_all()
+                .build()?;
+            let window_submenu = SubmenuBuilder::new(app, "Window")
+                .minimize()
+                .maximize()
+                .separator()
+                .close_window()
+                .build()?;
+            let app_menu = Menu::with_items(
+                app,
+                &[&app_submenu, &edit_submenu, &window_submenu],
+            )?;
+            app.set_menu(app_menu)?;
+            // Single global handler for both custom items. Each just
+            // emits an event; the frontend owns the actual flow so we
+            // don't have to plumb modal state through the backend.
+            app.on_menu_event(|app_handle, event| match event.id.as_ref() {
+                "menu:check-updates" => {
+                    let _ = app_handle.emit("menu:check-updates", ());
+                }
+                "menu:settings" => {
+                    let _ = app_handle.emit("menu:settings", ());
+                }
+                _ => {}
+            });
 
             // Menubar tray: icon + running-count title + minimal menu.
             // On left click we toggle the main window (show + focus, or hide
