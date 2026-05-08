@@ -341,6 +341,7 @@ pub fn run() {
             commands::probe_runtime,
             commands::container_history,
             commands::vuln_history,
+            commands::load_logs,
             commands::pty_open,
             commands::pty_write,
             commands::pty_resize,
