@@ -163,7 +163,10 @@ export function Sidebar({ tab, setTab, collapsed, t, onSettings, onDoctor, runni
         <div style={{ padding: '4px 8px 12px', display: 'flex', alignItems: 'center', gap: 10 }}>
           <div style={{ width: 22, height: 22, borderRadius: 5, background: t.fg1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: t.bg, fontFamily: t.mono, fontSize: 11, fontWeight: 700 }}>C</div>
           <div style={{ fontSize: 14, fontWeight: 600, color: t.fg1 }}>cgui</div>
-          <div style={{ marginLeft: 'auto', fontSize: 10, color: t.fg3, fontFamily: t.mono }}>0.13.0</div>
+          {/* App version pulled from package.json at build time via the
+              Vite `define` (__APP_VERSION__). Matches the version on
+              the macOS About panel and on GitHub Releases. */}
+          <div style={{ marginLeft: 'auto', fontSize: 10, color: t.fg3, fontFamily: t.mono }}>{__APP_VERSION__}</div>
         </div>
       )}
       {!collapsed && <Eyebrow t={t}>Resources</Eyebrow>}
@@ -204,13 +207,19 @@ export function Sidebar({ tab, setTab, collapsed, t, onSettings, onDoctor, runni
 }
 
 // ─── top toolbar ──────────────────────────────────────────────────────
-export function TopBar({ tab, t, search, setSearch, onPull, onCollapse, runtime, dark, setDark, onUpdate, headings }: {
+export function TopBar({ tab, t, search, setSearch, onPull, onCollapse, runtime, dark, setDark, onUpdate, updateCount = 0, updatesSeen = false, headings }: {
   tab: Tab; t: ThemeTokens;
   search: string; setSearch: (s: string) => void;
   onPull: () => void; onCollapse: () => void;
   runtime: Runtime;
   dark: boolean; setDark: (v: boolean) => void;
   onUpdate: (() => void) | null;
+  /** Live count from `listUpdates`. Drives the badge label. */
+  updateCount?: number;
+  /** True after the user has opened (and dismissed) the modal at
+   *  least once this session. Mutes the badge colour from
+   *  warning-orange to a subtle frame so it stops glaring. */
+  updatesSeen?: boolean;
   headings: Record<Tab, { title: string; sub: string }>;
 }) {
   const h = headings[tab];
@@ -231,10 +240,25 @@ export function TopBar({ tab, t, search, setSearch, onPull, onCollapse, runtime,
         <span style={{ width: 6, height: 6, borderRadius: '50%', background: t.success }} />
         runtime: {runtime}
       </div>
-      {onUpdate && (
-        <button onClick={onUpdate} title="Updates available" style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 10px', height: 32, background: 'transparent', border: `1px solid ${t.warning}`, color: t.warning, borderRadius: 6, fontSize: 11, fontFamily: t.mono, cursor: 'pointer' }}>
-          <Icon name="download" size={12} color={t.warning} />
-          2 updates
+      {onUpdate && updateCount > 0 && (
+        // Two visual states: unseen (warning-orange, demands attention)
+        // and seen (muted frame, stays clickable so the user can re-open
+        // the modal). Label uses the real count, not a hardcoded literal.
+        <button
+          onClick={onUpdate}
+          title={updatesSeen ? 'Companion updates (opened)' : 'Companion updates available'}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            padding: '4px 10px', height: 32,
+            background: 'transparent',
+            border: `1px solid ${updatesSeen ? t.border : t.warning}`,
+            color: updatesSeen ? t.fg3 : t.warning,
+            borderRadius: 6, fontSize: 11, fontFamily: t.mono,
+            cursor: 'pointer',
+          }}
+        >
+          <Icon name="download" size={12} color={updatesSeen ? t.fg3 : t.warning} />
+          {updateCount} update{updateCount === 1 ? '' : 's'}
         </button>
       )}
       <button onClick={() => setDark(!dark)} style={{ background: 'transparent', border: `1px solid ${t.border}`, borderRadius: 6, color: t.fg2, width: 32, height: 32, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -267,6 +291,22 @@ export function StatusBar({ t, runtime, tab, lastTickAt }: {
   t: ThemeTokens; runtime: Runtime; tab: Tab;
   lastTickAt?: number;
 }) {
+  // Hints are scoped to whichever shortcuts are actually wired for the
+  // active tab. The handler lives in App.tsx — keep this list in sync
+  // with the branches there. `?` is global so it appears on every tab.
+  const hints: { keys: string; label: string }[] = (() => {
+    if (tab === 'containers') {
+      return [
+        { keys: '↑/↓', label: 'navigate' },
+        { keys: '↵',   label: 'inspect' },
+        { keys: 'L',   label: 'logs' },
+      ];
+    }
+    if (tab === 'images') {
+      return [{ keys: 'S', label: 'scan' }];
+    }
+    return [];
+  })();
   return (
     <div style={{
       height: 26, borderTop: `1px solid ${t.border}`, background: t.surfaceAlt,
@@ -287,11 +327,14 @@ export function StatusBar({ t, runtime, tab, lastTickAt }: {
         </>
       )}
       <div style={{ flex: 1 }} />
-      <span style={{ color: t.fg3 }}>↑/↓ navigate</span>
-      <span style={{ color: t.fg3 }}>↵ inspect</span>
-      <span style={{ color: t.fg3 }}>L logs</span>
-      <span style={{ color: t.fg3 }}>S scan</span>
-      <span style={{ color: t.fg3 }}>? help</span>
+      {hints.map(h => (
+        <span key={h.keys} style={{ color: t.fg3 }}>
+          <span style={{ color: t.fg2 }}>{h.keys}</span> {h.label}
+        </span>
+      ))}
+      <span style={{ color: t.fg3 }}>
+        <span style={{ color: t.fg2 }}>?</span> help
+      </span>
     </div>
   );
 }

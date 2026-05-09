@@ -23,8 +23,15 @@ export default function App() {
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<string>('');
   const [modal, setModal] = useState<Modal>(null);
-  const [showUpdateBadge, setShowUpdateBadge] = useState(true);
-  const [pullReference] = useState('mlcommons/inference:llama2-70b');
+  // Companion-update badge state. `count` is the actual number returned
+  // from the backend's listUpdates probe (not a hardcoded literal); the
+  // badge stays clickable for the lifetime of the session so the user
+  // can re-open the modal. `seen` flips after first dismiss so the
+  // colour mutes from warning-orange to a subtle muted frame — keeps
+  // the affordance visible without the constant glare. State resets on
+  // app restart by design — fresh poll, fresh attention.
+  const [updateCount, setUpdateCount] = useState(0);
+  const [updatesSeen, setUpdatesSeen] = useState(false);
   const [logTarget, setLogTarget] = useState<string | undefined>(undefined);
   const [menubarMode, setMenubarMode] = useState(false);
   const [globalHotkey, setGlobalHotkey] = useState('');
@@ -117,7 +124,9 @@ export default function App() {
 
   // Slow background fetches so the Cmd-K palette has something to match
   // against without the user opening the corresponding tab first. Refreshes
-  // on a 30 s timer + whenever the palette is opened.
+  // on a 30 s timer + whenever the palette is opened. Same loop also
+  // refreshes the topbar update-badge count so newly-published companion
+  // releases surface without a relaunch.
   const [paletteImages, setPaletteImages] = useState<Image[]>([]);
   const [paletteStacks, setPaletteStacks] = useState<Stack[]>([]);
   useEffect(() => {
@@ -125,12 +134,56 @@ export default function App() {
     const refresh = () => {
       api.listImages().then(v => { if (!cancelled) setPaletteImages(v); });
       api.listStacks().then(v => { if (!cancelled) setPaletteStacks(v); });
+      api.listUpdates().then(v => { if (!cancelled) setUpdateCount(v.length); });
     };
     refresh();
     if (modal?.type === 'commandPalette') refresh();
     const id = window.setInterval(refresh, 30_000);
     return () => { cancelled = true; window.clearInterval(id); };
   }, [modal?.type]);
+
+  // Subscribe to events fired by the macOS app menu (lib.rs setup).
+  // The Rust side just emits — actual UI flow lives here so we don't
+  // have to plumb modal state through the backend.
+  useEffect(() => {
+    const inTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+    if (!inTauri) return;
+    let unlistenSettings: (() => void) | null = null;
+    let unlistenCheck: (() => void) | null = null;
+    (async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      unlistenSettings = await listen('menu:settings', () => {
+        setModal({ type: 'settings' });
+      });
+      unlistenCheck = await listen('menu:check-updates', async () => {
+        // Self-updater path: hits the latest.json manifest, asks the
+        // user before downloading, then installs + relaunches. No
+        // dedicated modal — the in-app updater does its own progress
+        // chrome via Tauri's plugin. Toast handles the no-update +
+        // error cases so the menu click never feels like a no-op.
+        try {
+          const { check } = await import('@tauri-apps/plugin-updater');
+          const update = await check();
+          const { toast } = await import('./toast');
+          if (!update) {
+            toast(`You're on the latest version (${__APP_VERSION__})`, 'info');
+            return;
+          }
+          if (!confirm(`cgui-visual ${update.version} is available. Install now?\n\n${update.body ?? ''}`)) {
+            return;
+          }
+          toast(`Downloading ${update.version}…`, 'info');
+          await update.downloadAndInstall();
+          const { relaunch } = await import('@tauri-apps/plugin-process');
+          await relaunch();
+        } catch (e: any) {
+          const { toast } = await import('./toast');
+          toast(`Update check failed: ${typeof e === 'string' ? e : (e?.message ?? String(e))}`);
+        }
+      });
+    })();
+    return () => { unlistenSettings?.(); unlistenCheck?.(); };
+  }, []);
 
   const [containers, setContainers] = useState<Container[]>([]);
   useEffect(() => {
@@ -150,9 +203,24 @@ export default function App() {
   useEffect(() => {
     // Tabs in display order — kept here so ⌘1..⌘6 mirrors the Sidebar.
     const tabsOrder: Tab[] = ['containers', 'images', 'volumes', 'networks', 'stacks', 'logs'];
+
+    // Mirror the search filter ContainersView applies internally so the
+    // ↑/↓ navigation steps through the same set of rows the user sees.
+    const filteredContainers = (() => {
+      if (!search) return containers;
+      const q = search.toLowerCase();
+      return containers.filter(c =>
+        c.name.toLowerCase().includes(q) ||
+        c.image.toLowerCase().includes(q) ||
+        c.id.toLowerCase().includes(q)
+      );
+    })();
+
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setModal(null);
-      const inInput = (document.activeElement as HTMLElement | null)?.tagName === 'INPUT';
+      const inInput = (document.activeElement as HTMLElement | null)?.tagName === 'INPUT' ||
+        (document.activeElement as HTMLElement | null)?.tagName === 'TEXTAREA';
+
       // Cmd/Ctrl-K → command palette. Suppress when typing in inputs so
       // search fields can still use ⌘K for word delete on macOS — wait,
       // ⌘K is a noop in inputs by default, safe to intercept globally.
@@ -171,11 +239,74 @@ export default function App() {
       if (e.key === '/' && !modal && !inInput) {
         e.preventDefault();
         document.querySelector<HTMLInputElement>('input[placeholder^="Filter"]')?.focus();
+        return;
+      }
+
+      // Below this line: shortcuts that target the active tab's row
+      // selection. Suppressed while a modal is open or the user is
+      // typing in a form field — both would steal letter keys.
+      if (modal || inInput) return;
+
+      // Help — single-key '?' on shifted '/' keys produces e.key === '?'
+      // on most layouts. Open from any tab.
+      if (e.key === '?') {
+        e.preventDefault();
+        setModal({ type: 'help' });
+        return;
+      }
+
+      // Tab-specific affordances. Each branch only fires on its tab so
+      // letters like 'L' don't intercept random typing on other surfaces.
+      if (tab === 'containers') {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          if (filteredContainers.length === 0) return;
+          e.preventDefault();
+          const idx = filteredContainers.findIndex(c => c.id === selected);
+          // -1 (no selection yet) → step to first row regardless of direction.
+          const next = idx < 0
+            ? 0
+            : (e.key === 'ArrowDown'
+                ? Math.min(filteredContainers.length - 1, idx + 1)
+                : Math.max(0, idx - 1));
+          setSelected(filteredContainers[next].id);
+          return;
+        }
+        if (e.key === 'Enter') {
+          const c = filteredContainers.find(x => x.id === selected) ?? filteredContainers[0];
+          if (c) {
+            e.preventDefault();
+            setModal({ type: 'detail', payload: c });
+          }
+          return;
+        }
+        if (e.key === 'l' || e.key === 'L') {
+          const c = filteredContainers.find(x => x.id === selected) ?? filteredContainers[0];
+          if (c) {
+            e.preventDefault();
+            setLogTarget(c.id);
+            setTab('logs');
+          }
+          return;
+        }
+      }
+
+      if (tab === 'images') {
+        if (e.key === 's' || e.key === 'S') {
+          // Per-row image selection isn't tracked yet — operate on the
+          // first visible image. Honest for now; can be extended once
+          // ImagesView grows a selection cursor.
+          const img = paletteImages[0];
+          if (img) {
+            e.preventDefault();
+            setModal({ type: 'trivy', image: img.ref });
+          }
+          return;
+        }
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [modal]);
+  }, [modal, tab, search, containers, selected, paletteImages]);
 
   const desktopBg = dark
     ? 'radial-gradient(ellipse at 30% 20%, #2A2D3A 0%, #14161D 60%, #0A0B10 100%)'
@@ -206,6 +337,19 @@ export default function App() {
         ::-webkit-scrollbar-thumb { background: ${t.border}; border-radius: 999px; }
         ::-webkit-scrollbar-thumb:hover { background: ${t.borderStrong}; }
         input::placeholder { color: ${t.fg3}; }
+
+        /* Focus ring. WKWebView's default outline draws a hard rectangle
+           that ignores border-radius, so tabbing through the sidebar
+           shows a sharp box around rounded buttons — looks like the
+           ring "tears away" from the row. Replace with a box-shadow
+           ring that automatically follows the element's border-radius
+           on every browser engine. :focus-visible scopes it to keyboard
+           navigation so mouse clicks don't leave a lingering halo. */
+        :focus { outline: none; }
+        :focus-visible {
+          outline: none;
+          box-shadow: 0 0 0 2px ${t.accent};
+        }
       `}</style>
 
       <div style={{ width: '100%', height: '100%', maxWidth: 1480, maxHeight: 920, position: 'relative' }}>
@@ -227,7 +371,9 @@ export default function App() {
                 runtime={runtime}
                 dark={dark}
                 setDark={setDark}
-                onUpdate={showUpdateBadge ? () => setModal({ type: 'update' }) : null}
+                onUpdate={updateCount > 0 ? () => setModal({ type: 'update' }) : null}
+                updateCount={updateCount}
+                updatesSeen={updatesSeen}
                 headings={headings}
               />
               {tab === 'containers' && (
@@ -259,12 +405,11 @@ export default function App() {
               t={t}
               runtime={runtime}
               setRuntime={setRuntime}
-              pullReference={pullReference}
               onClose={() => {
                 if (modal.type === 'onboarding') setOnboardingDismissed(true);
                 setModal(null);
               }}
-              onUpdateClosed={() => { setModal(null); setShowUpdateBadge(false); }}
+              onUpdateClosed={() => { setModal(null); setUpdatesSeen(true); }}
               onOnboardingResolved={() => setModal(null)}
               dark={dark} setDark={setDark}
               menubarMode={menubarMode} setMenubarMode={setMenubarMode}

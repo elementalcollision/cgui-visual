@@ -459,13 +459,23 @@ export function DetailModal({ item, t, onClose, onExec }: {
   );
 }
 
-export function PullModal({ t, reference = 'mlcommons/inference:llama2-70b', onClose }: {
-  t: ThemeTokens; reference?: string; onClose: () => void;
+export function PullModal({ t, reference, onClose }: {
+  t: ThemeTokens;
+  /** When the caller already knows what to pull (e.g. an "Update image"
+   *  affordance from elsewhere), seed the input. Empty by default so
+   *  the modal opens idle and the user types their own reference. */
+  reference?: string;
+  onClose: () => void;
 }) {
+  const [input, setInput] = useState(reference ?? '');
+  const [submitted, setSubmitted] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
   const [lines, setLines] = useState<string[]>([]);
   const [done, setDone] = useState<boolean | null>(null);
 
+  // Subscribe once. Backend events fire only after startPull, so it's
+  // safe to attach listeners in the idle phase too — they just won't
+  // see anything until the user clicks Pull.
   useEffect(() => {
     let cancelled = false;
     let unlistenLine: (() => void) | null = null;
@@ -481,35 +491,106 @@ export function PullModal({ t, reference = 'mlcommons/inference:llama2-70b', onC
       setDone(ok);
       if (ok) setProgress(100);
     }).then(fn => { if (cancelled) fn(); else unlistenDone = fn; });
-    api.startPull(reference).catch(e => console.warn('start_pull failed', e));
     return () => { cancelled = true; unlistenLine?.(); unlistenDone?.(); };
-  }, [reference]);
+  }, []);
+
+  const startPull = () => {
+    const ref = input.trim();
+    if (!ref) return;
+    setSubmitted(ref);
+    setDone(null);
+    setProgress(0);
+    setLines([]);
+    api.startPull(ref).catch(e => console.warn('start_pull failed', e));
+  };
+
+  const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') { e.preventDefault(); startPull(); }
+  };
+
+  const headerTitle = submitted == null ? 'Pull image'
+    : done === true   ? 'Pulled'
+    : done === false  ? 'Pull failed'
+    :                   'Pulling image';
 
   return (
     <Backdrop onClose={onClose}>
       <div style={{ width: 640, background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 80px rgba(0,0,0,0.4)' }}>
         <div style={{ padding: '16px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 12 }}>
           <Icon name="download" size={18} color={t.accent} />
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 15, fontWeight: 600, color: t.fg1 }}>{done === true ? 'Pulled' : done === false ? 'Pull failed' : 'Pulling image'}</div>
-            <div style={{ fontSize: 12, color: t.fg3, fontFamily: t.mono, marginTop: 2 }}>{reference}</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 15, fontWeight: 600, color: t.fg1 }}>{headerTitle}</div>
+            {submitted && (
+              <div style={{ fontSize: 12, color: t.fg3, fontFamily: t.mono, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{submitted}</div>
+            )}
           </div>
           <button onClick={onClose} style={iconBtn()}><Icon name="x" size={16} color={t.fg2} /></button>
         </div>
-        <div style={{ padding: '14px 22px', borderBottom: `1px solid ${t.border}` }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, fontFamily: t.mono, fontSize: 12, color: t.fg2 }}>
-            <span>{lines.length} lines</span><span>{progress}%</span>
+
+        {/* Idle phase: input + Pull. Once submitted we swap in the
+            progress UI; the idle controls stay hidden because re-firing
+            mid-pull would race the running child. */}
+        {submitted == null ? (
+          <div style={{ padding: '18px 22px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <label style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: t.fg3 }}>
+              Image reference
+            </label>
+            <input
+              autoFocus
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={onKey}
+              placeholder="alpine:latest  or  ghcr.io/owner/repo:tag"
+              spellCheck={false}
+              style={{
+                padding: '10px 12px',
+                background: t.bg, color: t.fg1,
+                border: `1px solid ${t.border}`, borderRadius: 6,
+                fontFamily: t.mono, fontSize: 13, outline: 'none',
+              }}
+            />
+            <div style={{ fontSize: 11, color: t.fg3, lineHeight: 1.5 }}>
+              Pulls the image and its layers via <code style={{ fontFamily: t.mono, color: t.fg2 }}>container image pull</code>.
+              Looking to import a stack from a <code style={{ fontFamily: t.mono, color: t.fg2 }}>docker-compose.yml</code>?
+              Use <span style={{ color: t.fg2 }}>Stacks → Import compose</span> instead.
+            </div>
           </div>
-          <Bar pct={progress} color={done === false ? t.danger : t.accent} bg={t.surfaceAlt} h={8} />
-        </div>
-        <div style={{ flex: 1, overflow: 'auto', padding: 16, fontFamily: t.mono, fontSize: 11, lineHeight: 1.6, background: t.bg, maxHeight: 280 }}>
-          {lines.map((l, i) => (
-            <div key={i} style={{ color: l.includes('✓') ? t.success : l.includes('▸') ? t.fg2 : t.fg1, padding: '1px 0' }}>{l}</div>
-          ))}
-        </div>
+        ) : (
+          <>
+            <div style={{ padding: '14px 22px', borderBottom: `1px solid ${t.border}` }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, fontFamily: t.mono, fontSize: 12, color: t.fg2 }}>
+                <span>{lines.length} lines</span><span>{progress}%</span>
+              </div>
+              <Bar pct={progress} color={done === false ? t.danger : t.accent} bg={t.surfaceAlt} h={8} />
+            </div>
+            <div style={{ flex: 1, overflow: 'auto', padding: 16, fontFamily: t.mono, fontSize: 11, lineHeight: 1.6, background: t.bg, maxHeight: 280 }}>
+              {lines.map((l, i) => (
+                <div key={i} style={{ color: l.includes('✓') ? t.success : l.includes('▸') ? t.fg2 : t.fg1, padding: '1px 0' }}>{l}</div>
+              ))}
+            </div>
+          </>
+        )}
+
         <div style={{ padding: '12px 22px', borderTop: `1px solid ${t.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: t.surfaceAlt }}>
-          <span style={{ fontSize: 11, color: t.fg3, fontFamily: t.mono }}>Esc to background — pull continues</span>
-          <button onClick={onClose} style={pillBtn(t)}>Background</button>
+          <span style={{ fontSize: 11, color: t.fg3, fontFamily: t.mono }}>
+            {submitted == null ? '↵ pull' : 'Esc to background — pull continues'}
+          </span>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={onClose} style={pillBtn(t)}>{submitted == null ? 'Cancel' : 'Background'}</button>
+            {submitted == null && (
+              <button
+                onClick={startPull}
+                disabled={!input.trim()}
+                style={{
+                  padding: '6px 14px',
+                  background: t.fg1, color: t.bg, border: 'none', borderRadius: 6,
+                  fontSize: 12, fontWeight: 500,
+                  cursor: input.trim() ? 'pointer' : 'default',
+                  opacity: input.trim() ? 1 : 0.5,
+                }}
+              >Pull</button>
+            )}
+          </div>
         </div>
       </div>
     </Backdrop>
@@ -1162,14 +1243,29 @@ export function RunImageModal({ t, image, onLaunched, onClose }: {
 
   const submit = () => {
     setBusy(true);
-    api.runImage({
-      image,
-      name: name.trim() || undefined,
-      ports: ports.split('\n').map(l => l.trim()).filter(Boolean),
-      env: env.split('\n').map(l => l.trim()).filter(Boolean),
-      command: command.trim() || undefined,
-    }).then(id => { onLaunched(id); onClose(); })
-      .catch(() => { setBusy(false); /* toast via withToast wrapper at call-site */ });
+    // `withToast` surfaces backend errors (image-pull failure, port
+    // already in use, container_system not running, etc.) — previously
+    // these were silently swallowed and the user just saw the modal
+    // dim and recover with no feedback.
+    withToast(
+      `run ${image}`,
+      api.runImage({
+        image,
+        name: name.trim() || undefined,
+        ports: ports.split('\n').map(l => l.trim()).filter(Boolean),
+        env: env.split('\n').map(l => l.trim()).filter(Boolean),
+        command: command.trim() || undefined,
+      }),
+    )
+      .then(id => {
+        onLaunched(id);
+        onClose();
+      })
+      .catch(() => {
+        // Error already toasted by withToast. Drop the busy flag so
+        // the user can edit the form and retry without re-opening.
+        setBusy(false);
+      });
   };
 
   const inputStyle = {
@@ -1675,6 +1771,77 @@ export function CommandPaletteModal({
           <span>↑↓ navigate</span><span>↵ open</span><span>esc close</span>
           <div style={{ flex: 1 }} />
           <span>{ranked.length} result{ranked.length === 1 ? '' : 's'}</span>
+        </div>
+      </div>
+    </Backdrop>
+  );
+}
+
+// Keyboard-shortcut cheat sheet. Triggered by '?' anywhere in the app
+// (matches the StatusBar hint). Static — no state — so it's cheap to
+// render every time. Grouped so users can scan to the section they
+// need rather than scrolling a flat list.
+export function HelpModal({ t, onClose }: { t: ThemeTokens; onClose: () => void }) {
+  type Row = { keys: string; label: string };
+  type Group = { title: string; rows: Row[] };
+  const groups: Group[] = [
+    {
+      title: 'Global',
+      rows: [
+        { keys: '⌘K', label: 'Open command palette' },
+        { keys: '⌘,', label: 'Open Settings' },
+        { keys: '⌘1 … ⌘6', label: 'Switch tabs (Containers / Images / Volumes / Networks / Stacks / Logs)' },
+        { keys: '/', label: 'Focus the filter input' },
+        { keys: '?', label: 'Open this help' },
+        { keys: 'Esc', label: 'Close the active modal' },
+      ],
+    },
+    {
+      title: 'Containers tab',
+      rows: [
+        { keys: '↑ / ↓', label: 'Move row selection up / down' },
+        { keys: '↵', label: 'Inspect the selected container (open detail)' },
+        { keys: 'L', label: 'Open Logs for the selected container' },
+      ],
+    },
+    {
+      title: 'Images tab',
+      rows: [
+        { keys: 'S', label: 'Run a Trivy scan on the first visible image' },
+      ],
+    },
+  ];
+  return (
+    <Backdrop onClose={onClose}>
+      <div style={{ width: 580, maxHeight: '85vh', background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ padding: '14px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 12 }}>
+          <Icon name="info" size={18} color={t.fg2} />
+          <div style={{ flex: 1, fontSize: 15, fontWeight: 600, color: t.fg1 }}>Keyboard shortcuts</div>
+          <button onClick={onClose} style={iconBtn()}><Icon name="x" size={16} color={t.fg2} /></button>
+        </div>
+        <div style={{ flex: 1, overflow: 'auto', padding: '14px 22px', display: 'flex', flexDirection: 'column', gap: 18 }}>
+          {groups.map(g => (
+            <div key={g.title}>
+              <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: t.fg3, marginBottom: 8 }}>{g.title}</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', rowGap: 6, columnGap: 14 }}>
+                {g.rows.map(r => (
+                  <Fragment key={r.keys + r.label}>
+                    <kbd style={{
+                      fontFamily: t.mono, fontSize: 11, color: t.fg1,
+                      background: t.surfaceAlt, border: `1px solid ${t.border}`,
+                      borderRadius: 4, padding: '2px 6px',
+                      whiteSpace: 'nowrap',
+                      justifySelf: 'start',
+                    }}>{r.keys}</kbd>
+                    <span style={{ fontSize: 12, color: t.fg2 }}>{r.label}</span>
+                  </Fragment>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{ padding: '10px 22px', borderTop: `1px solid ${t.border}`, background: t.surfaceAlt, fontFamily: t.mono, fontSize: 10, color: t.fg3 }}>
+          Esc to close
         </div>
       </div>
     </Backdrop>
