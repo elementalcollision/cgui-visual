@@ -182,6 +182,10 @@ export function ContainersView({ t, search, selected, setSelected, onInspect, on
                   ...tableRow(t, COLS_CONTAINERS),
                   background: sel ? t.selected : (isPicked ? t.hover : 'transparent'),
                   borderLeft: sel ? `2px solid ${t.accent}` : '2px solid transparent',
+                  // Smooth fade matches ImagesView so the two list views
+                  // share the same hover responsiveness rather than one
+                  // snapping while the other eases.
+                  transition: 'background 80ms ease',
                 }}
                 onMouseEnter={e => { if (!sel && !isPicked) (e.currentTarget as HTMLDivElement).style.background = t.hover; }}
                 onMouseLeave={e => { if (!sel && !isPicked) (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
@@ -310,15 +314,16 @@ export function ImagesView({ t, search, onScan, onRun, onInspect }: {
         const isPicked = picked.has(img.ref);
         return (
         <div key={img.id}
-          // Hover highlight matches ContainersView. Skipped while a row
-          // is already in the picked-set (selection background already
-          // signals state; layering hover on top would visually flicker
-          // when the cursor crosses between picked and un-picked rows).
+          // Hover highlight matches ContainersView. Picked rows use the
+          // stronger `selected` tint instead of `hover` so cursors
+          // moving across them produce a visible delta — without that
+          // distinction, hovering a picked row felt unresponsive
+          // (hover and picked were the same colour).
           onMouseEnter={e => { if (!isPicked) (e.currentTarget as HTMLDivElement).style.background = t.hover; }}
           onMouseLeave={e => { if (!isPicked) (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
           style={{
             ...tableRow(t, COLS_IMAGES),
-            background: isPicked ? t.hover : 'transparent',
+            background: isPicked ? t.selected : 'transparent',
             transition: 'background 80ms ease',
           }}
         >
