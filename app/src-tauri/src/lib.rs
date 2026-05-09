@@ -214,10 +214,7 @@ pub fn run() {
                 .separator()
                 .close_window()
                 .build()?;
-            let app_menu = Menu::with_items(
-                app,
-                &[&app_submenu, &edit_submenu, &window_submenu],
-            )?;
+            let app_menu = Menu::with_items(app, &[&app_submenu, &edit_submenu, &window_submenu])?;
             app.set_menu(app_menu)?;
             // Single global handler for both custom items. Each just
             // emits an event; the frontend owns the actual flow so we
