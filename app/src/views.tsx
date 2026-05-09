@@ -306,16 +306,27 @@ export function ImagesView({ t, search, onScan, onRun, onInspect }: {
           <Icon name="trash" size={11} color={t.danger} />Delete
         </button>
       </BulkActionBar>
-      {rows.map(img => (
-        <div key={img.id} style={{
-          ...tableRow(t, COLS_IMAGES),
-          background: picked.has(img.ref) ? t.hover : undefined,
-        }}>
+      {rows.map(img => {
+        const isPicked = picked.has(img.ref);
+        return (
+        <div key={img.id}
+          // Hover highlight matches ContainersView. Skipped while a row
+          // is already in the picked-set (selection background already
+          // signals state; layering hover on top would visually flicker
+          // when the cursor crosses between picked and un-picked rows).
+          onMouseEnter={e => { if (!isPicked) (e.currentTarget as HTMLDivElement).style.background = t.hover; }}
+          onMouseLeave={e => { if (!isPicked) (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
+          style={{
+            ...tableRow(t, COLS_IMAGES),
+            background: isPicked ? t.hover : 'transparent',
+            transition: 'background 80ms ease',
+          }}
+        >
           <SelectCheckbox
             t={t}
-            checked={picked.has(img.ref)}
+            checked={isPicked}
             onChange={() => toggleRef(img.ref)}
-            title={picked.has(img.ref) ? 'Deselect' : 'Select'}
+            title={isPicked ? 'Deselect' : 'Select'}
           />
           <div>
             <div style={{ fontFamily: t.mono, fontSize: 13, color: t.fg1 }}>{img.ref}</div>
@@ -333,7 +344,8 @@ export function ImagesView({ t, search, onScan, onRun, onInspect }: {
             <button onClick={() => onDelete(img)} style={iconBtn()} title="Delete"><Icon name="trash" size={13} color={t.fg2} /></button>
           </div>
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
