@@ -2,7 +2,7 @@
   "name": "cgui-gui",
   "description": "Desktop GUI for Apple's container runtime (cgui)",
   "private": true,
-  "version": "0.2.3",
+  "version": "0.2.4",
   "type": "module",
   "scripts": {
     "dev": "vite",
