@@ -182,6 +182,10 @@ export function ContainersView({ t, search, selected, setSelected, onInspect, on
                   ...tableRow(t, COLS_CONTAINERS),
                   background: sel ? t.selected : (isPicked ? t.hover : 'transparent'),
                   borderLeft: sel ? `2px solid ${t.accent}` : '2px solid transparent',
+                  // Smooth fade matches ImagesView so the two list views
+                  // share the same hover responsiveness rather than one
+                  // snapping while the other eases.
+                  transition: 'background 80ms ease',
                 }}
                 onMouseEnter={e => { if (!sel && !isPicked) (e.currentTarget as HTMLDivElement).style.background = t.hover; }}
                 onMouseLeave={e => { if (!sel && !isPicked) (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
@@ -306,16 +310,28 @@ export function ImagesView({ t, search, onScan, onRun, onInspect }: {
           <Icon name="trash" size={11} color={t.danger} />Delete
         </button>
       </BulkActionBar>
-      {rows.map(img => (
-        <div key={img.id} style={{
-          ...tableRow(t, COLS_IMAGES),
-          background: picked.has(img.ref) ? t.hover : undefined,
-        }}>
+      {rows.map(img => {
+        const isPicked = picked.has(img.ref);
+        return (
+        <div key={img.id}
+          // Hover highlight matches ContainersView. Picked rows use the
+          // stronger `selected` tint instead of `hover` so cursors
+          // moving across them produce a visible delta — without that
+          // distinction, hovering a picked row felt unresponsive
+          // (hover and picked were the same colour).
+          onMouseEnter={e => { if (!isPicked) (e.currentTarget as HTMLDivElement).style.background = t.hover; }}
+          onMouseLeave={e => { if (!isPicked) (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
+          style={{
+            ...tableRow(t, COLS_IMAGES),
+            background: isPicked ? t.selected : 'transparent',
+            transition: 'background 80ms ease',
+          }}
+        >
           <SelectCheckbox
             t={t}
-            checked={picked.has(img.ref)}
+            checked={isPicked}
             onChange={() => toggleRef(img.ref)}
-            title={picked.has(img.ref) ? 'Deselect' : 'Select'}
+            title={isPicked ? 'Deselect' : 'Select'}
           />
           <div>
             <div style={{ fontFamily: t.mono, fontSize: 13, color: t.fg1 }}>{img.ref}</div>
@@ -333,7 +349,8 @@ export function ImagesView({ t, search, onScan, onRun, onInspect }: {
             <button onClick={() => onDelete(img)} style={iconBtn()} title="Delete"><Icon name="trash" size={13} color={t.fg2} /></button>
           </div>
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
