@@ -12,20 +12,40 @@ use crate::prefs::Prefs;
 use crate::runtime;
 use crate::state::History;
 
-// Generic helper: run real impl when CLI is available, else fixture fallback.
-async fn real_or_fixture<T, F, Fut>(real: F, fallback: T) -> T
+/// Pick between a fixture (debug builds) and an empty default
+/// (release builds). The fixture data is great for design work in
+/// `cargo tauri dev`, but in shipped releases it has been leaking
+/// into users' UIs — a fresh install with `container` running but
+/// zero stacks ended up showing fictional MLPerf demo data, which
+/// looks broken. Gating on `debug_assertions` strips the fixture
+/// paths from release binaries cleanly.
+fn dev_fixture_or<T>(fixture: impl FnOnce() -> T, empty: impl FnOnce() -> T) -> T {
+    if cfg!(debug_assertions) {
+        fixture()
+    } else {
+        empty()
+    }
+}
+
+// Generic helper: run real impl when CLI is available, else fall back
+// to the dev fixture (or empty in release).
+async fn real_or_fixture<T, F, Fut>(
+    real: F,
+    fixture: impl FnOnce() -> T,
+    empty: impl FnOnce() -> T,
+) -> T
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<T>>,
 {
     if !runtime::available().await {
-        return fallback;
+        return dev_fixture_or(fixture, empty);
     }
     match real().await {
         Ok(v) => v,
         Err(e) => {
             eprintln!("runtime call failed: {e:#}");
-            fallback
+            dev_fixture_or(fixture, empty)
         }
     }
 }
@@ -35,40 +55,43 @@ where
 #[tauri::command]
 pub async fn list_containers(history: State<'_, Arc<History>>) -> Result<Vec<Container>, String> {
     if !runtime::available().await {
-        return Ok(fixtures::containers());
+        return Ok(dev_fixture_or(fixtures::containers, Vec::new));
     }
     match crate::state::poll_once(&history).await {
         Ok(cs) => Ok(cs),
         Err(e) => {
             eprintln!("list_containers poll failed: {e:#}");
-            Ok(fixtures::containers())
+            Ok(dev_fixture_or(fixtures::containers, Vec::new))
         }
     }
 }
 
 #[tauri::command]
 pub async fn list_images() -> Vec<Image> {
-    real_or_fixture(runtime::list_images, fixtures::images()).await
+    real_or_fixture(runtime::list_images, fixtures::images, Vec::new).await
 }
 
 #[tauri::command]
 pub async fn list_volumes() -> Vec<Volume> {
-    real_or_fixture(runtime::list_volumes, fixtures::volumes()).await
+    real_or_fixture(runtime::list_volumes, fixtures::volumes, Vec::new).await
 }
 
 #[tauri::command]
 pub async fn list_networks() -> Vec<Network> {
-    real_or_fixture(runtime::list_networks, fixtures::networks()).await
+    real_or_fixture(runtime::list_networks, fixtures::networks, Vec::new).await
 }
 
 #[tauri::command]
 pub async fn list_stacks() -> Vec<Stack> {
     let real = crate::stacks::list_stacks().await;
-    if real.is_empty() {
-        fixtures::stacks()
-    } else {
-        real
+    if !real.is_empty() {
+        return real;
     }
+    // Empty list from the real loader: in dev show the fictional MLPerf
+    // stacks so designers have something to look at; in release return
+    // an empty list so users see the genuine empty state instead of
+    // four invented stacks they didn't create.
+    dev_fixture_or(fixtures::stacks, Vec::new)
 }
 
 #[tauri::command]
@@ -92,11 +115,13 @@ pub async fn stack_health(name: String) -> Result<Vec<(String, String)>, String>
 #[tauri::command]
 pub async fn inspect_container(id: String) -> String {
     if !runtime::available().await {
-        return fixtures::inspect_json();
+        // Release: valid empty JSON so parseInspect doesn't crash on
+        // the frontend; dev: rich demo payload for design work.
+        return dev_fixture_or(fixtures::inspect_json, || "{}".to_string());
     }
     runtime::inspect(&id).await.unwrap_or_else(|e| {
         eprintln!("inspect failed: {e:#}");
-        fixtures::inspect_json()
+        dev_fixture_or(fixtures::inspect_json, || "{}".to_string())
     })
 }
 
@@ -312,14 +337,18 @@ fn err_str(e: anyhow::Error) -> String {
 #[tauri::command]
 pub async fn start_log_stream(app: AppHandle, id: String) -> Result<(), String> {
     if !runtime::available().await {
-        // Replay fixtures with a small delay so the LogsView still gets data.
-        let app2 = app.clone();
-        tauri::async_runtime::spawn(async move {
-            for line in fixtures::logs() {
-                let _ = app2.emit("logs:tick", line);
-                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-            }
-        });
+        // Dev: replay fixtures with a small delay so the LogsView still
+        // gets data for design work. Release: no-op — emitting fake
+        // log lines into a user's view would be confusing.
+        if cfg!(debug_assertions) {
+            let app2 = app.clone();
+            tauri::async_runtime::spawn(async move {
+                for line in fixtures::logs() {
+                    let _ = app2.emit("logs:tick", line);
+                    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                }
+            });
+        }
         return Ok(());
     }
     let child = runtime::spawn(&["logs", "-f", &id]).map_err(err_str)?;
@@ -355,15 +384,21 @@ pub fn load_logs(
 #[tauri::command]
 pub async fn start_pull(app: AppHandle, reference: String) -> Result<(), String> {
     if !runtime::available().await {
-        let app2 = app.clone();
-        tauri::async_runtime::spawn(async move {
-            for line in fixtures::pull_stream() {
-                let _ = app2.emit("pull:tick", line);
-                tokio::time::sleep(std::time::Duration::from_millis(380)).await;
-            }
-            let _ = app2.emit("pull:done", true);
-        });
-        return Ok(());
+        // Dev-only fake stream so designers can see the progress UI;
+        // release returns an error so the modal surfaces a real reason
+        // instead of pretending to pull through to "done".
+        if cfg!(debug_assertions) {
+            let app2 = app.clone();
+            tauri::async_runtime::spawn(async move {
+                for line in fixtures::pull_stream() {
+                    let _ = app2.emit("pull:tick", line);
+                    tokio::time::sleep(std::time::Duration::from_millis(380)).await;
+                }
+                let _ = app2.emit("pull:done", true);
+            });
+            return Ok(());
+        }
+        return Err("container runtime is not available".into());
     }
     let mut argv = vec!["image", "pull", "--progress=plain"];
     argv.push(&reference);
@@ -392,12 +427,24 @@ pub async fn doctor() -> Vec<DoctorCheck> {
 #[tauri::command]
 pub async fn scan_image(image: String) -> TrivyResult {
     let result = crate::trivy::scan(&image).await.unwrap_or_else(|| {
-        // Either trivy isn't on PATH or the scan failed; surface fixtures so
-        // the modal still has something to show. Doctor already flags the
-        // missing binary.
-        let mut fb = fixtures::trivy();
-        fb.image = image.clone();
-        fb
+        // Either trivy isn't on PATH or the scan failed. In dev show the
+        // demo findings so the modal isn't blank. In release return an
+        // empty result so users don't see invented CVEs against their
+        // image — Doctor already flags the missing trivy binary.
+        dev_fixture_or(
+            || {
+                let mut fb = fixtures::trivy();
+                fb.image = image.clone();
+                fb
+            },
+            || TrivyResult {
+                image: image.clone(),
+                counts: serde_json::json!({
+                    "CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0,
+                }),
+                findings: vec![],
+            },
+        )
     });
     // Persist a scan summary for the trend strip + new-CVEs diff (B7).
     // Best-effort — record_scan no-ops if the DB isn't initialised.
@@ -423,15 +470,17 @@ pub async fn list_updates() -> Vec<Update> {
     }
 }
 
-// Kept for backward-compat with the frontend api.ts; just returns the fixture
-// pull stream synchronously. New code should use start_pull + pull:tick.
+// Kept for backward-compat with the frontend api.ts; new code should
+// use start_pull + pull:tick / start_log_stream + logs:tick. Dev-only
+// fixture stream so designers can preview the panel; release returns
+// empty so users don't see invented log spam against their containers.
 #[tauri::command]
 pub fn pull_stream() -> Vec<String> {
-    fixtures::pull_stream()
+    dev_fixture_or(fixtures::pull_stream, Vec::new)
 }
 #[tauri::command]
 pub fn tail_logs(_target: Option<String>) -> Vec<String> {
-    fixtures::logs()
+    dev_fixture_or(fixtures::logs, Vec::new)
 }
 
 // ─── Prefs ────────────────────────────────────────────────────────────
