@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-05-15
+
+### Fixed
+
+- **Demo fixtures no longer leak into release builds.** When Apple's
+  `container` CLI was unavailable, every list/inspect/scan/log/pull
+  command unconditionally fell back to the in-process MLPerf demo
+  fixtures, cluttering the experience on machines without a runtime.
+  Fixture fallbacks are now gated behind `cfg!(debug_assertions)` via a
+  new `dev_fixture_or<T>(fixture, empty)` helper in `commands.rs`. In
+  release builds, missing-runtime paths return empty lists or surface a
+  real error; only debug builds keep the fixtures for design work.
+  Verified the shipped binary contains zero `mlperf-` references.
+
 ## [0.1.1] — 2026-05-07
 
 ### Added
@@ -112,6 +126,7 @@ Initial macOS-only release. Tauri + React + TypeScript GUI for Apple's
   binary. Apple's `container` CLI is similarly optional but required for
   any real data.
 
-[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/elementalcollision/cgui-visual/compare/v0.2.4...v0.2.5
 [0.1.1]: https://github.com/elementalcollision/cgui-visual/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/elementalcollision/cgui-visual/releases/tag/v0.1.0
