@@ -235,19 +235,26 @@ export function ContainersView({ t, search, selected, setSelected, onInspect, on
 // ─── Images ───────────────────────────────────────────────────────────
 const COLS_IMAGES = '32px 1fr 100px 110px 100px 140px';
 
-export function ImagesView({ t, search, onScan, onRun, onInspect }: {
+export function ImagesView({ t, search, onScan, onRun, onInspect, reloadKey = 0 }: {
   t: ThemeTokens; search: string;
   onScan: (img: Image) => void;
   onRun:  (img: Image) => void;
   onInspect: (img: Image) => void;
+  /** Bump to force a list refresh after out-of-view mutations (prune). */
+  reloadKey?: number;
 }) {
   const [items, setItems] = useState<Image[]>([]);
   const reload = () => api.listImages().then(setItems);
-  useEffect(() => { reload(); }, []);
+  useEffect(() => { reload(); }, [reloadKey]);
   const rows = items.filter(i => !search || i.ref.toLowerCase().includes(search.toLowerCase()));
   const onDelete = (img: Image) => {
     if (!confirm(`Delete image ${img.ref}?\nThis cannot be undone.`)) return;
     withToast(`delete ${img.ref}`, api.deleteImage(img.ref)).then(reload).catch(() => {});
+  };
+  const onTag = (img: Image) => {
+    const target = prompt(`New reference for ${img.ref}:`, img.ref);
+    if (!target || target === img.ref) return;
+    withToast(`tag ${target}`, api.tagImage(img.ref, target)).then(reload).catch(() => {});
   };
 
   // Bulk selection (A5). Identical pattern to ContainersView; pruned to
@@ -344,6 +351,7 @@ export function ImagesView({ t, search, onScan, onRun, onInspect }: {
           <div style={{ fontFamily: t.mono, fontSize: 12, color: t.fg3 }}>{img.created}</div>
           <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
             <button onClick={() => onInspect(img)} style={iconBtn()} title="Inspect"><Icon name="info" size={13} color={t.fg2} /></button>
+            <button onClick={() => onTag(img)} style={iconBtn()} title="Tag"><Icon name="tag" size={13} color={t.fg2} /></button>
             <button onClick={() => onScan(img)} style={iconBtn()} title="Trivy scan"><Icon name="shield" size={13} color={t.fg2} /></button>
             <button onClick={() => onRun(img)} style={iconBtn()} title="Run"><Icon name="play" size={13} color={t.fg2} /></button>
             <button onClick={() => onDelete(img)} style={iconBtn()} title="Delete"><Icon name="trash" size={13} color={t.fg2} /></button>
@@ -356,12 +364,13 @@ export function ImagesView({ t, search, onScan, onRun, onInspect }: {
 }
 
 // ─── Volumes ──────────────────────────────────────────────────────────
-export function VolumesView({ t, search, onInspect }: {
+export function VolumesView({ t, search, onInspect, reloadKey = 0 }: {
   t: ThemeTokens; search: string; onInspect: (v: Volume) => void;
+  reloadKey?: number;
 }) {
   const [items, setItems] = useState<Volume[]>([]);
   const reload = () => api.listVolumes().then(setItems);
-  useEffect(() => { reload(); }, []);
+  useEffect(() => { reload(); }, [reloadKey]);
   const onDelete = (v: Volume) => {
     if (!confirm(`Delete volume ${v.name}?\nAll data in this volume will be lost.`)) return;
     withToast(`delete ${v.name}`, api.deleteVolume(v.name)).then(reload).catch(() => {});
@@ -416,12 +425,13 @@ export function VolumesView({ t, search, onInspect }: {
 // ─── Networks ─────────────────────────────────────────────────────────
 const COLS_NETWORKS = '32px 1fr 100px 100px 1.4fr 1.2fr 70px 80px';
 
-export function NetworksView({ t, search, onInspect }: {
+export function NetworksView({ t, search, onInspect, reloadKey = 0 }: {
   t: ThemeTokens; search: string; onInspect: (n: Network) => void;
+  reloadKey?: number;
 }) {
   const [items, setItems] = useState<Network[]>([]);
   const reload = () => api.listNetworks().then(setItems);
-  useEffect(() => { reload(); }, []);
+  useEffect(() => { reload(); }, [reloadKey]);
   const q = search.trim().toLowerCase();
   const rows = q
     ? items.filter(n =>

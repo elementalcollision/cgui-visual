@@ -5,7 +5,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   Container, Image, Volume, Network, Stack,
-  TrivyResult, Update, DoctorCheck, HistoryPoint, VulnHistory,
+  TrivyResult, Update, DoctorCheck, HistoryPoint, VulnHistory, DiskUsage,
 } from './types';
 import * as fixtures from './fixtures';
 
@@ -80,6 +80,24 @@ export const api = {
   // run image: returns the new container id on success.
   runImage: (args: { image: string; name?: string; ports?: string[]; env?: string[]; command?: string }) =>
     inTauri ? invokeStrict<string>('run_image', { args }) : Promise.resolve('dev-mode-no-op'),
+
+  // Tag an existing image with a new reference.
+  tagImage: (source: string, target: string) =>
+    inTauri ? invokeStrict<void>('tag_image', { source, target }) : Promise.resolve(),
+
+  // Prune (strict — caller confirms first). Resolves to the CLI's stdout
+  // summary of what was removed/reclaimed, for toasting.
+  pruneContainers: () => inTauri ? invokeStrict<string>('prune_containers') : Promise.resolve('(dev-mode no-op)'),
+  pruneImages:     () => inTauri ? invokeStrict<string>('prune_images')     : Promise.resolve('(dev-mode no-op)'),
+  pruneVolumes:    () => inTauri ? invokeStrict<string>('prune_volumes')    : Promise.resolve('(dev-mode no-op)'),
+  pruneNetworks:   () => inTauri ? invokeStrict<string>('prune_networks')   : Promise.resolve('(dev-mode no-op)'),
+
+  // Disk usage per category from `container system df`.
+  systemDf: () => call<DiskUsage>('system_df', {
+    images:     { total: 9, active: 1, sizeInBytes: 3284578304, reclaimable: 2858975232 },
+    containers: { total: 1, active: 0, sizeInBytes: 760791040, reclaimable: 760791040 },
+    volumes:    { total: 0, active: 0, sizeInBytes: 0, reclaimable: 0 },
+  }),
 
   // First-run onboarding probe. Outside Tauri (browser dev mode) the
   // fallback returns true so the OnboardingModal doesn't trigger when the
