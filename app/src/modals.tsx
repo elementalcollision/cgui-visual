@@ -438,6 +438,33 @@ export function DetailModal({ item, t, onClose, onExec }: {
           <InspectPanel t={t} tab={tab} parsed={parsed} json={json} container={c} />
         </div>
         <div style={{ padding: '12px 22px', borderTop: `1px solid ${t.border}`, display: 'flex', gap: 8, justifyContent: 'flex-end', background: t.surfaceAlt }}>
+          {/* File operations (phase 2): copy in/out + filesystem export. */}
+          <button style={pillBtn(t)} title="Copy a file from this container to a local folder"
+                  onClick={async () => {
+                    const src = prompt(`Path inside ${c.name} to copy out:`, '/');
+                    if (!src) return;
+                    const { open } = await import('@tauri-apps/plugin-dialog');
+                    const dir = await open({ directory: true, multiple: false, title: 'Destination folder' });
+                    if (typeof dir !== 'string') return;
+                    withToast(`copy out ${src}`, api.copyPath(`${c.id}:${src}`, dir)).catch(() => {});
+                  }}>Copy out…</button>
+          <button style={pillBtn(t)} title="Copy a local file into this container"
+                  onClick={async () => {
+                    const { open } = await import('@tauri-apps/plugin-dialog');
+                    const file = await open({ multiple: false, title: 'File to copy into the container' });
+                    if (typeof file !== 'string') return;
+                    const dst = prompt(`Destination path inside ${c.name}:`, '/tmp/');
+                    if (!dst) return;
+                    withToast('copy in', api.copyPath(file, `${c.id}:${dst}`)).catch(() => {});
+                  }}>Copy in…</button>
+          <button style={pillBtn(t)} title="Export the container's filesystem as a tar archive"
+                  onClick={async () => {
+                    const { save } = await import('@tauri-apps/plugin-dialog');
+                    const dest = await save({ defaultPath: `${c.name}.tar`, filters: [{ name: 'tar archive', extensions: ['tar'] }] });
+                    if (!dest) return;
+                    withToast(`export ${c.name}`, api.exportContainer(c.id, dest)).catch(() => {});
+                  }}>Export tar…</button>
+          <div style={{ flex: 1 }} />
           <button style={pillBtn(t)} onClick={() => withToast(`restart ${c.name}`, api.restartContainer(c.id)).catch(() => {})}>Restart</button>
           <button style={pillBtn(t)} onClick={() => onExec(c)} disabled={c.status !== 'running'}
                   title={c.status === 'running' ? 'Open embedded terminal' : 'Container is not running'}>
@@ -1551,6 +1578,9 @@ export function SettingsModal({
             onChange={setNotifyOnExit}
           />
 
+          <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: t.fg3, margin: '20px 0 10px' }}>Registry logins</div>
+          <RegistryPanel t={t} />
+
           <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: t.fg3, margin: '20px 0 10px' }}>Disk usage</div>
           <DiskUsagePanel t={t} />
 
@@ -1559,6 +1589,60 @@ export function SettingsModal({
         </div>
       </div>
     </Backdrop>
+  );
+}
+
+// Registry logins (`container registry list/login/logout`). The
+// password is handed straight to the CLI over stdin and lands in the
+// user's keychain — it never touches app state beyond this controlled
+// input, which is cleared after a successful login.
+function RegistryPanel({ t }: { t: ThemeTokens }) {
+  const [logins, setLogins] = useState<{ hostname: string; username: string }[] | null>(null);
+  const reload = () => api.registryList().then(setLogins).catch(() => setLogins([]));
+  useEffect(() => { reload(); }, []);
+  const [server, setServer] = useState('');
+  const [user, setUser] = useState('');
+  const [pass, setPass] = useState('');
+  const canLogin = server.trim() !== '' && user.trim() !== '' && pass !== '';
+  const doLogin = () => {
+    if (!canLogin) return;
+    withToast(`login ${server.trim()}`, api.registryLogin(server.trim(), user.trim(), pass))
+      .then(() => { setPass(''); reload(); })
+      .catch(() => {});
+  };
+  const field = (value: string, set: (s: string) => void, placeholder: string, type = 'text') => (
+    <input
+      value={value} onChange={e => set(e.target.value)} placeholder={placeholder} type={type}
+      spellCheck={false} autoCapitalize="off" autoCorrect="off"
+      style={{ flex: 1, minWidth: 0, padding: '6px 10px', background: t.surfaceAlt, color: t.fg1, border: `1px solid ${t.border}`, borderRadius: 4, fontFamily: t.mono, fontSize: 12, outline: 'none' }}
+    />
+  );
+  return (
+    <div>
+      {logins === null && <div style={{ fontFamily: t.mono, fontSize: 11, color: t.fg3 }}>Loading…</div>}
+      {logins?.length === 0 && <div style={{ fontFamily: t.mono, fontSize: 11, color: t.fg3, marginBottom: 8 }}>No registries logged in.</div>}
+      {logins?.map(l => (
+        <div key={l.hostname} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: `1px solid ${t.border}` }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, color: t.fg1, fontFamily: t.mono }}>{l.hostname}</div>
+            {l.username && <div style={{ fontSize: 11, color: t.fg3, fontFamily: t.mono }}>{l.username}</div>}
+          </div>
+          <button style={pillBtn(t, t.danger)}
+                  onClick={() => withToast(`logout ${l.hostname}`, api.registryLogout(l.hostname)).then(reload).catch(() => {})}>
+            Log out
+          </button>
+        </div>
+      ))}
+      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+        {field(server, setServer, 'registry (e.g. ghcr.io)')}
+        {field(user, setUser, 'username')}
+        {field(pass, setPass, 'password / token', 'password')}
+        <button style={{ ...pillBtn(t), opacity: canLogin ? 1 : 0.5 }} disabled={!canLogin} onClick={doLogin}>Log in</button>
+      </div>
+      <div style={{ fontSize: 10, color: t.fg3, marginTop: 6 }}>
+        Credentials are stored by the container CLI in your macOS keychain.
+      </div>
+    </div>
   );
 }
 

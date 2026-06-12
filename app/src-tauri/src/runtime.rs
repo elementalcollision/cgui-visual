@@ -766,6 +766,117 @@ pub async fn tag_image(source: &str, target: &str) -> Result<()> {
     run(&["image", "tag", source, target]).await.map(|_| ())
 }
 
+// ─── Image lifecycle: push / save / load (1.0 parity) ─────────────────
+// All three can move gigabytes, so they run on the long timeout. Push
+// streams via spawn + drain_lines in commands.rs instead (progress UI).
+
+pub async fn save_image(reference: &str, output: &str) -> Result<()> {
+    run_with_timeout(
+        &["image", "save", "-o", output, reference],
+        RUN_LONG_TIMEOUT,
+    )
+    .await
+    .map(|_| ())
+}
+
+pub async fn load_image(input: &str) -> Result<String> {
+    let bytes = run_with_timeout(&["image", "load", "-i", input], RUN_LONG_TIMEOUT).await?;
+    Ok(String::from_utf8_lossy(&bytes).trim().to_string())
+}
+
+// ─── Container filesystem: copy / export (1.0 parity) ─────────────────
+
+/// `container copy <src> <dst>` — either side may be `<id>:<path>`.
+pub async fn copy_path(src: &str, dst: &str) -> Result<()> {
+    run_with_timeout(&["copy", src, dst], RUN_LONG_TIMEOUT)
+        .await
+        .map(|_| ())
+}
+
+pub async fn export_container(id: &str, output: &str) -> Result<()> {
+    run_with_timeout(&["export", "-o", output, id], RUN_LONG_TIMEOUT)
+        .await
+        .map(|_| ())
+}
+
+// ─── Registry logins (1.0 parity) ─────────────────────────────────────
+
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RegistryLogin {
+    pub hostname: String,
+    pub username: String,
+}
+
+pub async fn registry_list() -> Result<Vec<RegistryLogin>> {
+    let bytes = run(&["registry", "list", "--format", "json"]).await?;
+    let raw: Vec<Value> = serde_json::from_slice(&bytes).context("parse `registry list` json")?;
+    Ok(raw
+        .into_iter()
+        .map(|v| RegistryLogin {
+            hostname: v
+                .get("hostname")
+                .or_else(|| v.get("server"))
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string(),
+            username: v
+                .get("username")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        })
+        .collect())
+}
+
+/// Log in to a registry. The password travels over the child's stdin
+/// (`--password-stdin`) so it never appears in an argv that `ps` or
+/// crash logs could capture. The CLI stores it in the user's keychain;
+/// we never persist it.
+pub async fn registry_login(server: &str, username: &str, password: &str) -> Result<()> {
+    let mut child = Command::new(bin())
+        .args([
+            "registry",
+            "login",
+            "--password-stdin",
+            "-u",
+            username,
+            server,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("failed to spawn `{} registry login`", bin()))?;
+    {
+        use tokio::io::AsyncWriteExt;
+        let mut stdin = child.stdin.take().context("registry login stdin")?;
+        stdin.write_all(password.as_bytes()).await?;
+        // Drop closes the pipe so the CLI sees EOF and proceeds.
+    }
+    let out = tokio::time::timeout(RUN_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "`registry login` timed out after {}s",
+                RUN_TIMEOUT.as_secs()
+            )
+        })??;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "`registry login` exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+pub async fn registry_logout(server: &str) -> Result<()> {
+    run(&["registry", "logout", server]).await.map(|_| ())
+}
+
 // ─── Prune (1.0 parity) ───────────────────────────────────────────────
 // All four prune commands are non-interactive in Apple's CLI. The raw
 // stdout (a list of removed ids / reclaimed space) is returned so the
