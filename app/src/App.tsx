@@ -7,7 +7,7 @@ import type { Tab, Modal, Runtime, Container, Image, Stack } from './types';
 import { api, type Prefs } from './api';
 import { FramelessChrome, Sidebar, TopBar, StatusBar } from './components';
 import { ContainersView, ImagesView, VolumesView, NetworksView, StacksView, LogsView } from './views';
-import { ToastTray } from './toast';
+import { ToastTray, withToast } from './toast';
 
 // All modal code is split into a separate chunk and only fetched on first
 // modal open. Saves ~30 KB from the initial bundle without affecting
@@ -46,8 +46,30 @@ export default function App() {
   // `onboardingDismissed` makes the dismissal sticky for this session
   // so dismiss → close doesn't immediately re-open the modal next tick.
   const [onboardingDismissed, setOnboardingDismissed] = useState(false);
+  // Bumped after a prune so the mount-loaded views (images/volumes/
+  // networks) refetch; the containers list refreshes on its own tick.
+  const [pruneTick, setPruneTick] = useState(0);
 
   const t = useMemo(() => getTheme(dark), [dark]);
+
+  // Tab-scoped prune. Each maps to the CLI's non-interactive prune for
+  // that resource; the stdout summary lands in the success toast.
+  const onPrune = useMemo(() => {
+    const handlers: Partial<Record<Tab, { msg: string; call: () => Promise<string> }>> = {
+      containers: { msg: 'Remove all stopped containers?', call: api.pruneContainers },
+      images:     { msg: 'Remove dangling images?',        call: api.pruneImages },
+      volumes:    { msg: 'Remove volumes not referenced by any container?', call: api.pruneVolumes },
+      networks:   { msg: 'Remove networks with no container connections?',  call: api.pruneNetworks },
+    };
+    const h = handlers[tab];
+    if (!h) return null;
+    return () => {
+      if (!confirm(h.msg)) return;
+      withToast(`prune ${tab}`, h.call())
+        .then(() => setPruneTick(n => n + 1))
+        .catch(() => {});
+    };
+  }, [tab]);
 
   // Load persisted prefs once on mount.
   useEffect(() => {
@@ -367,6 +389,7 @@ export default function App() {
                 tab={tab} t={t}
                 search={search} setSearch={setSearch}
                 onPull={() => setModal({ type: 'pull' })}
+                onPrune={onPrune}
                 onCollapse={() => setCollapsed(!collapsed)}
                 runtime={runtime}
                 dark={dark}
@@ -385,12 +408,12 @@ export default function App() {
                   containers={containers}
                 />
               )}
-              {tab === 'images'   && <ImagesView   t={t} search={search}
+              {tab === 'images'   && <ImagesView   t={t} search={search} reloadKey={pruneTick}
                                        onScan={(img: Image) => setModal({ type: 'trivy', image: img.ref })}
                                        onRun={(img: Image) => setModal({ type: 'runImage', image: img.ref })}
                                        onInspect={(img: Image) => setModal({ type: 'imageInspect', reference: img.ref })} />}
-              {tab === 'volumes'  && <VolumesView  t={t} search={search} onInspect={(v) => setModal({ type: 'volumeInspect', name: v.name })} />}
-              {tab === 'networks' && <NetworksView t={t} search={search} onInspect={(n) => setModal({ type: 'networkInspect', id: n.id, name: n.name })} />}
+              {tab === 'volumes'  && <VolumesView  t={t} search={search} reloadKey={pruneTick} onInspect={(v) => setModal({ type: 'volumeInspect', name: v.name })} />}
+              {tab === 'networks' && <NetworksView t={t} search={search} reloadKey={pruneTick} onInspect={(n) => setModal({ type: 'networkInspect', id: n.id, name: n.name })} />}
               {tab === 'stacks'   && <StacksView   t={t} search={search} onGraph={s => setModal({ type: 'stackGraph', stack: s })} />}
               {tab === 'logs'     && <LogsView     t={t} target={logTarget ?? containers.find(c => c.status === 'running')?.id} />}
               <StatusBar t={t} runtime={runtime} tab={tab} lastTickAt={lastTickAt} />

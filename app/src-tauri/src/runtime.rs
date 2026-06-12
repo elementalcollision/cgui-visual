@@ -756,6 +756,57 @@ pub async fn run_image(args: RunArgs) -> Result<String> {
 pub async fn delete_image(reference: &str) -> Result<()> {
     run(&["image", "delete", reference]).await.map(|_| ())
 }
+
+pub async fn tag_image(source: &str, target: &str) -> Result<()> {
+    run(&["image", "tag", source, target]).await.map(|_| ())
+}
+
+// ─── Prune (1.0 parity) ───────────────────────────────────────────────
+// All four prune commands are non-interactive in Apple's CLI. The raw
+// stdout (a list of removed ids / reclaimed space) is returned so the
+// UI can toast a meaningful summary. `image prune` intentionally omits
+// `--all`: dangling-only is the safe default for a one-click button.
+
+pub async fn prune_containers() -> Result<String> {
+    let bytes = run(&["prune"]).await?;
+    Ok(String::from_utf8_lossy(&bytes).trim().to_string())
+}
+pub async fn prune_images() -> Result<String> {
+    let bytes = run(&["image", "prune"]).await?;
+    Ok(String::from_utf8_lossy(&bytes).trim().to_string())
+}
+pub async fn prune_volumes() -> Result<String> {
+    let bytes = run(&["volume", "prune"]).await?;
+    Ok(String::from_utf8_lossy(&bytes).trim().to_string())
+}
+pub async fn prune_networks() -> Result<String> {
+    let bytes = run(&["network", "prune"]).await?;
+    Ok(String::from_utf8_lossy(&bytes).trim().to_string())
+}
+
+// ─── Disk usage (`system df`, 1.0) ────────────────────────────────────
+
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DiskUsageRow {
+    pub total: u64,
+    pub active: u64,
+    pub size_in_bytes: u64,
+    pub reclaimable: u64,
+}
+
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DiskUsage {
+    pub images: DiskUsageRow,
+    pub containers: DiskUsageRow,
+    pub volumes: DiskUsageRow,
+}
+
+pub async fn system_df() -> Result<DiskUsage> {
+    let bytes = run(&["system", "df", "--format", "json"]).await?;
+    serde_json::from_slice(&bytes).context("parse `system df` json")
+}
 pub async fn delete_volume(name: &str) -> Result<()> {
     run(&["volume", "delete", name]).await.map(|_| ())
 }
