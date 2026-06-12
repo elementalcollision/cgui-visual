@@ -711,7 +711,9 @@ pub async fn restart(id: &str) -> Result<()> {
 }
 
 // Args used to build a `container run -d` invocation. All optional except the
-// image reference. Matches the fields the UI's RunImageModal collects.
+// image reference. Matches the fields the UI's RunImageModal collects;
+// the advanced block (resources, mounts, identity, platform) landed
+// with 1.0 parity phase 4.
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunArgs {
@@ -724,25 +726,65 @@ pub struct RunArgs {
     pub env: Vec<String>, // "KEY=value" each
     #[serde(default)]
     pub command: Option<String>, // free-form; split on spaces
+    #[serde(default)]
+    pub cpus: Option<u32>,
+    #[serde(default)]
+    pub memory: Option<String>, // e.g. "2G"
+    #[serde(default)]
+    pub volumes: Vec<String>, // "name-or-path:containerpath" each
+    #[serde(default)]
+    pub labels: Vec<String>, // "key=value" each
+    #[serde(default)]
+    pub network: Option<String>,
+    #[serde(default)]
+    pub workdir: Option<String>,
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub platform: Option<String>, // "os/arch[/variant]"
+    #[serde(default)]
+    pub rm: bool,
+    #[serde(default)]
+    pub rosetta: bool,
 }
 
-pub async fn run_image(args: RunArgs) -> Result<String> {
+pub fn run_image_argv(args: &RunArgs) -> Vec<String> {
     let mut argv: Vec<String> = vec!["run".into(), "-d".into()];
-    if let Some(n) = args.name.as_deref().filter(|s| !s.is_empty()) {
-        argv.push("--name".into());
-        argv.push(n.into());
-    }
-    for p in &args.ports {
-        if !p.is_empty() {
-            argv.push("-p".into());
-            argv.push(p.clone());
+    let mut opt = |flag: &str, val: Option<&str>| {
+        if let Some(v) = val.filter(|s| !s.is_empty()) {
+            argv.push(flag.into());
+            argv.push(v.into());
         }
+    };
+    opt("--name", args.name.as_deref());
+    opt("--cpus", args.cpus.map(|c| c.to_string()).as_deref());
+    opt("--memory", args.memory.as_deref());
+    opt("--network", args.network.as_deref());
+    opt("--workdir", args.workdir.as_deref());
+    opt("--user", args.user.as_deref());
+    opt("--platform", args.platform.as_deref());
+    // Re-borrow argv after the closure (NLL ends its borrow above).
+    for p in args.ports.iter().filter(|s| !s.is_empty()) {
+        argv.push("-p".into());
+        argv.push(p.clone());
     }
-    for e in &args.env {
-        if !e.is_empty() {
-            argv.push("-e".into());
-            argv.push(e.clone());
-        }
+    for e in args.env.iter().filter(|s| !s.is_empty()) {
+        argv.push("-e".into());
+        argv.push(e.clone());
+    }
+    for v in args.volumes.iter().filter(|s| !s.is_empty()) {
+        argv.push("--volume".into());
+        argv.push(v.clone());
+    }
+    for l in args.labels.iter().filter(|s| !s.is_empty()) {
+        argv.push("--label".into());
+        argv.push(l.clone());
+    }
+    if args.rm {
+        argv.push("--rm".into());
+    }
+    if args.rosetta {
+        argv.push("--rosetta".into());
     }
     argv.push(args.image.clone());
     if let Some(cmd) = args.command.as_deref().filter(|s| !s.is_empty()) {
@@ -750,6 +792,11 @@ pub async fn run_image(args: RunArgs) -> Result<String> {
             argv.push(tok.into());
         }
     }
+    argv
+}
+
+pub async fn run_image(args: RunArgs) -> Result<String> {
+    let argv = run_image_argv(&args);
     let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
     // First-run image pulls + VM provisioning blow past the default
     // inspect-sized timeout; use the long envelope so the modal isn't
@@ -883,6 +930,78 @@ pub async fn export_container(id: &str, output: &str) -> Result<()> {
 }
 
 // ─── Registry logins (1.0 parity) ─────────────────────────────────────
+
+// ─── Container machines (`container machine …`, new in 1.0) ──────────
+// Machines are named VMs that containers run inside. `machine list
+// --format json` returns a flat shape: {id, status, cpus, memory,
+// diskSize, default, createdDate}.
+
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Machine {
+    pub id: String,
+    pub status: String,
+    pub cpus: u32,
+    pub memory: u64,
+    pub disk_size: u64,
+    #[serde(rename = "default")]
+    pub is_default: bool,
+    pub created_date: String,
+}
+
+pub async fn machine_list() -> Result<Vec<Machine>> {
+    let bytes = run(&["machine", "list", "--format", "json"]).await?;
+    serde_json::from_slice(&bytes).context("parse `machine list` json")
+}
+
+/// Create a machine. Pulls the image on first use, so long timeout.
+/// `no_boot` creates without booting (cheaper; boots on first use).
+pub async fn machine_create(
+    name: &str,
+    image: &str,
+    cpus: Option<u32>,
+    memory: Option<String>,
+    no_boot: bool,
+) -> Result<()> {
+    let mut argv: Vec<String> = vec![
+        "machine".into(),
+        "create".into(),
+        "--name".into(),
+        name.into(),
+    ];
+    if let Some(c) = cpus.filter(|c| *c > 0) {
+        argv.push("--cpus".into());
+        argv.push(c.to_string());
+    }
+    if let Some(m) = memory.filter(|m| !m.is_empty()) {
+        argv.push("--memory".into());
+        argv.push(m);
+    }
+    if no_boot {
+        argv.push("--no-boot".into());
+    }
+    argv.push(image.into());
+    let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
+    run_with_timeout(&argv_ref, RUN_LONG_TIMEOUT)
+        .await
+        .map(|_| ())
+}
+
+pub async fn machine_stop(name: &str) -> Result<()> {
+    run_with_timeout(&["machine", "stop", name], RUN_LONG_TIMEOUT)
+        .await
+        .map(|_| ())
+}
+
+pub async fn machine_delete(name: &str) -> Result<()> {
+    run_with_timeout(&["machine", "delete", name], RUN_LONG_TIMEOUT)
+        .await
+        .map(|_| ())
+}
+
+pub async fn machine_set_default(name: &str) -> Result<()> {
+    run(&["machine", "set-default", name]).await.map(|_| ())
+}
 
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -1352,6 +1471,97 @@ mod tests {
         let counts = volume_ref_counts(serde_json::to_vec(&ls).unwrap().as_slice());
         assert_eq!(counts.get("vol-a"), Some(&2));
         assert_eq!(counts.len(), 1);
+    }
+
+    #[test]
+    fn run_image_argv_full_surface() {
+        let args = RunArgs {
+            image: "alpine:latest".into(),
+            name: Some("web".into()),
+            ports: vec!["8080:80".into()],
+            env: vec!["A=1".into(), "".into()],
+            command: Some("sh -c true".into()),
+            cpus: Some(2),
+            memory: Some("2G".into()),
+            volumes: vec!["data:/data".into()],
+            labels: vec!["team=infra".into()],
+            network: Some("default".into()),
+            workdir: Some("/srv".into()),
+            user: Some("1000:1000".into()),
+            platform: Some("linux/arm64".into()),
+            rm: true,
+            rosetta: false,
+        };
+        let argv = run_image_argv(&args);
+        let s = argv.join(" ");
+        assert!(s.starts_with("run -d "));
+        for frag in [
+            "--name web",
+            "--cpus 2",
+            "--memory 2G",
+            "--network default",
+            "--workdir /srv",
+            "--user 1000:1000",
+            "--platform linux/arm64",
+            "-p 8080:80",
+            "-e A=1",
+            "--volume data:/data",
+            "--label team=infra",
+            "--rm",
+        ] {
+            assert!(s.contains(frag), "missing {frag} in {s}");
+        }
+        assert!(!s.contains("--rosetta"));
+        // Image before the command tokens, command split on whitespace.
+        assert!(s.ends_with("alpine:latest sh -c true"));
+        // Empty env entry filtered.
+        assert_eq!(argv.iter().filter(|a| *a == "-e").count(), 1);
+    }
+
+    #[test]
+    fn run_image_argv_minimal() {
+        let args = RunArgs {
+            image: "redis:7".into(),
+            ..Default::default()
+        };
+        assert_eq!(run_image_argv(&args), vec!["run", "-d", "redis:7"]);
+    }
+
+    #[test]
+    fn machine_list_parses_1_0_shape() {
+        // Verbatim from `container machine list --format json` on 1.0.0.
+        let json = r#"[{"status":"stopped","memory":2147483648,"default":true,"diskSize":78725120,"cpus":2,"createdDate":"2026-06-12T15:32:16Z","id":"cgui-m-test"}]"#;
+        let ms: Vec<Machine> = serde_json::from_slice(json.as_bytes()).unwrap();
+        assert_eq!(ms.len(), 1);
+        assert_eq!(ms[0].id, "cgui-m-test");
+        assert_eq!(ms[0].status, "stopped");
+        assert_eq!(ms[0].cpus, 2);
+        assert_eq!(ms[0].memory, 2147483648);
+        assert!(ms[0].is_default);
+    }
+
+    #[test]
+    fn build_argv_full_surface() {
+        let args = BuildArgs {
+            context: "/proj".into(),
+            tag: Some("app:dev".into()),
+            dockerfile: Some("/proj/Dockerfile.dev".into()),
+            build_args: vec!["V=1".into()],
+            target: Some("runtime".into()),
+            no_cache: true,
+        };
+        let s = build_argv(&args).join(" ");
+        assert!(s.starts_with("build --progress plain"));
+        for frag in [
+            "-t app:dev",
+            "-f /proj/Dockerfile.dev",
+            "--build-arg V=1",
+            "--target runtime",
+            "--no-cache",
+        ] {
+            assert!(s.contains(frag), "missing {frag} in {s}");
+        }
+        assert!(s.ends_with(" /proj"));
     }
 
     #[test]

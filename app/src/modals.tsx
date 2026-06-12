@@ -1416,6 +1416,19 @@ export function RunImageModal({ t, image, onLaunched, onClose }: {
   const [env, setEnv] = useState('');
   const [command, setCommand] = useState('');
   const [busy, setBusy] = useState(false);
+  // Advanced block (phase 4). Collapsed by default — the simple path
+  // stays simple; power users disclose resources/mounts/identity.
+  const [advanced, setAdvanced] = useState(false);
+  const [cpus, setCpus] = useState('');
+  const [memory, setMemory] = useState('');
+  const [volumes, setVolumes] = useState('');
+  const [labels, setLabels] = useState('');
+  const [network, setNetwork] = useState('');
+  const [workdir, setWorkdir] = useState('');
+  const [user, setUser] = useState('');
+  const [platform, setPlatform] = useState('');
+  const [rm, setRm] = useState(false);
+  const [rosetta, setRosetta] = useState(false);
 
   const submit = () => {
     setBusy(true);
@@ -1431,6 +1444,16 @@ export function RunImageModal({ t, image, onLaunched, onClose }: {
         ports: ports.split('\n').map(l => l.trim()).filter(Boolean),
         env: env.split('\n').map(l => l.trim()).filter(Boolean),
         command: command.trim() || undefined,
+        cpus: cpus.trim() ? Number(cpus.trim()) : undefined,
+        memory: memory.trim() || undefined,
+        volumes: volumes.split('\n').map(l => l.trim()).filter(Boolean),
+        labels: labels.split('\n').map(l => l.trim()).filter(Boolean),
+        network: network.trim() || undefined,
+        workdir: workdir.trim() || undefined,
+        user: user.trim() || undefined,
+        platform: platform.trim() || undefined,
+        rm,
+        rosetta,
       }),
     )
       .then(id => {
@@ -1462,7 +1485,7 @@ export function RunImageModal({ t, image, onLaunched, onClose }: {
           </div>
           <button onClick={onClose} style={iconBtn()}><Icon name="x" size={16} color={t.fg2} /></button>
         </div>
-        <div style={{ padding: '18px 22px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ padding: '18px 22px', display: 'flex', flexDirection: 'column', gap: 14, maxHeight: '62vh', overflow: 'auto' }}>
           <div>
             <label style={labelStyle}>Name <span style={{ color: t.fg3, fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>(optional)</span></label>
             <input style={inputStyle} value={name} onChange={e => setName(e.target.value)} placeholder="myservice" />
@@ -1479,6 +1502,62 @@ export function RunImageModal({ t, image, onLaunched, onClose }: {
             <label style={labelStyle}>Override command <span style={{ color: t.fg3, fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>(optional)</span></label>
             <input style={inputStyle} value={command} onChange={e => setCommand(e.target.value)} placeholder="sh -c 'echo hello'" />
           </div>
+
+          <button onClick={() => setAdvanced(a => !a)}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', color: t.fg2, fontSize: 12, display: 'flex', alignItems: 'center', gap: 6, padding: 0, fontFamily: 'inherit' }}>
+            <span style={{ display: 'inline-block', transform: advanced ? 'rotate(90deg)' : 'none', transition: 'transform 120ms ease' }}>
+              <Icon name="chevron" size={12} color={t.fg3} />
+            </span>
+            Advanced options
+          </button>
+          {advanced && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <div>
+                  <label style={labelStyle}>CPUs</label>
+                  <input style={inputStyle} value={cpus} onChange={e => setCpus(e.target.value.replace(/[^0-9]/g, ''))} placeholder="4" />
+                </div>
+                <div>
+                  <label style={labelStyle}>Memory</label>
+                  <input style={inputStyle} value={memory} onChange={e => setMemory(e.target.value)} placeholder="2G" />
+                </div>
+                <div>
+                  <label style={labelStyle}>Network</label>
+                  <input style={inputStyle} value={network} onChange={e => setNetwork(e.target.value)} placeholder="default" />
+                </div>
+                <div>
+                  <label style={labelStyle}>Platform</label>
+                  <input style={inputStyle} value={platform} onChange={e => setPlatform(e.target.value)} placeholder="linux/arm64" />
+                </div>
+                <div>
+                  <label style={labelStyle}>Working dir</label>
+                  <input style={inputStyle} value={workdir} onChange={e => setWorkdir(e.target.value)} placeholder="/srv" />
+                </div>
+                <div>
+                  <label style={labelStyle}>User</label>
+                  <input style={inputStyle} value={user} onChange={e => setUser(e.target.value)} placeholder="name or uid[:gid]" />
+                </div>
+              </div>
+              <div>
+                <label style={labelStyle}>Volumes <span style={{ color: t.fg3, fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>(volume-or-path:containerpath, one per line)</span></label>
+                <textarea style={{ ...inputStyle, minHeight: 48, resize: 'vertical' }} value={volumes} onChange={e => setVolumes(e.target.value)} placeholder="mydata:/data" />
+              </div>
+              <div>
+                <label style={labelStyle}>Labels <span style={{ color: t.fg3, fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>(key=value, one per line)</span></label>
+                <textarea style={{ ...inputStyle, minHeight: 48, resize: 'vertical' }} value={labels} onChange={e => setLabels(e.target.value)} placeholder="team=infra" />
+              </div>
+              <div style={{ display: 'flex', gap: 18 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: t.fg1, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={rm} onChange={e => setRm(e.target.checked)} style={{ accentColor: t.accent }} />
+                  Remove after exit (--rm)
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: t.fg1, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={rosetta} onChange={e => setRosetta(e.target.checked)} style={{ accentColor: t.accent }} />
+                  Rosetta (x86 images)
+                </label>
+              </div>
+            </div>
+          )}
         </div>
         <div style={{ padding: '12px 22px', borderTop: `1px solid ${t.border}`, display: 'flex', gap: 8, justifyContent: 'flex-end', background: t.surfaceAlt }}>
           <button style={pillBtn(t)} onClick={onClose} disabled={busy}>Cancel</button>
@@ -1722,6 +1801,9 @@ export function SettingsModal({
             onChange={setNotifyOnExit}
           />
 
+          <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: t.fg3, margin: '20px 0 10px' }}>Machines</div>
+          <MachinesPanel t={t} />
+
           <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: t.fg3, margin: '20px 0 10px' }}>Builder</div>
           <BuilderPanel t={t} />
 
@@ -1736,6 +1818,95 @@ export function SettingsModal({
         </div>
       </div>
     </Backdrop>
+  );
+}
+
+// Container machines (`container machine …`, new platform concept in
+// 1.0): named VMs that containers run inside. Machines boot on demand
+// when a container targets them, so there's no Start button — only
+// Stop, Set default, Delete, and a create form.
+function MachinesPanel({ t }: { t: ThemeTokens }) {
+  type M = { id: string; status: string; cpus: number; memory: number; diskSize: number; isDefault: boolean; createdDate: string };
+  const [machines, setMachines] = useState<M[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const reload = () => api.machineList().then(setMachines).catch(() => setMachines([]));
+  useEffect(() => { reload(); }, []);
+  const [showCreate, setShowCreate] = useState(false);
+  const [name, setName] = useState('');
+  const [image, setImage] = useState('alpine:latest');
+  const [cpus, setCpus] = useState('');
+  const [memory, setMemory] = useState('');
+  const act = (label: string, p: Promise<void>) => {
+    setBusy(true);
+    withToast(label, p).then(reload).catch(() => {}).finally(() => setBusy(false));
+  };
+  const gib = (b: number) => `${(b / 1024 ** 3).toFixed(b >= 1024 ** 3 ? 0 : 1)}G`;
+  const inputStyle = {
+    flex: 1, minWidth: 0, padding: '6px 10px', background: t.surfaceAlt, color: t.fg1,
+    border: `1px solid ${t.border}`, borderRadius: 4, fontFamily: t.mono, fontSize: 12, outline: 'none',
+  };
+  return (
+    <div>
+      {machines === null && <div style={{ fontFamily: t.mono, fontSize: 11, color: t.fg3 }}>Loading…</div>}
+      {machines?.length === 0 && (
+        <div style={{ fontFamily: t.mono, fontSize: 11, color: t.fg3, marginBottom: 8 }}>
+          No machines. Containers run in per-container VMs until a machine exists.
+        </div>
+      )}
+      {machines?.map(m => (
+        <div key={m.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: `1px solid ${t.border}` }}>
+          <span style={{ width: 8, height: 8, borderRadius: '50%', background: m.status === 'running' ? t.success : t.fg3 }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, color: t.fg1, fontFamily: t.mono }}>
+              {m.id}
+              {m.isDefault && <span style={{ marginLeft: 8, fontSize: 10, color: t.accent, border: `1px solid ${t.accent}`, borderRadius: 999, padding: '1px 7px' }}>default</span>}
+            </div>
+            <div style={{ fontSize: 11, color: t.fg3, fontFamily: t.mono }}>
+              {m.status} · {m.cpus} cpu · {gib(m.memory)} mem · {gib(m.diskSize)} disk
+            </div>
+          </div>
+          {!m.isDefault && (
+            <button style={{ ...pillBtn(t), opacity: busy ? 0.5 : 1 }} disabled={busy}
+                    onClick={() => act(`set default ${m.id}`, api.machineSetDefault(m.id))}>Set default</button>
+          )}
+          {m.status === 'running' && (
+            <button style={{ ...pillBtn(t), opacity: busy ? 0.5 : 1 }} disabled={busy}
+                    onClick={() => act(`stop ${m.id}`, api.machineStop(m.id))}>Stop</button>
+          )}
+          <button style={{ ...pillBtn(t, t.danger), opacity: busy ? 0.5 : 1 }} disabled={busy}
+                  onClick={() => {
+                    if (!confirm(`Delete machine ${m.id}?\nIts disk image is removed.`)) return;
+                    act(`delete ${m.id}`, api.machineDelete(m.id));
+                  }}>Delete</button>
+        </div>
+      ))}
+      {!showCreate ? (
+        <button style={{ ...pillBtn(t), marginTop: 10 }} onClick={() => setShowCreate(true)}>New machine…</button>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input style={inputStyle} value={name} onChange={e => setName(e.target.value)} placeholder="machine name" spellCheck={false} />
+            <input style={inputStyle} value={image} onChange={e => setImage(e.target.value)} placeholder="image (e.g. alpine:latest)" spellCheck={false} />
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input style={{ ...inputStyle, flex: '0 0 90px' }} value={cpus} onChange={e => setCpus(e.target.value.replace(/[^0-9]/g, ''))} placeholder="cpus" />
+            <input style={{ ...inputStyle, flex: '0 0 90px' }} value={memory} onChange={e => setMemory(e.target.value)} placeholder="mem (4G)" />
+            <div style={{ flex: 1 }} />
+            <button style={pillBtn(t)} onClick={() => setShowCreate(false)}>Cancel</button>
+            <button style={{ ...pillBtn(t), opacity: name.trim() && image.trim() ? 1 : 0.5 }}
+                    disabled={!name.trim() || !image.trim() || busy}
+                    onClick={() => {
+                      act(`create ${name.trim()}`, api.machineCreate(name.trim(), image.trim(),
+                        cpus.trim() ? Number(cpus.trim()) : undefined, memory.trim() || undefined));
+                      setShowCreate(false); setName('');
+                    }}>Create</button>
+          </div>
+          <div style={{ fontSize: 10, color: t.fg3 }}>
+            Created without booting — it boots on first use.
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
