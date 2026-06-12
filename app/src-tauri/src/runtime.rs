@@ -226,9 +226,14 @@ fn parse_container(v: Value) -> Container {
         .and_then(Value::as_str)
         .unwrap_or("?")
         .to_string();
+    // 0.x reported `status` as a plain string; 1.0 nests it as
+    // `{"state": "running", "startedDate": "...", "networks": [...]}`.
     let status = v
         .get("status")
-        .and_then(Value::as_str)
+        .and_then(|s| {
+            s.as_str()
+                .or_else(|| s.get("state").and_then(Value::as_str))
+        })
         .unwrap_or("unknown")
         .to_string();
     let memory_bytes = cfg
@@ -256,16 +261,20 @@ fn parse_container(v: Value) -> Container {
     // Short-id (first 8 chars) for parity with the prototype's display.
     let short_id = id.chars().take(8).collect::<String>();
 
-    // Apple's container reports `startedDate` (or `createdDate`) as a float
-    // in NSDate reference epoch (seconds since 2001-01-01 UTC). Fall back to
-    // the RFC3339 `createdAt` if a future runtime version emits it.
+    // 0.x reported `startedDate` (or `createdDate`) as a top-level float
+    // in NSDate reference epoch (seconds since 2001-01-01 UTC). 1.0 moved
+    // it to `status.startedDate` as an RFC3339 string, with the creation
+    // time at `configuration.creationDate`.
     let started_apple = v
         .get("startedDate")
         .or_else(|| v.get("createdDate"))
         .or_else(|| cfg.get("createdAt"))
         .and_then(Value::as_f64);
-    let started_iso = cfg
-        .get("createdAt")
+    let started_iso = v
+        .get("status")
+        .and_then(|s| s.get("startedDate"))
+        .or_else(|| cfg.get("createdAt"))
+        .or_else(|| cfg.get("creationDate"))
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
@@ -282,13 +291,18 @@ fn parse_container(v: Value) -> Container {
         "—".into()
     };
 
+    // Hostname lived at `networks[0].hostname` in 0.x; 1.0 nests it
+    // under `networks[0].options.hostname`.
     let name = cfg
         .get("hostname")
         .and_then(Value::as_str)
         .or_else(|| {
-            cfg.get("networks")
-                .and_then(|n| n.get(0))
-                .and_then(|n| n.get("hostname"))
+            let n0 = cfg.get("networks").and_then(|n| n.get(0));
+            n0.and_then(|n| n.get("hostname"))
+                .or_else(|| {
+                    n0.and_then(|n| n.get("options"))
+                        .and_then(|o| o.get("hostname"))
+                })
                 .and_then(Value::as_str)
         })
         .unwrap_or(&id)
@@ -407,57 +421,73 @@ fn compose_project(cfg: &Value) -> Option<String> {
 pub async fn list_images() -> Result<Vec<Image>> {
     let bytes = run(&["image", "ls", "--format", "json"]).await?;
     let raw: Vec<Value> = serde_json::from_slice(&bytes).context("parse `image ls` json")?;
-    Ok(raw
-        .into_iter()
-        .map(|v| {
-            let reference = v
-                .get("reference")
-                .and_then(Value::as_str)
-                .unwrap_or("?")
-                .to_string();
-            let size_str = v
-                .get("fullSize")
-                .and_then(Value::as_str)
-                .unwrap_or("0")
-                .to_string();
-            let size = parse_size_to_gib(&size_str);
-            let digest = v
-                .get("descriptor")
-                .and_then(|d| d.get("digest"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let id = digest
-                .split(':')
-                .nth(1)
-                .map(|h| format!("sha256:{}", &h[..h.len().min(8)]))
-                .unwrap_or_else(|| digest.clone());
-            Image {
-                id,
-                reference,
-                size,
-                size_unit: "GiB".into(),
-                created: v
-                    .get("createdAt")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                tags: v
-                    .get("tags")
-                    .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                digest,
-                // `image ls` doesn't expose layer count directly; surface 0 for
-                // now (a follow-up can call `image inspect` per row to get it).
-                layers: 0,
-            }
-        })
-        .collect())
+    Ok(raw.into_iter().map(parse_image).collect())
+}
+
+fn parse_image(v: Value) -> Image {
+    // 1.0 nests the metadata under `configuration` (`name`, `creationDate`,
+    // `descriptor`) with per-platform byte sizes in `variants[].size`;
+    // 0.x had `reference`, `createdAt`, `descriptor`, and a human-formatted
+    // `fullSize` string at the top level.
+    let cfg = v.get("configuration");
+    let reference = cfg
+        .and_then(|c| c.get("name"))
+        .or_else(|| v.get("reference"))
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+        .to_string();
+    let size = match cfg {
+        Some(_) => {
+            let bytes: u64 = v
+                .get("variants")
+                .and_then(Value::as_array)
+                .map(|vs| {
+                    vs.iter()
+                        .filter_map(|p| p.get("size").and_then(Value::as_u64))
+                        .sum()
+                })
+                .unwrap_or(0);
+            bytes_to_gib(bytes)
+        }
+        None => parse_size_to_gib(v.get("fullSize").and_then(Value::as_str).unwrap_or("0")),
+    };
+    let digest = cfg
+        .unwrap_or(&v)
+        .get("descriptor")
+        .and_then(|d| d.get("digest"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let id = digest
+        .split(':')
+        .nth(1)
+        .map(|h| format!("sha256:{}", &h[..h.len().min(8)]))
+        .unwrap_or_else(|| digest.clone());
+    Image {
+        id,
+        reference,
+        size,
+        size_unit: "GiB".into(),
+        created: cfg
+            .and_then(|c| c.get("creationDate"))
+            .or_else(|| v.get("createdAt"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        tags: v
+            .get("tags")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        digest,
+        // `image ls` doesn't expose layer count directly; surface 0 for
+        // now (a follow-up can call `image inspect` per row to get it).
+        layers: 0,
+    }
 }
 
 // "1.4 GB" / "142 MB" / "8192 bytes" → GiB.
@@ -493,42 +523,45 @@ pub async fn list_volumes() -> Result<Vec<Volume>> {
     let raw: Vec<Value> = serde_json::from_slice(&bytes).unwrap_or_default();
     let refs = ctr_res.map(|b| volume_ref_counts(&b)).unwrap_or_default();
 
-    Ok(raw
-        .into_iter()
-        .map(|v| {
-            let name = v
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("?")
-                .to_string();
-            let driver = v
-                .get("driver")
-                .and_then(Value::as_str)
-                .unwrap_or("local")
-                .to_string();
-            let source = v
-                .get("source")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let capacity_bytes = v.get("sizeInBytes").and_then(Value::as_u64).unwrap_or(0);
-            let used_bytes = if source.is_empty() {
-                0
-            } else {
-                std::fs::metadata(&source).map(|m| m.len()).unwrap_or(0)
-            };
-            let ref_count = refs.get(name.as_str()).copied().unwrap_or(0);
-            Volume {
-                name,
-                driver,
-                mountpoint: source,
-                size: bytes_to_gib(capacity_bytes),
-                used: bytes_to_gib(used_bytes),
-                unit: "GiB".into(),
-                refs: ref_count,
-            }
-        })
-        .collect())
+    Ok(raw.into_iter().map(|v| parse_volume(v, &refs)).collect())
+}
+
+fn parse_volume(v: Value, refs: &std::collections::HashMap<String, u32>) -> Volume {
+    // 1.0 nests `name`/`driver`/`source`/`sizeInBytes` under
+    // `configuration`; 0.x had them at the top level. Field names are
+    // unchanged, so resolve the container object once and read through it.
+    let cfg = v.get("configuration").unwrap_or(&v);
+    let name = cfg
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+        .to_string();
+    let driver = cfg
+        .get("driver")
+        .and_then(Value::as_str)
+        .unwrap_or("local")
+        .to_string();
+    let source = cfg
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let capacity_bytes = cfg.get("sizeInBytes").and_then(Value::as_u64).unwrap_or(0);
+    let used_bytes = if source.is_empty() {
+        0
+    } else {
+        std::fs::metadata(&source).map(|m| m.len()).unwrap_or(0)
+    };
+    let ref_count = refs.get(name.as_str()).copied().unwrap_or(0);
+    Volume {
+        name,
+        driver,
+        mountpoint: source,
+        size: bytes_to_gib(capacity_bytes),
+        used: bytes_to_gib(used_bytes),
+        unit: "GiB".into(),
+        refs: ref_count,
+    }
 }
 
 // Scan container ls output for volume mounts and return a name → count map.
@@ -546,12 +579,25 @@ fn volume_ref_counts(ls_bytes: &[u8]) -> std::collections::HashMap<String, u32> 
             .and_then(Value::as_array);
         let Some(mounts) = mounts else { continue };
         for m in mounts {
-            let kind = m.get("type").and_then(Value::as_str).unwrap_or("");
-            if kind != "volume" {
-                continue;
-            }
-            if let Some(src) = m.get("source").and_then(Value::as_str) {
-                *out.entry(src.to_string()).or_insert(0) += 1;
+            // 0.x: `"type": "volume"` with the volume name in `source`.
+            // 1.0: `"type": {"volume": {"name": "...", ...}}` and `source`
+            // holds the backing image path instead of the name.
+            match m.get("type") {
+                Some(Value::String(kind)) if kind == "volume" => {
+                    if let Some(src) = m.get("source").and_then(Value::as_str) {
+                        *out.entry(src.to_string()).or_insert(0) += 1;
+                    }
+                }
+                Some(Value::Object(kind)) => {
+                    if let Some(name) = kind
+                        .get("volume")
+                        .and_then(|vol| vol.get("name"))
+                        .and_then(Value::as_str)
+                    {
+                        *out.entry(name.to_string()).or_insert(0) += 1;
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -561,47 +607,58 @@ fn volume_ref_counts(ls_bytes: &[u8]) -> std::collections::HashMap<String, u32> 
 pub async fn list_networks() -> Result<Vec<Network>> {
     let bytes = run(&["network", "ls", "--format", "json"]).await?;
     let raw: Vec<Value> = serde_json::from_slice(&bytes).unwrap_or_default();
-    Ok(raw
-        .into_iter()
-        .map(|v| {
-            let cfg = v.get("config").cloned().unwrap_or(Value::Null);
-            let name = v
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or("?")
-                .to_string();
-            let mode = cfg
-                .get("mode")
-                .and_then(Value::as_str)
-                .unwrap_or("?")
-                .to_string();
-            // Apple's CLI returns "running" for an up network; the UI treats
-            // "active" as the up state. Normalize so the status dot lights up.
-            let raw_state = v.get("state").and_then(Value::as_str).unwrap_or("active");
-            let state = if matches!(raw_state, "running" | "active" | "up") {
-                "active"
-            } else {
-                "stopped"
-            }
-            .to_string();
-            let subnet = v
-                .get("status")
-                .and_then(|s| s.get("ipv4Subnet").or_else(|| s.get("ipv6Subnet")))
-                .and_then(Value::as_str)
-                .unwrap_or("—")
-                .to_string();
-            Network {
-                id: name.clone(),
-                name,
-                mode,
-                state,
-                subnet,
-                gateway: "—".into(),
-                dns: vec![],
-                containers: 0,
-            }
-        })
-        .collect())
+    Ok(raw.into_iter().map(parse_network).collect())
+}
+
+fn parse_network(v: Value) -> Network {
+    // 0.x called the nested block `config`; 1.0 renamed it
+    // `configuration` and added `ipv4Gateway` to `status`.
+    let cfg = v
+        .get("configuration")
+        .or_else(|| v.get("config"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let name = cfg
+        .get("name")
+        .or_else(|| v.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+        .to_string();
+    let mode = cfg
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+        .to_string();
+    // Apple's CLI returns "running" for an up network; the UI treats
+    // "active" as the up state. Normalize so the status dot lights up.
+    let raw_state = v.get("state").and_then(Value::as_str).unwrap_or("active");
+    let state = if matches!(raw_state, "running" | "active" | "up") {
+        "active"
+    } else {
+        "stopped"
+    }
+    .to_string();
+    let status = v.get("status");
+    let subnet = status
+        .and_then(|s| s.get("ipv4Subnet").or_else(|| s.get("ipv6Subnet")))
+        .and_then(Value::as_str)
+        .unwrap_or("—")
+        .to_string();
+    let gateway = status
+        .and_then(|s| s.get("ipv4Gateway"))
+        .and_then(Value::as_str)
+        .unwrap_or("—")
+        .to_string();
+    Network {
+        id: name.clone(),
+        name,
+        mode,
+        state,
+        subnet,
+        gateway,
+        dns: vec![],
+        containers: 0,
+    }
 }
 
 // ─── Inspect / actions ────────────────────────────────────────────────
@@ -911,6 +968,140 @@ mod tests {
             lines.iter().any(|l| l == "errline"),
             "missing stderr line: {lines:?}"
         );
+    }
+
+    #[test]
+    fn parse_container_1_0_shape() {
+        // Verbatim structure from `container ls --format json` on 1.0.0:
+        // status is an object, startedDate is RFC3339 under status, the
+        // hostname moved to networks[0].options, and mount types are
+        // objects keyed by kind.
+        let v = json!({
+            "id": "cgui-smoke",
+            "status": {
+                "state": "running",
+                "startedDate": "2026-06-12T13:00:26Z",
+                "networks": [{ "hostname": "cgui-smoke", "ipv4Address": "192.168.64.2/24" }]
+            },
+            "configuration": {
+                "id": "cgui-smoke",
+                "creationDate": "2026-06-12T13:00:24Z",
+                "image": { "reference": "docker.io/library/alpine:latest" },
+                "resources": { "cpus": 4, "memoryInBytes": 1073741824u64 },
+                "publishedPorts": [],
+                "networks": [{ "network": "default", "options": { "hostname": "cgui-smoke", "mtu": 1280 } }],
+                "initProcess": { "executable": "sleep", "arguments": ["120"] },
+                "labels": {}
+            }
+        });
+        let c = parse_container(v);
+        assert_eq!(c.status, "running");
+        assert_eq!(c.name, "cgui-smoke");
+        assert_eq!(c.image, "docker.io/library/alpine:latest");
+        // RFC3339 startedDate must produce a real uptime, not "—".
+        assert_ne!(c.uptime, "—");
+        assert_eq!(c.cmd, vec!["sleep", "120"]);
+    }
+
+    #[test]
+    fn parse_image_1_0_shape() {
+        let v = json!({
+            "id": "5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11",
+            "configuration": {
+                "creationDate": "2026-04-15T20:00:31Z",
+                "descriptor": { "digest": "sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11" },
+                "name": "docker.io/library/alpine:latest"
+            },
+            "variants": [
+                { "platform": { "architecture": "amd64", "os": "linux" }, "size": 3865822u64 },
+                { "platform": { "architecture": "arm64", "os": "linux" }, "size": 3999999u64 }
+            ]
+        });
+        let img = parse_image(v);
+        assert_eq!(img.reference, "docker.io/library/alpine:latest");
+        assert_eq!(img.created, "2026-04-15T20:00:31Z");
+        assert_eq!(img.id, "sha256:5b10f432");
+        // Variant sizes are summed bytes → GiB.
+        assert!((img.size - ((3865822.0 + 3999999.0) / (1024.0 * 1024.0 * 1024.0))).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_image_0_x_shape_still_works() {
+        let v = json!({
+            "reference": "docker.io/library/redis:7",
+            "fullSize": "142 MB",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "descriptor": { "digest": "sha256:abcdef0123456789" }
+        });
+        let img = parse_image(v);
+        assert_eq!(img.reference, "docker.io/library/redis:7");
+        assert_eq!(img.created, "2026-01-01T00:00:00Z");
+        assert!((img.size - (142.0 / 1024.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_volume_1_0_shape() {
+        let v = json!({
+            "id": "cgui-test-vol",
+            "configuration": {
+                "creationDate": "2026-06-12T13:00:15Z",
+                "driver": "local",
+                "format": "ext4",
+                "name": "cgui-test-vol",
+                "sizeInBytes": 549755813888u64,
+                "source": "/nonexistent/volumes/cgui-test-vol/volume.img"
+            }
+        });
+        let refs = std::collections::HashMap::from([("cgui-test-vol".to_string(), 2u32)]);
+        let vol = parse_volume(v, &refs);
+        assert_eq!(vol.name, "cgui-test-vol");
+        assert_eq!(vol.driver, "local");
+        assert_eq!(vol.refs, 2);
+        assert!((vol.size - 512.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_network_1_0_shape() {
+        let v = json!({
+            "id": "default",
+            "configuration": {
+                "creationDate": "2026-04-11T19:00:16Z",
+                "mode": "nat",
+                "name": "default"
+            },
+            "status": {
+                "ipv4Gateway": "192.168.64.1",
+                "ipv4Subnet": "192.168.64.0/24",
+                "ipv6Subnet": "fdea:57c1:ba3e:6cbe::/64"
+            }
+        });
+        let n = parse_network(v);
+        assert_eq!(n.name, "default");
+        assert_eq!(n.mode, "nat");
+        assert_eq!(n.state, "active");
+        assert_eq!(n.subnet, "192.168.64.0/24");
+        assert_eq!(n.gateway, "192.168.64.1");
+    }
+
+    #[test]
+    fn volume_ref_counts_handles_both_mount_shapes() {
+        let ls = json!([
+            { "configuration": { "mounts": [
+                // 1.0: type object with the volume name nested inside.
+                { "destination": "/data", "source": "/path/volume.img",
+                  "type": { "volume": { "name": "vol-a", "format": "ext4" } } },
+                // 1.0: non-volume mount types are skipped.
+                { "destination": "/run", "source": "", "type": { "tmpfs": {} } }
+            ] } },
+            { "configuration": { "mounts": [
+                // 0.x: type string with the volume name in source.
+                { "destination": "/data", "source": "vol-a", "type": "volume" },
+                { "destination": "/host", "source": "/host", "type": "bind" }
+            ] } }
+        ]);
+        let counts = volume_ref_counts(serde_json::to_vec(&ls).unwrap().as_slice());
+        assert_eq!(counts.get("vol-a"), Some(&2));
+        assert_eq!(counts.len(), 1);
     }
 
     #[test]
