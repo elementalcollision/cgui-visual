@@ -256,6 +256,30 @@ export function ImagesView({ t, search, onScan, onRun, onInspect, reloadKey = 0 
     if (!target || target === img.ref) return;
     withToast(`tag ${target}`, api.tagImage(img.ref, target)).then(reload).catch(() => {});
   };
+  // Push resolves on the push:done event, not the invoke — the invoke
+  // returns as soon as the child is spawned.
+  const onPush = (img: Image) => {
+    if (!confirm(`Push ${img.ref} to its registry?\nRequires a registry login (Settings → Registry logins).`)) return;
+    let unlisten: (() => void) | null = null;
+    const done = new Promise<void>((resolve, reject) => {
+      api.onPushDone(ok => {
+        unlisten?.();
+        if (ok) resolve(); else reject(new Error('push failed — check registry login and reference'));
+      }).then(fn => { unlisten = fn; });
+      api.startPush(img.ref).catch(e => { unlisten?.(); reject(e); });
+    });
+    withToast(`push ${img.ref}`, done).catch(() => {});
+  };
+  const onSave = async (img: Image) => {
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    const safe = img.ref.split('/').pop()?.replace(/[:@]/g, '_') ?? 'image';
+    const dest = await save({
+      defaultPath: `${safe}.tar`,
+      filters: [{ name: 'OCI image archive', extensions: ['tar'] }],
+    });
+    if (!dest) return;
+    withToast(`save ${img.ref}`, api.saveImage(img.ref, dest)).catch(() => {});
+  };
 
   // Bulk selection (A5). Identical pattern to ContainersView; pruned to
   // visible refs whenever the underlying list refreshes.
@@ -352,6 +376,8 @@ export function ImagesView({ t, search, onScan, onRun, onInspect, reloadKey = 0 
           <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
             <button onClick={() => onInspect(img)} style={iconBtn()} title="Inspect"><Icon name="info" size={13} color={t.fg2} /></button>
             <button onClick={() => onTag(img)} style={iconBtn()} title="Tag"><Icon name="tag" size={13} color={t.fg2} /></button>
+            <button onClick={() => onPush(img)} style={iconBtn()} title="Push to registry"><Icon name="upload" size={13} color={t.fg2} /></button>
+            <button onClick={() => onSave(img)} style={iconBtn()} title="Save as OCI tar…"><Icon name="download" size={13} color={t.fg2} /></button>
             <button onClick={() => onScan(img)} style={iconBtn()} title="Trivy scan"><Icon name="shield" size={13} color={t.fg2} /></button>
             <button onClick={() => onRun(img)} style={iconBtn()} title="Run"><Icon name="play" size={13} color={t.fg2} /></button>
             <button onClick={() => onDelete(img)} style={iconBtn()} title="Delete"><Icon name="trash" size={13} color={t.fg2} /></button>

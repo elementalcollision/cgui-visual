@@ -230,6 +230,44 @@ export const api = {
     if (!inTauri) return () => {};
     return listen<boolean>('pull:done', e => cb(e.payload));
   },
+  onPushLine: async (cb: (line: string) => void): Promise<UnlistenFn> => {
+    if (!inTauri) {
+      // Reuse the pull fixture stream so the push modal animates in dev.
+      let i = 0;
+      const id = window.setInterval(() => {
+        if (i >= fixtures.pullStream.length) { window.clearInterval(id); return; }
+        cb(fixtures.pullStream[i++]);
+      }, 380);
+      return () => window.clearInterval(id);
+    }
+    return listen<string>('push:tick', e => cb(e.payload));
+  },
+  onPushDone: async (cb: (ok: boolean) => void): Promise<UnlistenFn> => {
+    if (!inTauri) return () => {};
+    return listen<boolean>('push:done', e => cb(e.payload));
+  },
+
+  // Image lifecycle (phase 2). save/load move whole archives — strict,
+  // long-running, surfaced via toast by callers.
+  startPush: (reference: string) => inTauri ? invokeStrict<void>('start_push', { reference }) : Promise.resolve(),
+  saveImage: (reference: string, output: string) =>
+    inTauri ? invokeStrict<void>('save_image', { reference, output }) : Promise.resolve(),
+  loadImage: (input: string) =>
+    inTauri ? invokeStrict<string>('load_image', { input }) : Promise.resolve('(dev-mode no-op)'),
+
+  // Container filesystem (phase 2). Either side of copy may be `<id>:<path>`.
+  copyPath: (src: string, dst: string) =>
+    inTauri ? invokeStrict<void>('copy_path', { src, dst }) : Promise.resolve(),
+  exportContainer: (id: string, output: string) =>
+    inTauri ? invokeStrict<void>('export_container', { id, output }) : Promise.resolve(),
+
+  // Registry logins (phase 2). The password goes straight to the CLI's
+  // stdin and into the user's keychain — never persisted app-side.
+  registryList: () => call<{ hostname: string; username: string }[]>('registry_list', []),
+  registryLogin: (server: string, username: string, password: string) =>
+    inTauri ? invokeStrict<void>('registry_login', { server, username, password }) : Promise.resolve(),
+  registryLogout: (server: string) =>
+    inTauri ? invokeStrict<void>('registry_logout', { server }) : Promise.resolve(),
 
   // Prefs persistence. Outside Tauri, hand back defaults / no-op save.
   loadPrefs: () => call<Prefs>('load_prefs', PREFS_DEFAULT),

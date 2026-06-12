@@ -179,6 +179,74 @@ pub async fn system_df() -> Result<runtime::DiskUsage, String> {
     runtime::system_df().await.map_err(err_str)
 }
 
+// ─── Image lifecycle + registry + container fs (1.0 parity, phase 2) ──
+
+#[tauri::command]
+pub async fn save_image(reference: String, output: String) -> Result<(), String> {
+    runtime::save_image(&reference, &output)
+        .await
+        .map_err(err_str)
+}
+
+#[tauri::command]
+pub async fn load_image(input: String) -> Result<String, String> {
+    runtime::load_image(&input).await.map_err(err_str)
+}
+
+// Streamed push, mirroring start_pull: one `push:tick` per progress
+// line, `push:done(bool)` on exit.
+#[tauri::command]
+pub async fn start_push(app: AppHandle, reference: String) -> Result<(), String> {
+    if !runtime::available().await {
+        return Err("container runtime is not available".into());
+    }
+    let child =
+        runtime::spawn(&["image", "push", "--progress", "plain", &reference]).map_err(err_str)?;
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let res = runtime::drain_lines(child, move |line| {
+            let _ = app2.emit("push:tick", line);
+        })
+        .await;
+        let ok = matches!(res, Ok(s) if s.success());
+        let _ = app.emit("push:done", ok);
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn copy_path(src: String, dst: String) -> Result<(), String> {
+    runtime::copy_path(&src, &dst).await.map_err(err_str)
+}
+
+#[tauri::command]
+pub async fn export_container(id: String, output: String) -> Result<(), String> {
+    runtime::export_container(&id, &output)
+        .await
+        .map_err(err_str)
+}
+
+#[tauri::command]
+pub async fn registry_list() -> Result<Vec<runtime::RegistryLogin>, String> {
+    runtime::registry_list().await.map_err(err_str)
+}
+
+#[tauri::command]
+pub async fn registry_login(
+    server: String,
+    username: String,
+    password: String,
+) -> Result<(), String> {
+    runtime::registry_login(&server, &username, &password)
+        .await
+        .map_err(err_str)
+}
+
+#[tauri::command]
+pub async fn registry_logout(server: String) -> Result<(), String> {
+    runtime::registry_logout(&server).await.map_err(err_str)
+}
+
 // Probe used by first-run onboarding. Frontend calls this on mount and
 // shows the OnboardingModal when it returns false. Cheap (single fork +
 // `container --version`), so re-running on a timer is fine.

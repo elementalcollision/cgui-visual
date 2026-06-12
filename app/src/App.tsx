@@ -71,6 +71,21 @@ export default function App() {
     };
   }, [tab]);
 
+  // Import an OCI tar archive (`image load`). Reuses pruneTick as the
+  // generic "list changed outside the view" refresh signal.
+  const onImportImage = async () => {
+    const { open } = await import('@tauri-apps/plugin-dialog');
+    const picked = await open({
+      multiple: false,
+      title: 'Load images from an OCI tar archive',
+      filters: [{ name: 'OCI image archive', extensions: ['tar', 'tgz', 'tar.gz'] }],
+    });
+    if (typeof picked !== 'string') return;
+    withToast('import image', api.loadImage(picked))
+      .then(() => setPruneTick(n => n + 1))
+      .catch(() => {});
+  };
+
   // Load persisted prefs once on mount.
   useEffect(() => {
     api.loadPrefs().then(p => {
@@ -390,6 +405,7 @@ export default function App() {
                 search={search} setSearch={setSearch}
                 onPull={() => setModal({ type: 'pull' })}
                 onPrune={onPrune}
+                onImport={tab === 'images' ? onImportImage : null}
                 onCollapse={() => setCollapsed(!collapsed)}
                 runtime={runtime}
                 dark={dark}
