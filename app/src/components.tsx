@@ -18,7 +18,7 @@ type IconName =
   | 'box' | 'image' | 'database' | 'network' | 'layers' | 'terminal'
   | 'play' | 'stop' | 'restart' | 'trash' | 'info' | 'logs' | 'search'
   | 'pause' | 'plus' | 'download' | 'shield' | 'sun' | 'moon' | 'menu'
-  | 'check' | 'x' | 'cog' | 'heart' | 'chevron';
+  | 'check' | 'x' | 'cog' | 'heart' | 'chevron' | 'tag';
 
 export function Icon({ name, size = 14, color = 'currentColor', strokeWidth = 1.6 }: {
   name: IconName; size?: number; color?: string; strokeWidth?: number;
@@ -51,6 +51,7 @@ export function Icon({ name, size = 14, color = 'currentColor', strokeWidth = 1.
     case 'cog': return <svg viewBox="0 0 24 24" style={s}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3 1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8 1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>;
     case 'heart': return <svg viewBox="0 0 24 24" style={s}><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8z"/></svg>;
     case 'chevron': return <svg viewBox="0 0 24 24" style={s}><path d="M9 18l6-6-6-6"/></svg>;
+    case 'tag': return <svg viewBox="0 0 24 24" style={s}><path d="M20.6 13.4L11 3.8A2 2 0 0 0 9.6 3.2H4a1 1 0 0 0-1 1v5.6a2 2 0 0 0 .6 1.4l9.6 9.6a2 2 0 0 0 2.8 0l4.6-4.6a2 2 0 0 0 0-2.8z"/><circle cx="7.5" cy="7.5" r="1"/></svg>;
     default: return null;
   }
 }
@@ -207,10 +208,13 @@ export function Sidebar({ tab, setTab, collapsed, t, onSettings, onDoctor, runni
 }
 
 // ─── top toolbar ──────────────────────────────────────────────────────
-export function TopBar({ tab, t, search, setSearch, onPull, onCollapse, runtime, dark, setDark, onUpdate, updateCount = 0, updatesSeen = false, headings }: {
+export function TopBar({ tab, t, search, setSearch, onPull, onPrune, onCollapse, runtime, dark, setDark, onUpdate, updateCount = 0, updatesSeen = false, headings }: {
   tab: Tab; t: ThemeTokens;
   search: string; setSearch: (s: string) => void;
   onPull: () => void; onCollapse: () => void;
+  /** Tab-scoped prune action (containers/images/volumes/networks).
+   *  Hidden on tabs without a prune-able resource. */
+  onPrune?: (() => void) | null;
   runtime: Runtime;
   dark: boolean; setDark: (v: boolean) => void;
   onUpdate: (() => void) | null;
@@ -264,6 +268,12 @@ export function TopBar({ tab, t, search, setSearch, onPull, onCollapse, runtime,
       <button onClick={() => setDark(!dark)} style={{ background: 'transparent', border: `1px solid ${t.border}`, borderRadius: 6, color: t.fg2, width: 32, height: 32, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <Icon name={dark ? 'sun' : 'moon'} size={14} />
       </button>
+      {onPrune && (
+        <button onClick={onPrune} title={`Prune ${tab}`} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 12px', height: 32, background: 'transparent', color: t.fg2, border: `1px solid ${t.border}`, borderRadius: 6, fontSize: 13, fontFamily: 'inherit', cursor: 'pointer' }}>
+          <Icon name="trash" size={13} color={t.fg2} />
+          Prune
+        </button>
+      )}
       <button onClick={onPull} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 14px', height: 32, background: t.fg1, color: t.bg, border: 'none', borderRadius: 6, fontSize: 13, fontFamily: 'inherit', fontWeight: 500, cursor: 'pointer' }}>
         <Icon name="plus" size={14} color={t.bg} />
         Pull image

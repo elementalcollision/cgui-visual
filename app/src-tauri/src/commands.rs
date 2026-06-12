@@ -145,6 +145,40 @@ pub async fn run_image(args: runtime::RunArgs) -> Result<String, String> {
     runtime::run_image(args).await.map_err(err_str)
 }
 
+#[tauri::command]
+pub async fn tag_image(source: String, target: String) -> Result<(), String> {
+    runtime::tag_image(&source, &target).await.map_err(err_str)
+}
+
+// ─── Prune + disk usage (1.0 parity) ──────────────────────────────────
+// Each returns the CLI's stdout summary so the UI can toast what was
+// reclaimed. Confirmation happens in the frontend before the call.
+
+#[tauri::command]
+pub async fn prune_containers() -> Result<String, String> {
+    runtime::prune_containers().await.map_err(err_str)
+}
+
+#[tauri::command]
+pub async fn prune_images() -> Result<String, String> {
+    runtime::prune_images().await.map_err(err_str)
+}
+
+#[tauri::command]
+pub async fn prune_volumes() -> Result<String, String> {
+    runtime::prune_volumes().await.map_err(err_str)
+}
+
+#[tauri::command]
+pub async fn prune_networks() -> Result<String, String> {
+    runtime::prune_networks().await.map_err(err_str)
+}
+
+#[tauri::command]
+pub async fn system_df() -> Result<runtime::DiskUsage, String> {
+    runtime::system_df().await.map_err(err_str)
+}
+
 // Probe used by first-run onboarding. Frontend calls this on mount and
 // shows the OnboardingModal when it returns false. Cheap (single fork +
 // `container --version`), so re-running on a timer is fine.

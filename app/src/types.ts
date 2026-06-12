@@ -60,6 +60,21 @@ export interface Network {
   containers: number;
 }
 
+/** Per-category disk usage from `container system df`. Mirrors
+ *  runtime::DiskUsage / DiskUsageRow (serde camelCase). */
+export interface DiskUsageRow {
+  total: number;
+  active: number;
+  sizeInBytes: number;
+  reclaimable: number;
+}
+
+export interface DiskUsage {
+  images: DiskUsageRow;
+  containers: DiskUsageRow;
+  volumes: DiskUsageRow;
+}
+
 export interface Service {
   name: string;
   image: string;
