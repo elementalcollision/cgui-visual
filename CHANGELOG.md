@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-12
+
+Completes Phases 1 and 2 of the apple/container 1.0 divergence
+roadmap (`docs/roadmap-apple-container-1.0.md`).
+
+### Added
+
+- **Registry logins** in Settings — list, log in, log out
+  (`container registry …`). The password is piped to the CLI over
+  `--password-stdin`, never placed in argv or app state; the CLI
+  stores credentials in the macOS keychain.
+- **Image push** — streamed progress over `push:tick`/`push:done`
+  events (same pipeline as pull). Row action on the Images tab.
+- **Image save / import** — save any image as an OCI tar archive via
+  a native save dialog; Import button on the Images tab loads
+  archives back (`image save` / `image load`).
+- **Container file operations** in the detail modal — Copy out…
+  (container → folder), Copy in… (file → container), and Export tar…
+  (full filesystem archive) using the CLI's `<id>:<path>` syntax.
+- **Kill with signal** — the Kill button now prompts for a signal
+  (default SIGKILL) and passes it via `container kill -s`.
+- **Boot log toggle** in the Logs tab — streams the VM console
+  (`logs --boot`) instead of stdio, for containers that die before
+  their entrypoint prints anything. Console lines are excluded from
+  the persisted log history.
+- **Tail selector** in the Logs tab — replay only the last
+  100/500/1000 lines on attach (`-n`).
+
 ## [0.3.0] — 2026-06-12
 
 First release targeting Apple's `container` CLI **1.0.0**. See
@@ -155,7 +183,8 @@ Initial macOS-only release. Tauri + React + TypeScript GUI for Apple's
   binary. Apple's `container` CLI is similarly optional but required for
   any real data.
 
-[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/elementalcollision/cgui-visual/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/elementalcollision/cgui-visual/compare/v0.2.5...v0.3.0
 [0.2.5]: https://github.com/elementalcollision/cgui-visual/compare/v0.2.4...v0.2.5
 [0.1.1]: https://github.com/elementalcollision/cgui-visual/compare/v0.1.0...v0.1.1
