@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-06-12
+
+Completes the apple/container 1.0 divergence roadmap
+(`docs/roadmap-apple-container-1.0.md`) — phases 3 and 4.
+
+### Added
+
+- **Dockerfile builds.** New Build modal on the Images tab: pick a
+  build-context folder and optional Dockerfile, set tag, build-args,
+  target stage, and no-cache, then watch `container build` output
+  stream live with auto-follow and an edit-and-rebuild loop.
+- **Builder panel** in Settings — status of the dedicated build VM
+  with Start / Stop / Delete (delete drops the build cache; the next
+  build recreates it).
+- **Machines panel** in Settings for 1.0's container machines (named
+  VMs that containers run inside): list with default badge and
+  cpu/mem/disk summary, set-default, stop, delete, and a create form.
+  Machines are created without booting and boot on first use.
+- **Run dialog advanced options** (collapsed by default): CPUs,
+  memory, network, platform, working directory, user, volume mounts,
+  labels, remove-after-exit (`--rm`), and Rosetta. The simple
+  name/ports/env/command path is unchanged.
+
 ## [0.4.0] — 2026-06-12
 
 Completes Phases 1 and 2 of the apple/container 1.0 divergence
@@ -183,7 +206,8 @@ Initial macOS-only release. Tauri + React + TypeScript GUI for Apple's
   binary. Apple's `container` CLI is similarly optional but required for
   any real data.
 
-[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/elementalcollision/cgui-visual/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/elementalcollision/cgui-visual/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/elementalcollision/cgui-visual/compare/v0.2.5...v0.3.0
 [0.2.5]: https://github.com/elementalcollision/cgui-visual/compare/v0.2.4...v0.2.5
