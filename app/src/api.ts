@@ -58,12 +58,13 @@ export const api = {
   // Container actions — strict; UI surfaces errors via console + (later) toasts.
   startContainer:   (id: string) => inTauri ? invokeStrict<void>('start_container',   { id }) : Promise.resolve(),
   stopContainer:    (id: string) => inTauri ? invokeStrict<void>('stop_container',    { id }) : Promise.resolve(),
-  killContainer:    (id: string) => inTauri ? invokeStrict<void>('kill_container',    { id }) : Promise.resolve(),
+  killContainer:    (id: string, signal?: string) => inTauri ? invokeStrict<void>('kill_container', { id, signal }) : Promise.resolve(),
   deleteContainer:  (id: string) => inTauri ? invokeStrict<void>('delete_container',  { id }) : Promise.resolve(),
   restartContainer: (id: string) => inTauri ? invokeStrict<void>('restart_container', { id }) : Promise.resolve(),
 
   // Streams: backend spawns a child process, frontend subscribes to events.
-  startLogStream: (id: string) => inTauri ? invokeStrict<void>('start_log_stream', { id }) : Promise.resolve(),
+  startLogStream: (id: string, opts?: { boot?: boolean; tail?: number }) =>
+    inTauri ? invokeStrict<void>('start_log_stream', { id, boot: opts?.boot, tail: opts?.tail }) : Promise.resolve(),
   startPull:      (reference: string) => inTauri ? invokeStrict<void>('start_pull', { reference }) : Promise.resolve(),
 
   // Deletes (strict — caller should confirm first and surface errors via toast).

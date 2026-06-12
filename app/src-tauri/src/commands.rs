@@ -330,8 +330,8 @@ pub async fn stop_container(id: String) -> Result<(), String> {
     runtime::stop(&id).await.map_err(err_str)
 }
 #[tauri::command]
-pub async fn kill_container(id: String) -> Result<(), String> {
-    runtime::kill(&id).await.map_err(err_str)
+pub async fn kill_container(id: String, signal: Option<String>) -> Result<(), String> {
+    runtime::kill(&id, signal.as_deref()).await.map_err(err_str)
 }
 #[tauri::command]
 pub async fn delete_container(id: String) -> Result<(), String> {
@@ -369,7 +369,12 @@ fn err_str(e: anyhow::Error) -> String {
 // child via kill_on_drop.
 
 #[tauri::command]
-pub async fn start_log_stream(app: AppHandle, id: String) -> Result<(), String> {
+pub async fn start_log_stream(
+    app: AppHandle,
+    id: String,
+    boot: Option<bool>,
+    tail: Option<u32>,
+) -> Result<(), String> {
     if !runtime::available().await {
         // Dev: replay fixtures with a small delay so the LogsView still
         // gets data for design work. Release: no-op — emitting fake
@@ -385,14 +390,33 @@ pub async fn start_log_stream(app: AppHandle, id: String) -> Result<(), String> 
         }
         return Ok(());
     }
-    let child = runtime::spawn(&["logs", "-f", &id]).map_err(err_str)?;
+    // `--boot` swaps stdio for the VM boot log (1.0); `-n` tails the
+    // last N lines instead of replaying the whole history on attach.
+    let mut argv: Vec<String> = vec!["logs".into(), "-f".into()];
+    if boot.unwrap_or(false) {
+        argv.push("--boot".into());
+    }
+    let tail_str;
+    if let Some(n) = tail.filter(|n| *n > 0) {
+        tail_str = n.to_string();
+        argv.push("-n".into());
+        argv.push(tail_str);
+    }
+    argv.push(id.clone());
+    let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let child = runtime::spawn(&argv_ref).map_err(err_str)?;
     let app2 = app.clone();
     let id_for_persist = id.clone();
+    // Boot logs are VM console output, not container stdio — don't mix
+    // them into the per-container log history sidecar.
+    let persist = !boot.unwrap_or(false);
     tauri::async_runtime::spawn(async move {
         let _ = runtime::drain_lines(child, move |line| {
             // Persist before emitting so a crash mid-tick still gets the
             // line on disk. record_log no-ops when the DB isn't init'd.
-            crate::history::record_log(&id_for_persist, &line);
+            if persist {
+                crate::history::record_log(&id_for_persist, &line);
+            }
             let _ = app2.emit("logs:tick", line);
         })
         .await;

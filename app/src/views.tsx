@@ -796,6 +796,12 @@ export function LogsView({ t, target }: { t: ThemeTokens; target?: string }) {
   const [level, setLevel] = useState<LogLevel>('all');
   const [search, setSearch] = useState('');
   const [stripColors, setStripColors] = useState(false);
+  // Boot-log mode streams the VM console (`logs --boot`) instead of the
+  // container's stdio — invaluable when a container dies before its
+  // entrypoint produces any output. Tail caps how much history the CLI
+  // replays on attach (0 = everything).
+  const [bootLog, setBootLog] = useState(false);
+  const [tail, setTail] = useState(0);
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
 
@@ -804,8 +810,9 @@ export function LogsView({ t, target }: { t: ThemeTokens; target?: string }) {
     let unlisten: (() => void) | null = null;
     setLines([]);
     // Seed with persisted history so the view isn't blank between
-    // restarts (B12). Live tail then appends as usual on top.
-    if (target) {
+    // restarts (B12). Live tail then appends as usual on top. Boot mode
+    // skips the seed — the sidecar holds stdio lines, not console output.
+    if (target && !bootLog) {
       api.loadLogs(target, 500).then(rows => {
         if (cancelled) return;
         if (rows.length) setLines(rows.map(r => r.line));
@@ -815,9 +822,12 @@ export function LogsView({ t, target }: { t: ThemeTokens; target?: string }) {
       if (cancelled || pausedRef.current) return;
       setLines(prev => prev.length >= LOG_BUFFER_MAX ? [...prev.slice(-LOG_BUFFER_MAX + 1), line] : [...prev, line]);
     }).then(fn => { if (cancelled) fn(); else unlisten = fn; });
-    if (target) api.startLogStream(target).catch(e => console.warn('start_log_stream failed', e));
+    if (target) {
+      api.startLogStream(target, { boot: bootLog, tail: tail || undefined })
+        .catch(e => console.warn('start_log_stream failed', e));
+    }
     return () => { cancelled = true; unlisten?.(); };
-  }, [target]);
+  }, [target, bootLog, tail]);
 
   // Filtering happens at render time, not on the buffer, so toggling level
   // or search doesn't lose lines that arrived during the previous filter.
@@ -877,6 +887,30 @@ export function LogsView({ t, target }: { t: ThemeTokens; target?: string }) {
         <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search…"
           style={{ padding: '5px 10px', background: t.surfaceAlt, border: `1px solid ${t.border}`, borderRadius: 6, color: t.fg1, fontSize: 12, fontFamily: t.mono, width: 200, outline: 'none' }} />
         <div style={{ flex: 1 }} />
+        <button
+          style={{
+            ...pillBtn(t),
+            background: bootLog ? t.selected : t.surfaceAlt,
+            borderColor: bootLog ? t.accent : t.border,
+            color: bootLog ? t.fg1 : t.fg2,
+          }}
+          onClick={() => setBootLog(b => !b)}
+          disabled={!target}
+          title="Stream the VM boot log (container logs --boot) instead of stdio — useful when a container dies before producing output"
+        >Boot log</button>
+        <select
+          value={tail}
+          onChange={e => setTail(Number(e.target.value))}
+          disabled={!target}
+          title="How many historical lines the CLI replays on attach"
+          style={{ padding: '5px 8px', background: t.surfaceAlt, border: `1px solid ${t.border}`, borderRadius: 6, color: t.fg2, fontSize: 12, fontFamily: t.mono, outline: 'none', cursor: 'pointer' }}
+        >
+          <option value={0}>tail: all</option>
+          <option value={100}>tail: 100</option>
+          <option value={500}>tail: 500</option>
+          <option value={1000}>tail: 1000</option>
+        </select>
+        <span style={{ width: 1, height: 18, background: t.border, margin: '0 4px' }} />
         <button
           style={{
             ...pillBtn(t),
