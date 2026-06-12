@@ -766,6 +766,89 @@ pub async fn tag_image(source: &str, target: &str) -> Result<()> {
     run(&["image", "tag", source, target]).await.map(|_| ())
 }
 
+// ─── Builder VM lifecycle (`container builder …`, 1.0 parity) ─────────
+// `builder status --format json` returns the builder container in the
+// same shape as `ls`, so parse_container is reused. None = no builder
+// instance exists yet.
+
+pub async fn builder_status() -> Result<Option<Container>> {
+    let bytes = run(&["builder", "status", "--format", "json"]).await?;
+    let raw: Vec<Value> = serde_json::from_slice(&bytes).context("parse `builder status` json")?;
+    Ok(raw.into_iter().next().map(parse_container))
+}
+
+/// Start (creating if needed) the builder VM. First start pulls the
+/// builder shim image, so this runs on the long timeout.
+pub async fn builder_start(cpus: Option<u32>, memory: Option<String>) -> Result<()> {
+    let mut argv: Vec<String> = vec!["builder".into(), "start".into()];
+    if let Some(c) = cpus.filter(|c| *c > 0) {
+        argv.push("--cpus".into());
+        argv.push(c.to_string());
+    }
+    if let Some(m) = memory.filter(|m| !m.is_empty()) {
+        argv.push("--memory".into());
+        argv.push(m);
+    }
+    let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
+    run_with_timeout(&argv_ref, RUN_LONG_TIMEOUT)
+        .await
+        .map(|_| ())
+}
+
+pub async fn builder_stop() -> Result<()> {
+    run_with_timeout(&["builder", "stop"], RUN_LONG_TIMEOUT)
+        .await
+        .map(|_| ())
+}
+
+pub async fn builder_delete() -> Result<()> {
+    run_with_timeout(&["builder", "delete", "--force"], RUN_LONG_TIMEOUT)
+        .await
+        .map(|_| ())
+}
+
+// Args for a streamed `container build`. Mirrors the BuildModal form.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildArgs {
+    pub context: String,
+    #[serde(default)]
+    pub tag: Option<String>,
+    #[serde(default)]
+    pub dockerfile: Option<String>,
+    #[serde(default)]
+    pub build_args: Vec<String>, // KEY=value each
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub no_cache: bool,
+}
+
+pub fn build_argv(args: &BuildArgs) -> Vec<String> {
+    let mut argv: Vec<String> = vec!["build".into(), "--progress".into(), "plain".into()];
+    if let Some(t) = args.tag.as_deref().filter(|s| !s.is_empty()) {
+        argv.push("-t".into());
+        argv.push(t.into());
+    }
+    if let Some(f) = args.dockerfile.as_deref().filter(|s| !s.is_empty()) {
+        argv.push("-f".into());
+        argv.push(f.into());
+    }
+    for ba in args.build_args.iter().filter(|s| !s.is_empty()) {
+        argv.push("--build-arg".into());
+        argv.push(ba.clone());
+    }
+    if let Some(stage) = args.target.as_deref().filter(|s| !s.is_empty()) {
+        argv.push("--target".into());
+        argv.push(stage.into());
+    }
+    if args.no_cache {
+        argv.push("--no-cache".into());
+    }
+    argv.push(args.context.clone());
+    argv
+}
+
 // ─── Image lifecycle: push / save / load (1.0 parity) ─────────────────
 // All three can move gigabytes, so they run on the long timeout. Push
 // streams via spawn + drain_lines in commands.rs instead (progress UI).

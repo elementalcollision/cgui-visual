@@ -15,6 +15,7 @@ const StackGraphModal = lazy(() => import('./StackGraph'));
 import {
   DetailModal,
   PullModal,
+  BuildModal,
   TrivyModal,
   UpdateModal,
   DoctorModal,
@@ -72,6 +73,8 @@ export default function ModalsHost(props: {
       />;
     case 'pull':
       return <PullModal t={t} onClose={onClose} />;
+    case 'build':
+      return <BuildModal t={t} onClose={onClose} />;
     case 'trivy':
       return <TrivyModal t={t} image={modal.image} onClose={onClose} />;
     case 'update':

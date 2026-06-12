@@ -169,6 +169,7 @@ export type Runtime = 'container' | 'docker' | 'podman';
 export type Modal =
   | { type: 'detail'; payload: Container }
   | { type: 'pull' }
+  | { type: 'build' }
   | { type: 'trivy'; image?: string }
   | { type: 'update' }
   | { type: 'doctor' }

@@ -247,6 +247,50 @@ pub async fn registry_logout(server: String) -> Result<(), String> {
     runtime::registry_logout(&server).await.map_err(err_str)
 }
 
+// ─── Build experience (phase 3) ───────────────────────────────────────
+
+#[tauri::command]
+pub async fn builder_status() -> Result<Option<crate::model::Container>, String> {
+    runtime::builder_status().await.map_err(err_str)
+}
+
+#[tauri::command]
+pub async fn builder_start(cpus: Option<u32>, memory: Option<String>) -> Result<(), String> {
+    runtime::builder_start(cpus, memory).await.map_err(err_str)
+}
+
+#[tauri::command]
+pub async fn builder_stop() -> Result<(), String> {
+    runtime::builder_stop().await.map_err(err_str)
+}
+
+#[tauri::command]
+pub async fn builder_delete() -> Result<(), String> {
+    runtime::builder_delete().await.map_err(err_str)
+}
+
+// Streamed Dockerfile build: one `build:tick` per output line,
+// `build:done(bool)` on exit. Mirrors start_pull / start_push.
+#[tauri::command]
+pub async fn start_build(app: AppHandle, args: runtime::BuildArgs) -> Result<(), String> {
+    if !runtime::available().await {
+        return Err("container runtime is not available".into());
+    }
+    let argv = runtime::build_argv(&args);
+    let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let child = runtime::spawn(&argv_ref).map_err(err_str)?;
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let res = runtime::drain_lines(child, move |line| {
+            let _ = app2.emit("build:tick", line);
+        })
+        .await;
+        let ok = matches!(res, Ok(s) if s.success());
+        let _ = app.emit("build:done", ok);
+    });
+    Ok(())
+}
+
 // Probe used by first-run onboarding. Frontend calls this on mount and
 // shows the OnboardingModal when it returns false. Cheap (single fork +
 // `container --version`), so re-running on a timer is fine.
