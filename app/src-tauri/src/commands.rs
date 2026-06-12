@@ -269,6 +269,44 @@ pub async fn builder_delete() -> Result<(), String> {
     runtime::builder_delete().await.map_err(err_str)
 }
 
+// ─── Container machines (phase 4) ─────────────────────────────────────
+
+#[tauri::command]
+pub async fn machine_list() -> Result<Vec<runtime::Machine>, String> {
+    if !runtime::available().await {
+        return Ok(vec![]);
+    }
+    runtime::machine_list().await.map_err(err_str)
+}
+
+#[tauri::command]
+pub async fn machine_create(
+    name: String,
+    image: String,
+    cpus: Option<u32>,
+    memory: Option<String>,
+    no_boot: Option<bool>,
+) -> Result<(), String> {
+    runtime::machine_create(&name, &image, cpus, memory, no_boot.unwrap_or(true))
+        .await
+        .map_err(err_str)
+}
+
+#[tauri::command]
+pub async fn machine_stop(name: String) -> Result<(), String> {
+    runtime::machine_stop(&name).await.map_err(err_str)
+}
+
+#[tauri::command]
+pub async fn machine_delete(name: String) -> Result<(), String> {
+    runtime::machine_delete(&name).await.map_err(err_str)
+}
+
+#[tauri::command]
+pub async fn machine_set_default(name: String) -> Result<(), String> {
+    runtime::machine_set_default(&name).await.map_err(err_str)
+}
+
 // Streamed Dockerfile build: one `build:tick` per output line,
 // `build:done(bool)` on exit. Mirrors start_pull / start_push.
 #[tauri::command]

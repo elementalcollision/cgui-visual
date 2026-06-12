@@ -78,9 +78,23 @@ export const api = {
   inspectNetwork: (id: string)        => inTauri ? invokeStrict<string>('inspect_network', { id })        : Promise.resolve('{\n  "id": "' + id + '"\n}'),
   inspectImage:   (reference: string) => inTauri ? invokeStrict<string>('inspect_image',   { reference }) : Promise.resolve('{\n  "reference": "' + reference + '",\n  "layers": []\n}'),
 
-  // run image: returns the new container id on success.
-  runImage: (args: { image: string; name?: string; ports?: string[]; env?: string[]; command?: string }) =>
+  // run image: returns the new container id on success. The advanced
+  // block (resources/mounts/identity/platform) is phase-4 parity.
+  runImage: (args: {
+    image: string; name?: string; ports?: string[]; env?: string[]; command?: string;
+    cpus?: number; memory?: string; volumes?: string[]; labels?: string[];
+    network?: string; workdir?: string; user?: string; platform?: string;
+    rm?: boolean; rosetta?: boolean;
+  }) =>
     inTauri ? invokeStrict<string>('run_image', { args }) : Promise.resolve('dev-mode-no-op'),
+
+  // Container machines (phase 4): named VMs that containers run in.
+  machineList: () => call<{ id: string; status: string; cpus: number; memory: number; diskSize: number; isDefault: boolean; createdDate: string }[]>('machine_list', []),
+  machineCreate: (name: string, image: string, cpus?: number, memory?: string, noBoot = true) =>
+    inTauri ? invokeStrict<void>('machine_create', { name, image, cpus, memory, noBoot }) : Promise.resolve(),
+  machineStop: (name: string) => inTauri ? invokeStrict<void>('machine_stop', { name }) : Promise.resolve(),
+  machineDelete: (name: string) => inTauri ? invokeStrict<void>('machine_delete', { name }) : Promise.resolve(),
+  machineSetDefault: (name: string) => inTauri ? invokeStrict<void>('machine_set_default', { name }) : Promise.resolve(),
 
   // Tag an existing image with a new reference.
   tagImage: (source: string, target: string) =>
