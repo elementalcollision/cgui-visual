@@ -445,10 +445,15 @@ export function DetailModal({ item, t, onClose, onExec }: {
           </button>
           {c.status === 'running' && (
             <button style={pillBtn(t, t.danger)}
+                    title="Send a signal to the container's init process"
                     onClick={() => {
-                      if (!confirm(`Force-kill ${c.name}?\nThis sends SIGKILL — the container will not get a chance to clean up.`)) return;
-                      withToast(`kill ${c.name}`, api.killContainer(c.id)).then(onClose).catch(() => {});
-                    }}>Kill</button>
+                      const sig = prompt(
+                        `Signal to send to ${c.name}:\n(SIGKILL force-kills; SIGTERM asks it to exit cleanly; SIGHUP reloads many daemons)`,
+                        'SIGKILL'
+                      );
+                      if (!sig) return;
+                      withToast(`kill ${c.name} (${sig.trim()})`, api.killContainer(c.id, sig.trim())).then(onClose).catch(() => {});
+                    }}>Kill…</button>
           )}
           {c.status === 'running'
             ? <button style={pillBtn(t, t.danger)} onClick={() => withToast(`stop ${c.name}`, api.stopContainer(c.id)).then(onClose).catch(() => {})}>Stop</button>

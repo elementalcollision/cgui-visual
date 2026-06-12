@@ -694,8 +694,13 @@ pub async fn start(id: &str) -> Result<()> {
 pub async fn stop(id: &str) -> Result<()> {
     run(&["stop", id]).await.map(|_| ())
 }
-pub async fn kill(id: &str) -> Result<()> {
-    run(&["kill", id]).await.map(|_| ())
+/// Kill with an optional signal (`container kill -s <signal> <id>`).
+/// `None` keeps the CLI's default (SIGKILL).
+pub async fn kill(id: &str, signal: Option<&str>) -> Result<()> {
+    match signal.filter(|s| !s.is_empty()) {
+        Some(sig) => run(&["kill", "-s", sig, id]).await.map(|_| ()),
+        None => run(&["kill", id]).await.map(|_| ()),
+    }
 }
 pub async fn delete(id: &str) -> Result<()> {
     run(&["delete", id]).await.map(|_| ())
