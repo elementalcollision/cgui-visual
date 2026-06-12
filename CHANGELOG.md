@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-06-12
+
+First release targeting Apple's `container` CLI **1.0.0**. See
+`docs/roadmap-apple-container-1.0.md` for the full divergence roadmap
+this release begins to execute.
+
+### Fixed
+
+- **container CLI 1.0.0 compatibility.** The 1.0 release restructured
+  most list-command JSON; without this fix every container showed
+  status "unknown" with no uptime, images showed "?" at 0 bytes, and
+  volumes showed "?". All parsers (`ls`, `image ls`, `volume ls`,
+  `network ls`) now accept both the 0.x and 1.0 shapes — verified
+  against a live 1.0.0 install plus unit tests built from verbatim
+  1.0 output. Mount-type objects (`{"volume": {...}}`) are handled so
+  volume reference counts work again.
+
+### Added
+
+- **Prune** button in the top bar, scoped to the active tab —
+  containers (all stopped), images (dangling), volumes (unreferenced),
+  networks (unconnected). Confirms first, then toasts the CLI's
+  reclaimed-space summary.
+- **Tag** action on image rows (`container image tag`).
+- **Disk usage** panel in Settings backed by `container system df`:
+  active counts, total size, and reclaimable space per category.
+- Networks table now shows the **gateway** (exposed by 1.0's
+  `network ls`).
+
 ## [0.2.5] — 2026-05-15
 
 ### Fixed
@@ -126,7 +155,8 @@ Initial macOS-only release. Tauri + React + TypeScript GUI for Apple's
   binary. Apple's `container` CLI is similarly optional but required for
   any real data.
 
-[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/elementalcollision/cgui-visual/compare/v0.2.5...v0.3.0
 [0.2.5]: https://github.com/elementalcollision/cgui-visual/compare/v0.2.4...v0.2.5
 [0.1.1]: https://github.com/elementalcollision/cgui-visual/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/elementalcollision/cgui-visual/releases/tag/v0.1.0
