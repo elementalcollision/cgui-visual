@@ -261,6 +261,31 @@ export const api = {
   exportContainer: (id: string, output: string) =>
     inTauri ? invokeStrict<void>('export_container', { id, output }) : Promise.resolve(),
 
+  // Build experience (phase 3). The builder is a dedicated VM; status
+  // returns null when no builder instance exists yet.
+  builderStatus: () => call<Container | null>('builder_status', null),
+  builderStart: (cpus?: number, memory?: string) =>
+    inTauri ? invokeStrict<void>('builder_start', { cpus, memory }) : Promise.resolve(),
+  builderStop: () => inTauri ? invokeStrict<void>('builder_stop') : Promise.resolve(),
+  builderDelete: () => inTauri ? invokeStrict<void>('builder_delete') : Promise.resolve(),
+  startBuild: (args: { context: string; tag?: string; dockerfile?: string; buildArgs?: string[]; target?: string; noCache?: boolean }) =>
+    inTauri ? invokeStrict<void>('start_build', { args }) : Promise.resolve(),
+  onBuildLine: async (cb: (line: string) => void): Promise<UnlistenFn> => {
+    if (!inTauri) {
+      let i = 0;
+      const id = window.setInterval(() => {
+        if (i >= fixtures.pullStream.length) { window.clearInterval(id); return; }
+        cb(fixtures.pullStream[i++]);
+      }, 200);
+      return () => window.clearInterval(id);
+    }
+    return listen<string>('build:tick', e => cb(e.payload));
+  },
+  onBuildDone: async (cb: (ok: boolean) => void): Promise<UnlistenFn> => {
+    if (!inTauri) return () => {};
+    return listen<boolean>('build:done', e => cb(e.payload));
+  },
+
   // Registry logins (phase 2). The password goes straight to the CLI's
   // stdin and into the user's keychain — never persisted app-side.
   registryList: () => call<{ hostname: string; username: string }[]>('registry_list', []),

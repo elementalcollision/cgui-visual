@@ -406,6 +406,7 @@ export default function App() {
                 onPull={() => setModal({ type: 'pull' })}
                 onPrune={onPrune}
                 onImport={tab === 'images' ? onImportImage : null}
+                onBuild={tab === 'images' ? () => setModal({ type: 'build' }) : null}
                 onCollapse={() => setCollapsed(!collapsed)}
                 runtime={runtime}
                 dark={dark}

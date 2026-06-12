@@ -209,7 +209,7 @@ export function Sidebar({ tab, setTab, collapsed, t, onSettings, onDoctor, runni
 }
 
 // ─── top toolbar ──────────────────────────────────────────────────────
-export function TopBar({ tab, t, search, setSearch, onPull, onPrune, onImport, onCollapse, runtime, dark, setDark, onUpdate, updateCount = 0, updatesSeen = false, headings }: {
+export function TopBar({ tab, t, search, setSearch, onPull, onPrune, onImport, onBuild, onCollapse, runtime, dark, setDark, onUpdate, updateCount = 0, updatesSeen = false, headings }: {
   tab: Tab; t: ThemeTokens;
   search: string; setSearch: (s: string) => void;
   onPull: () => void; onCollapse: () => void;
@@ -218,6 +218,8 @@ export function TopBar({ tab, t, search, setSearch, onPull, onPrune, onImport, o
   onPrune?: (() => void) | null;
   /** Import an image archive (`image load`). Images tab only. */
   onImport?: (() => void) | null;
+  /** Open the Dockerfile build modal. Images tab only. */
+  onBuild?: (() => void) | null;
   runtime: Runtime;
   dark: boolean; setDark: (v: boolean) => void;
   onUpdate: (() => void) | null;
@@ -271,6 +273,12 @@ export function TopBar({ tab, t, search, setSearch, onPull, onPrune, onImport, o
       <button onClick={() => setDark(!dark)} style={{ background: 'transparent', border: `1px solid ${t.border}`, borderRadius: 6, color: t.fg2, width: 32, height: 32, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <Icon name={dark ? 'sun' : 'moon'} size={14} />
       </button>
+      {onBuild && (
+        <button onClick={onBuild} title="Build an image from a Dockerfile" style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 12px', height: 32, background: 'transparent', color: t.fg2, border: `1px solid ${t.border}`, borderRadius: 6, fontSize: 13, fontFamily: 'inherit', cursor: 'pointer' }}>
+          <Icon name="layers" size={13} color={t.fg2} />
+          Build
+        </button>
+      )}
       {onImport && (
         <button onClick={onImport} title="Load images from an OCI tar archive" style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 12px', height: 32, background: 'transparent', color: t.fg2, border: `1px solid ${t.border}`, borderRadius: 6, fontSize: 13, fontFamily: 'inherit', cursor: 'pointer' }}>
           <Icon name="download" size={13} color={t.fg2} />
