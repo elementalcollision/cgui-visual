@@ -132,3 +132,13 @@ jobs:
         # workflow always runs its current logic, not the version frozen
         # at the release tag.
         run: gh workflow run updater-manifest.yml --repo "$GITHUB_REPOSITORY" --ref main
+
+      # Same hand-off rationale as the manifest trigger above: the
+      # GITHUB_TOKEN-published release won't fire `release: published`,
+      # so dispatch the Homebrew tap bump explicitly. Keeps the cask in
+      # lockstep with every release. Requires the HOMEBREW_TAP_TOKEN
+      # secret (see tap-bump.yml's header for setup).
+      - name: Trigger Homebrew tap bump
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run tap-bump.yml --repo "$GITHUB_REPOSITORY" --ref main

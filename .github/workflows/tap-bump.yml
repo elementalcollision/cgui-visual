@@ -1,0 +1,109 @@
+name: Bump Homebrew tap
+
+# After a release is published, bump the Homebrew cask in the
+# elementalcollision/homebrew-cgui-visual tap to the new version and the
+# published .dmg's sha256. Keeps the tap in lockstep with releases so it
+# never drifts behind — it sat at 0.2.4 while the app was already at
+# 0.5.0 before this was automated.
+#
+# Trigger model mirrors updater-manifest.yml: the PRIMARY path is the
+# explicit `workflow_dispatch` fired from release.yml's publish-release
+# job, because a release published by GITHUB_TOKEN does NOT fire the
+# implicit `release: published` event (GitHub's anti-recursion guard).
+# The `release: published` trigger here is the FALLBACK for releases
+# published manually through the GitHub UI.
+#
+# One-time setup:
+#   The default GITHUB_TOKEN is scoped to THIS repo and cannot push to
+#   the tap. Create a fine-grained Personal Access Token scoped to the
+#   elementalcollision/homebrew-cgui-visual repository with
+#   Repository permissions -> Contents: Read and write, then add it to
+#   THIS repo's Actions secrets as HOMEBREW_TAP_TOKEN.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    name: Update cask
+    runs-on: ubuntu-latest
+    steps:
+      # Fail early and legibly if the cross-repo PAT is missing, rather
+      # than letting the tap checkout die with a cryptic 403.
+      - name: Verify tap token is configured
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::error::HOMEBREW_TAP_TOKEN is not set. Create a fine-grained PAT with Contents: read/write on elementalcollision/homebrew-cgui-visual and add it as a repo secret (see this workflow's header)."
+            exit 1
+          fi
+
+      - name: Resolve version + dmg checksum
+        id: rel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Always read the latest published release, so this behaves the
+          # same whether fired by release.yml's dispatch or a manual UI
+          # publish. (This project never ships prereleases, which
+          # releases/latest would otherwise skip.)
+          REL=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest")
+          TAG=$(echo "$REL" | jq -r .tag_name)
+          VER=${TAG#v}
+          DMG_URL=$(echo "$REL" | jq -r '.assets[] | select(.name | test("universal\\.dmg$")) | .browser_download_url' | head -n1)
+          if [ -z "$DMG_URL" ] || [ "$DMG_URL" = "null" ]; then
+            echo "::error::no universal.dmg asset found on release $TAG"
+            exit 1
+          fi
+          echo "Downloading $DMG_URL"
+          curl -sfL "$DMG_URL" -o cgui.dmg
+          SHA=$(shasum -a 256 cgui.dmg | awk '{print $1}')
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Resolved cgui-visual $VER  sha256=$SHA"
+
+      - name: Checkout tap
+        uses: actions/checkout@v6
+        with:
+          repository: elementalcollision/homebrew-cgui-visual
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Rewrite cask version + sha256
+        env:
+          VER: ${{ steps.rel.outputs.version }}
+          SHA: ${{ steps.rel.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          CASK=tap/Casks/cgui-visual.rb
+          # Anchored to the leading two-space indent: exactly one version
+          # and one sha256 line live at the top of the cask.
+          sed -i -E "s/^  version \".*\"/  version \"${VER}\"/" "$CASK"
+          sed -i -E "s/^  sha256 \".*\"/  sha256 \"${SHA}\"/" "$CASK"
+          echo "--- head of updated cask ---"
+          head -5 "$CASK"
+
+      - name: Commit + push if changed
+        working-directory: tap
+        env:
+          VER: ${{ steps.rel.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Idempotent: re-running on an already-bumped release is a no-op
+          # rather than an empty commit.
+          if git diff --quiet; then
+            echo "Cask already at ${VER} — nothing to do."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/cgui-visual.rb
+          git commit -m "cgui-visual ${VER}"
+          git push
