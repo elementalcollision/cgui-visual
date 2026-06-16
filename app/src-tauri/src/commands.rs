@@ -269,6 +269,29 @@ pub async fn builder_delete() -> Result<(), String> {
     runtime::builder_delete().await.map_err(err_str)
 }
 
+// Runtime service controls. Sudo-free; surfaced as one-click buttons in
+// Doctor (start) and Settings (start/stop). Fixed argv, no user input.
+#[tauri::command]
+pub async fn system_start() -> Result<(), String> {
+    runtime::system_start().await.map_err(err_str)
+}
+
+#[tauri::command]
+pub async fn system_stop() -> Result<(), String> {
+    runtime::system_stop().await.map_err(err_str)
+}
+
+// Whether the runtime services are currently up. Drives the Settings
+// Services panel's status dot. Returns false (not an error) when the
+// runtime isn't installed, so the panel renders a clean stopped state.
+#[tauri::command]
+pub async fn system_status() -> Result<bool, String> {
+    if !runtime::available().await {
+        return Ok(false);
+    }
+    runtime::system_running().await.map_err(err_str)
+}
+
 // ─── Container machines (phase 4) ─────────────────────────────────────
 
 #[tauri::command]

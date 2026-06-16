@@ -178,7 +178,12 @@ pub enum DoctorFix {
     /// Open this URL in the user's default browser.
     Url { label: String, url: String },
     /// Copy this shell command to the clipboard so the user can paste it
-    /// into Terminal. We never run shell commands directly from doctor —
-    /// `brew install …` etc. should be opt-in to keep the surface safe.
+    /// into Terminal. Used for fixes we won't run for the user — e.g.
+    /// `brew install …` — to keep the surface safe.
     Copy { label: String, command: String },
+    /// Run a known-safe, sudo-free remediation directly. `action` is a
+    /// closed vocabulary the frontend maps to a dedicated command (e.g.
+    /// "system-start" → the system_start command); the renderer never
+    /// passes a free-form command back to the backend.
+    Run { label: String, action: String },
 }

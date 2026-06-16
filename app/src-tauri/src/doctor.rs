@@ -48,24 +48,25 @@ pub async fn run() -> Vec<DoctorCheck> {
     {
         Ok(o) if o.status.success() => {
             let body = String::from_utf8_lossy(&o.stdout);
-            if body.lines().any(|l| l.contains("running")) {
+            // Precise match: a naive contains("running") also matches the
+            // stopped message "apiserver is not running", which would hide
+            // the Start-services fix exactly when it's needed.
+            if crate::runtime::parse_system_running(&body) {
                 out.push(ok("container system status: running".into()));
             } else {
-                let mut c = warn(
-                    "container system status not running — try `container system start`".into(),
-                );
-                c.fix = Some(DoctorFix::Copy {
-                    label: "Copy `container system start`".into(),
-                    command: "container system start".into(),
+                let mut c = warn("container system status not running".into());
+                c.fix = Some(DoctorFix::Run {
+                    label: "Start services".into(),
+                    action: "system-start".into(),
                 });
                 out.push(c);
             }
         }
         _ => {
             let mut c = warn("could not query `container system status`".into());
-            c.fix = Some(DoctorFix::Copy {
-                label: "Copy `container system start`".into(),
-                command: "container system start".into(),
+            c.fix = Some(DoctorFix::Run {
+                label: "Start services".into(),
+                action: "system-start".into(),
             });
             out.push(c);
         }
