@@ -1076,7 +1076,14 @@ export function UpdateModal({ t, onClose }: { t: ThemeTokens; onClose: () => voi
 // Fire a DoctorFix. URL fixes go through the opener plugin (or a fallback
 // window.open in browser-dev mode). Copy fixes write to the clipboard and
 // flash the button label so the user sees confirmation.
-async function runDoctorFix(fix: DoctorFix): Promise<'opened' | 'copied'> {
+// Maps a DoctorFix `run` action token to its dedicated, fixed-argv
+// command. Closed set — an unknown action throws rather than doing
+// anything resembling arbitrary execution.
+const DOCTOR_ACTIONS: Record<string, () => Promise<void>> = {
+  'system-start': () => api.systemStart(),
+};
+
+async function runDoctorFix(fix: DoctorFix): Promise<'opened' | 'copied' | 'ran'> {
   if (fix.kind === 'url') {
     try {
       const { openUrl } = await import('@tauri-apps/plugin-opener');
@@ -1086,19 +1093,29 @@ async function runDoctorFix(fix: DoctorFix): Promise<'opened' | 'copied'> {
     }
     return 'opened';
   }
+  if (fix.kind === 'run') {
+    const action = DOCTOR_ACTIONS[fix.action];
+    if (!action) throw new Error(`unknown doctor action: ${fix.action}`);
+    await action();
+    return 'ran';
+  }
   await navigator.clipboard?.writeText(fix.command);
   return 'copied';
 }
 
 function DoctorRow({ t, d }: { t: ThemeTokens; d: DoctorCheck }) {
-  const [flash, setFlash] = useState<'opened' | 'copied' | null>(null);
+  const [flash, setFlash] = useState<'opened' | 'copied' | 'ran' | null>(null);
+  const [busy, setBusy] = useState(false);
   useEffect(() => {
     if (!flash) return;
     const id = window.setTimeout(() => setFlash(null), 1500);
     return () => window.clearTimeout(id);
   }, [flash]);
   const onClick = async () => {
-    if (!d.fix) return;
+    if (!d.fix || busy) return;
+    // `run` fixes shell out and can take a few seconds; reflect that.
+    const isRun = d.fix.kind === 'run';
+    if (isRun) setBusy(true);
     try {
       const verb = await runDoctorFix(d.fix);
       setFlash(verb);
@@ -1106,11 +1123,19 @@ function DoctorRow({ t, d }: { t: ThemeTokens; d: DoctorCheck }) {
       // Fallback toast via the lazy import to avoid a circular dep.
       const { toast } = await import('./toast');
       toast(`Doctor fix failed: ${typeof e === 'string' ? e : (e as Error)?.message ?? 'unknown'}`);
+    } finally {
+      if (isRun) setBusy(false);
     }
   };
-  const label = flash === 'copied' ? '✓ Copied'
+  const label = busy ? '…'
+              : flash === 'copied' ? '✓ Copied'
               : flash === 'opened' ? '✓ Opened'
+              : flash === 'ran' ? '✓ Done'
               : d.fix?.label;
+  const fixTitle = !d.fix ? undefined
+                 : d.fix.kind === 'url' ? d.fix.url
+                 : d.fix.kind === 'copy' ? d.fix.command
+                 : d.fix.label;
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0',
@@ -1121,14 +1146,15 @@ function DoctorRow({ t, d }: { t: ThemeTokens; d: DoctorCheck }) {
       {d.fix && (
         <button
           onClick={onClick}
+          disabled={busy}
           style={{
             padding: '4px 10px',
             background: t.surfaceAlt, color: t.fg2,
             border: `1px solid ${t.border}`, borderRadius: 4,
-            fontSize: 11, fontFamily: t.mono, cursor: 'pointer',
-            whiteSpace: 'nowrap',
+            fontSize: 11, fontFamily: t.mono, cursor: busy ? 'wait' : 'pointer',
+            whiteSpace: 'nowrap', opacity: busy ? 0.6 : 1,
           }}
-          title={d.fix.kind === 'url' ? d.fix.url : d.fix.command}
+          title={fixTitle}
         >{label}</button>
       )}
     </div>
@@ -1784,6 +1810,9 @@ export function SettingsModal({
             onChange={setNotifyOnExit}
           />
 
+          <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: t.fg3, margin: '20px 0 10px' }}>Services</div>
+          <ServicesPanel t={t} />
+
           <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: t.fg3, margin: '20px 0 10px' }}>Machines</div>
           <MachinesPanel t={t} />
 
@@ -1808,6 +1837,39 @@ export function SettingsModal({
 // 1.0): named VMs that containers run inside. Machines boot on demand
 // when a container targets them, so there's no Start button — only
 // Stop, Set default, Delete, and a create form.
+// Runtime service controls (`container system start/stop`). Sudo-free,
+// so wired as direct one-click buttons. Start is additive (no confirm);
+// stop disrupts running containers, so it confirms first.
+function ServicesPanel({ t }: { t: ThemeTokens }) {
+  const [running, setRunning] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const reload = () => api.systemStatus().then(setRunning).catch(() => setRunning(null));
+  useEffect(() => { reload(); }, []);
+  const act = (label: string, p: Promise<void>) => {
+    setBusy(true);
+    withToast(label, p).then(reload).catch(() => {}).finally(() => setBusy(false));
+  };
+  const dotColor = running === null ? t.fg3 : running ? t.success : t.warning;
+  const stateLabel = running === null ? 'Checking…' : running ? 'Services running' : 'Services stopped';
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0' }}>
+      <span style={{ width: 8, height: 8, borderRadius: '50%', background: dotColor }} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 13, color: t.fg1 }}>{stateLabel}</div>
+        <div style={{ fontSize: 11, color: t.fg3, fontFamily: t.mono }}>container system start / stop</div>
+      </div>
+      <button style={{ ...pillBtn(t), opacity: busy ? 0.5 : 1 }} disabled={busy}
+              onClick={() => act('start services', api.systemStart())}>Start</button>
+      <button style={{ ...pillBtn(t, t.danger), opacity: busy ? 0.5 : 1 }} disabled={busy}
+              title="Stops the runtime services; running containers are affected"
+              onClick={() => {
+                if (!confirm('Stop container services?\nRunning containers will be affected.')) return;
+                act('stop services', api.systemStop());
+              }}>Stop</button>
+    </div>
+  );
+}
+
 function MachinesPanel({ t }: { t: ThemeTokens }) {
   type M = { id: string; status: string; cpus: number; memory: number; diskSize: number; isDefault: boolean; createdDate: string };
   const [machines, setMachines] = useState<M[] | null>(null);

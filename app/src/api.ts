@@ -282,6 +282,14 @@ export const api = {
     inTauri ? invokeStrict<void>('builder_start', { cpus, memory }) : Promise.resolve(),
   builderStop: () => inTauri ? invokeStrict<void>('builder_stop') : Promise.resolve(),
   builderDelete: () => inTauri ? invokeStrict<void>('builder_delete') : Promise.resolve(),
+
+  // Runtime service controls (sudo-free). Surfaced in Doctor (start) and
+  // Settings (start/stop).
+  systemStart: () => inTauri ? invokeStrict<void>('system_start') : Promise.resolve(),
+  systemStop:  () => inTauri ? invokeStrict<void>('system_stop')  : Promise.resolve(),
+  // Whether services are up; drives the Settings Services status dot.
+  // Dev/browser mode reports true so the panel renders a sane default.
+  systemStatus: () => call<boolean>('system_status', true),
   startBuild: (args: { context: string; tag?: string; dockerfile?: string; buildArgs?: string[]; target?: string; noCache?: boolean }) =>
     inTauri ? invokeStrict<void>('start_build', { args }) : Promise.resolve(),
   onBuildLine: async (cb: (line: string) => void): Promise<UnlistenFn> => {

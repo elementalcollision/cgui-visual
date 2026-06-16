@@ -126,7 +126,10 @@ export interface Update {
 
 export type DoctorFix =
   | { kind: 'url'; label: string; url: string }
-  | { kind: 'copy'; label: string; command: string };
+  | { kind: 'copy'; label: string; command: string }
+  /** A known-safe, sudo-free remediation run directly. `action` is a
+   *  closed vocabulary mapped to a dedicated command (e.g. 'system-start'). */
+  | { kind: 'run'; label: string; action: string };
 
 export interface ScanPoint {
   scannedAt: number;

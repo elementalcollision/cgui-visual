@@ -854,6 +854,44 @@ pub async fn builder_delete() -> Result<()> {
         .map(|_| ())
 }
 
+// ─── Runtime services (`container system start/stop`) ─────────────────
+// Sudo-free service controls. Fixed argv (no user input), run on the
+// long timeout because start provisions launchd agents + the helper VM.
+// `start` is idempotent; `stop` tears the services down.
+
+pub async fn system_start() -> Result<()> {
+    run_with_timeout(&["system", "start"], RUN_LONG_TIMEOUT)
+        .await
+        .map(|_| ())
+}
+
+pub async fn system_stop() -> Result<()> {
+    run_with_timeout(&["system", "stop"], RUN_LONG_TIMEOUT)
+        .await
+        .map(|_| ())
+}
+
+/// True when `container system status` reports the services up. The 1.0
+/// running output is a table with a `status   running` row; the stopped
+/// output is a prose line ("apiserver is not running ..."). A naive
+/// substring search for "running" misfires on "not running", so match
+/// the status row precisely (exactly the two tokens `status running`).
+pub fn parse_system_running(body: &str) -> bool {
+    body.lines()
+        .any(|l| l.split_whitespace().collect::<Vec<_>>() == ["status", "running"])
+}
+
+/// Returns whether the runtime services are up. Never errors — a
+/// non-zero exit (which `system status` returns when the services are
+/// down) is reported as `false` rather than propagated, so callers can
+/// render a clean stopped state.
+pub async fn system_running() -> Result<bool> {
+    match run(&["system", "status"]).await {
+        Ok(bytes) => Ok(parse_system_running(&String::from_utf8_lossy(&bytes))),
+        Err(_) => Ok(false),
+    }
+}
+
 // Args for a streamed `container build`. Mirrors the BuildModal form.
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1525,6 +1563,18 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(run_image_argv(&args), vec!["run", "-d", "redis:7"]);
+    }
+
+    #[test]
+    fn parse_system_running_matches_status_row_only() {
+        // 1.0 running output: a key/value table with a status row.
+        let up = "FIELD              VALUE\nstatus             running\nappRoot            /x\n";
+        assert!(parse_system_running(up));
+        // Stopped output: prose containing the substring "running" inside
+        // "not running" — must NOT be read as up.
+        let down = "apiserver is not running and not registered with launchd";
+        assert!(!parse_system_running(down));
+        assert!(!parse_system_running(""));
     }
 
     #[test]
