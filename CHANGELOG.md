@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-06-16
+
+### Added
+
+- **Start / stop the runtime services from the GUI.** `container system
+  start` and `stop` are sudo-free, so they're now one-click actions: the
+  Doctor "services not running" check runs Start directly (was
+  copy-to-clipboard), and Settings gains a Services panel with a
+  running/stopped status dot plus Start / Stop (Stop confirms first).
+
+### Fixed
+
+- **Image timestamps no longer render as `1970-01-01T00:00:00Z`.** Apple's
+  `container image ls` reports a zeroed creationDate for images it can't
+  date (builder / intermediate); the list and the inspect Layers tab now
+  show `—` for missing/epoch dates via a shared, epoch-guarded formatter.
+  The Images list also shows `—` instead of a misleading `0` in the
+  Layers column, since `image ls` doesn't report a layer count.
+- **Doctor no longer misreports stopped services as running.** The status
+  check matched the substring "running", which also occurs in the stopped
+  message "apiserver is not running", hiding the Start fix exactly when it
+  was needed. It now matches the status row precisely.
+
 ## [0.5.0] — 2026-06-12
 
 Completes the apple/container 1.0 divergence roadmap
@@ -206,7 +229,8 @@ Initial macOS-only release. Tauri + React + TypeScript GUI for Apple's
   binary. Apple's `container` CLI is similarly optional but required for
   any real data.
 
-[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/elementalcollision/cgui-visual/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/elementalcollision/cgui-visual/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/elementalcollision/cgui-visual/compare/v0.2.5...v0.3.0
