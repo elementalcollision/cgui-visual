@@ -314,6 +314,30 @@ export function fmtAgo(lastMs: number, nowMs: number = Date.now()): string {
   return `${h}h ago`;
 }
 
+// Format an ISO-8601 timestamp (image / layer creation time) as a short
+// relative age. Returns "—" for missing, unparseable, OR epoch-zero
+// values: Apple's `container` reports a zeroed creationDate
+// ("1970-01-01T00:00:00Z") for images it can't date — builder and
+// intermediate images — and that must not leak into the UI as a literal
+// 1970 stamp or a bogus "56y ago". `Date.parse` of the epoch is 0, not
+// NaN, so the `<= 0` guard is the one that actually catches this.
+export function fmtCreated(iso: string, nowMs: number = Date.now()): string {
+  if (!iso) return '—';
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms) || ms <= 0) return '—';
+  const sec = Math.max(0, Math.floor((nowMs - ms) / 1000));
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 48) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day < 30) return `${day}d ago`;
+  const mo = Math.floor(day / 30);
+  if (mo < 24) return `${mo}mo ago`;
+  return `${Math.floor(day / 365)}y ago`;
+}
+
 export function StatusBar({ t, runtime, tab, lastTickAt }: {
   t: ThemeTokens; runtime: Runtime; tab: Tab;
   lastTickAt?: number;
