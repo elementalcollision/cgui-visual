@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { render } from '@testing-library/react';
-import { fmtBytes, Sparkline, StatusDot, Bar, fmtAgo } from './components';
+import { fmtBytes, Sparkline, StatusDot, Bar, fmtAgo, fmtCreated } from './components';
 import { getTheme } from './theme';
 
 const t = getTheme(true);
@@ -67,6 +67,27 @@ describe('fmtAgo', () => {
     expect(fmtAgo(now - 30_000, now)).toBe('30s ago');
     expect(fmtAgo(now - 90_000, now)).toBe('1m ago');
     expect(fmtAgo(now - 3 * 3600_000, now)).toBe('3h ago');
+  });
+});
+
+describe('fmtCreated', () => {
+  const now = Date.parse('2026-06-16T00:00:00Z');
+  it("returns '—' for missing / unparseable input", () => {
+    expect(fmtCreated('', now)).toBe('—');
+    expect(fmtCreated('not a date', now)).toBe('—');
+  });
+  it("returns '—' for an epoch-zero stamp (the 1970 bug)", () => {
+    // Date.parse here is 0, not NaN — the case the old `ago` helper missed.
+    expect(fmtCreated('1970-01-01T00:00:00Z', now)).toBe('—');
+  });
+  it('formats a real timestamp as a relative age', () => {
+    // Hours bucket runs up to 48h, so 24h ago reads as "24h ago".
+    expect(fmtCreated('2026-06-15T00:00:00Z', now)).toBe('24h ago');
+    expect(fmtCreated('2026-06-13T00:00:00Z', now)).toBe('3d ago');
+    expect(fmtCreated('2026-04-17T00:00:00Z', now)).toBe('2mo ago');
+  });
+  it('accepts a date-only string (fixture shape)', () => {
+    expect(fmtCreated('2026-06-13', now)).toBe('3d ago');
   });
 });
 

@@ -3,7 +3,7 @@
 import React, { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ThemeTokens } from './theme';
 import type { Container, Image, Severity, Stack, Tab, TrivyFinding, TrivyResult, Update, DoctorCheck, DoctorFix, HistoryPoint, VulnHistory, Runtime, DiskUsage, DiskUsageRow } from './types';
-import { Icon, Bar, Sparkline, iconBtn, pillBtn } from './components';
+import { Icon, Bar, Sparkline, iconBtn, pillBtn, fmtCreated } from './components';
 import { api } from './api';
 import { withToast } from './toast';
 
@@ -1243,23 +1243,6 @@ function prettyCmd(s: string): string {
 
 // Best-effort relative "n ago" without pulling a date library. Returns
 // "—" for missing / un-parseable timestamps so the column degrades.
-function ago(iso: string): string {
-  if (!iso) return '—';
-  const ms = Date.parse(iso);
-  if (Number.isNaN(ms)) return '—';
-  const sec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
-  if (sec < 60) return `${sec}s ago`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 48) return `${hr}h ago`;
-  const day = Math.floor(hr / 24);
-  if (day < 30) return `${day}d ago`;
-  const mo = Math.floor(day / 30);
-  if (mo < 24) return `${mo}mo ago`;
-  return `${Math.floor(day / 365)}y ago`;
-}
-
 export function ImageInspectModal({ t, reference, onClose }: {
   t: ThemeTokens; reference: string; onClose: () => void;
 }) {
@@ -1354,7 +1337,7 @@ export function ImageInspectModal({ t, reference, onClose }: {
                     )}
                   </div>
                   <div style={{ textAlign: 'right' }}>
-                    <div style={{ fontFamily: t.mono, fontSize: 10, color: t.fg3, whiteSpace: 'nowrap' }}>{ago(l.created)}</div>
+                    <div style={{ fontFamily: t.mono, fontSize: 10, color: t.fg3, whiteSpace: 'nowrap' }}>{fmtCreated(l.created)}</div>
                     {l.emptyLayer && (
                       <div style={{ fontFamily: t.mono, fontSize: 9, color: t.fg3, marginTop: 2, letterSpacing: '0.04em', textTransform: 'uppercase' }}>empty</div>
                     )}

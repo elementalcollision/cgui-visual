@@ -4,7 +4,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import type { ThemeTokens } from './theme';
 import type { Container, Image, Volume, Network, Stack } from './types';
-import { Icon, Sparkline, Bar, StatusDot, BulkActionBar, SelectCheckbox, iconBtn, pillBtn, tableHeader, tableRow } from './components';
+import { Icon, Sparkline, Bar, StatusDot, BulkActionBar, SelectCheckbox, iconBtn, pillBtn, tableHeader, tableRow, fmtCreated } from './components';
 import { api } from './api';
 import { withToast } from './toast';
 
@@ -371,8 +371,8 @@ export function ImagesView({ t, search, onScan, onRun, onInspect, reloadKey = 0 
           <div style={{ textAlign: 'right', fontFamily: t.mono, fontSize: 12, color: t.fg1, fontVariantNumeric: 'tabular-nums' }}>
             {img.size.toFixed(img.size < 1 ? 2 : 1)} <span style={{ color: t.fg3, fontSize: 11 }}>{img.sizeUnit}</span>
           </div>
-          <div style={{ textAlign: 'right', fontFamily: t.mono, fontSize: 12, color: t.fg2 }}>{img.layers}</div>
-          <div style={{ fontFamily: t.mono, fontSize: 12, color: t.fg3 }}>{img.created}</div>
+          <div style={{ textAlign: 'right', fontFamily: t.mono, fontSize: 12, color: t.fg2 }}>{img.layers || '—'}</div>
+          <div style={{ fontFamily: t.mono, fontSize: 12, color: t.fg3 }}>{fmtCreated(img.created)}</div>
           <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
             <button onClick={() => onInspect(img)} style={iconBtn()} title="Inspect"><Icon name="info" size={13} color={t.fg2} /></button>
             <button onClick={() => onTag(img)} style={iconBtn()} title="Tag"><Icon name="tag" size={13} color={t.fg2} /></button>
