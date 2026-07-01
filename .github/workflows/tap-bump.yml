@@ -70,7 +70,7 @@ jobs:
           echo "Resolved cgui-visual $VER  sha256=$SHA"
 
       - name: Checkout tap
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: elementalcollision/homebrew-cgui-visual
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
