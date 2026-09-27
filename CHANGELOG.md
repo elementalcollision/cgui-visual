@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] — 2026-09-27
+
 ### Added
 
 - **"Reclaim space" container action.** Wraps Apple container 1.4's
@@ -18,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the selected running containers). Older CLIs without the subcommand
   surface a clear "requires Apple container 1.4 or later" error instead
   of the raw plugin-not-found failure.
+
+### Fixed
+
+- **Doctor "fix failed" errors now actually show.** The detail modal's
+  failure path called `toast()` without importing it, so a failed Doctor
+  fix threw instead of surfacing its error.
 
 ## [0.5.2] — 2026-09-27
 
@@ -282,7 +290,8 @@ Initial macOS-only release. Tauri + React + TypeScript GUI for Apple's
   binary. Apple's `container` CLI is similarly optional but required for
   any real data.
 
-[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/elementalcollision/cgui-visual/compare/v0.4.0...v0.5.0
