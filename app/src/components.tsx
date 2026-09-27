@@ -18,7 +18,7 @@ type IconName =
   | 'box' | 'image' | 'database' | 'network' | 'layers' | 'terminal'
   | 'play' | 'stop' | 'restart' | 'trash' | 'info' | 'logs' | 'search'
   | 'pause' | 'plus' | 'download' | 'shield' | 'sun' | 'moon' | 'menu'
-  | 'check' | 'x' | 'cog' | 'heart' | 'chevron' | 'tag' | 'upload';
+  | 'check' | 'x' | 'cog' | 'heart' | 'chevron' | 'tag' | 'upload' | 'sparkle';
 
 export function Icon({ name, size = 14, color = 'currentColor', strokeWidth = 1.6 }: {
   name: IconName; size?: number; color?: string; strokeWidth?: number;
@@ -53,6 +53,9 @@ export function Icon({ name, size = 14, color = 'currentColor', strokeWidth = 1.
     case 'heart': return <svg viewBox="0 0 24 24" style={s}><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8z"/></svg>;
     case 'chevron': return <svg viewBox="0 0 24 24" style={s}><path d="M9 18l6-6-6-6"/></svg>;
     case 'tag': return <svg viewBox="0 0 24 24" style={s}><path d="M20.6 13.4L11 3.8A2 2 0 0 0 9.6 3.2H4a1 1 0 0 0-1 1v5.6a2 2 0 0 0 .6 1.4l9.6 9.6a2 2 0 0 0 2.8 0l4.6-4.6a2 2 0 0 0 0-2.8z"/><circle cx="7.5" cy="7.5" r="1"/></svg>;
+    // "Reclaim space" (container clean) — a small four-point sparkle,
+    // the conventional glyph for a cleanup/trim action.
+    case 'sparkle': return <svg viewBox="0 0 24 24" style={s}><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 3.5l.6 1.7L21.3 6l-1.7.6-.6 1.7-.6-1.7L16.7 6l1.7-.6z"/></svg>;
     default: return null;
   }
 }

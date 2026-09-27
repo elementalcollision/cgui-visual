@@ -5,7 +5,7 @@ import type { ThemeTokens } from './theme';
 import type { Container, Image, Severity, Stack, Tab, TrivyFinding, TrivyResult, Update, DoctorCheck, DoctorFix, HistoryPoint, VulnHistory, Runtime, DiskUsage, DiskUsageRow } from './types';
 import { Icon, Bar, Sparkline, iconBtn, pillBtn, fmtCreated } from './components';
 import { api } from './api';
-import { withToast } from './toast';
+import { toast, withToast } from './toast';
 
 function Backdrop({ onClose, children }: { onClose: () => void; children: ReactNode }) {
   return (
@@ -465,6 +465,13 @@ export function DetailModal({ item, t, onClose, onExec }: {
                     withToast(`export ${c.name}`, api.exportContainer(c.id, dest)).catch(() => {});
                   }}>Export tar…</button>
           <div style={{ flex: 1 }} />
+          {c.status === 'running' && (
+            <button style={pillBtn(t)}
+                    title="Trim the container's disk images to return freed space to macOS (container clean). Running containers only; no data is removed."
+                    onClick={() => withToast(`reclaim space in ${c.name}`, api.cleanContainers([c.id]))
+                      .then(() => toast(`Reclaimed space in ${c.name}`, 'info'))
+                      .catch(() => {})}>Reclaim space</button>
+          )}
           <button style={pillBtn(t)} onClick={() => withToast(`restart ${c.name}`, api.restartContainer(c.id)).catch(() => {})}>Restart</button>
           <button style={pillBtn(t)} onClick={() => onExec(c)} disabled={c.status !== 'running'}
                   title={c.status === 'running' ? 'Open embedded terminal' : 'Container is not running'}>

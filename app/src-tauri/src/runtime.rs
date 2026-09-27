@@ -794,6 +794,55 @@ pub async fn restart(id: &str) -> Result<()> {
     run(&["start", id]).await.map(|_| ())
 }
 
+/// Builds `container clean <id> [<id>...]` argv. Unlike start/stop/kill/
+/// delete/restart above, the CLI itself accepts multiple ids in a single
+/// invocation, and the UI's bulk-action bar can target several containers
+/// at once, so this is a slice op rather than one-id-per-call. Pure and
+/// unit-testable without touching the runtime binary.
+pub fn clean_argv(ids: &[String]) -> Vec<String> {
+    let mut argv = vec!["clean".to_string()];
+    argv.extend(ids.iter().cloned());
+    argv
+}
+
+/// `container clean <id> [<id>...]` — runs an fstrim of the container's
+/// writable root filesystem and every writable block mount, returning
+/// freed space in the sparse ext4 disk image back to the host. Non-
+/// destructive (no files or data are removed); only valid for running
+/// containers, which the CLI itself enforces ("container is not running").
+///
+/// Trimming can take a while on a container with a lot of accumulated
+/// writable-layer garbage, so this uses the long timeout like other
+/// potentially-slow lifecycle ops (image pulls, builder teardown).
+pub async fn clean_containers(ids: &[String]) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let argv = clean_argv(ids);
+    let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
+    run_with_timeout(&argv_ref, RUN_LONG_TIMEOUT)
+        .await
+        .map(|_| ())
+        .map_err(map_clean_unsupported)
+}
+
+/// `container clean` is new in Apple container 1.4; older CLIs dispatch
+/// subcommands as external plugins and fail with `Plugin '...' not
+/// found` at exit code 64 when the plugin doesn't exist. Translate that
+/// specific failure into a clear version-requirement message instead of
+/// the raw plugin error; leave other failures (e.g. "container is not
+/// running") untouched so the caller sees the real reason.
+fn map_clean_unsupported(e: anyhow::Error) -> anyhow::Error {
+    // Exit 64 alone is EX_USAGE, which argument-parse errors share; also
+    // require the plugin-dispatch message so those aren't mislabelled.
+    let msg = e.to_string();
+    if msg.contains("exit status: 64") && msg.contains("Plugin 'container-clean' not found") {
+        anyhow!("`container clean` requires Apple container 1.4 or later")
+    } else {
+        e
+    }
+}
+
 // Args used to build a `container run -d` invocation. All optional except the
 // image reference. Matches the fields the UI's RunImageModal collects;
 // the advanced block (resources, mounts, identity, platform) landed
@@ -1854,5 +1903,49 @@ mod tests {
         assert_eq!(c.stack.as_deref(), Some("demo"));
         // Memory limit reported in GiB.
         assert!((c.mem.limit - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn clean_argv_builds_subcommand_plus_ids() {
+        let ids = vec!["abc123".to_string(), "def456".to_string()];
+        assert_eq!(clean_argv(&ids), vec!["clean", "abc123", "def456"]);
+    }
+
+    #[test]
+    fn clean_argv_handles_single_id() {
+        let ids = vec!["abc123".to_string()];
+        assert_eq!(clean_argv(&ids), vec!["clean", "abc123"]);
+    }
+
+    #[test]
+    fn map_clean_unsupported_translates_exit_64() {
+        // Real shape from an old CLI's plugin dispatcher (verified against
+        // 1.4.1 with a bogus subcommand, which fails the same way).
+        let e = anyhow!(
+            "`container clean abc123` exited exit status: 64: Error: Plugin 'container-clean' not found."
+        );
+        let mapped = map_clean_unsupported(e);
+        assert_eq!(
+            mapped.to_string(),
+            "`container clean` requires Apple container 1.4 or later"
+        );
+    }
+
+    #[test]
+    fn map_clean_unsupported_passes_through_other_failures() {
+        // e.g. target container isn't running, or doesn't exist — exit 1,
+        // not the plugin-dispatch 64. Should reach the caller unchanged.
+        let e = anyhow!(
+            "`container clean abc123` exited exit status: 1: Error: internalError: \"failed to clean container\" (cause: \"notFound: \\\"container with ID abc123 not found\\\"\")"
+        );
+        let msg = e.to_string();
+        let mapped = map_clean_unsupported(e);
+        assert_eq!(mapped.to_string(), msg);
+
+        // A usage error also exits 64 but isn't a missing subcommand.
+        let usage =
+            anyhow!("`container clean` exited exit status: 64: Error: Missing expected argument");
+        let msg = usage.to_string();
+        assert_eq!(map_clean_unsupported(usage).to_string(), msg);
     }
 }

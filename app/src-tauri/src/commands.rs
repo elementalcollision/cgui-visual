@@ -514,6 +514,14 @@ pub async fn delete_container(id: String) -> Result<(), String> {
 pub async fn restart_container(id: String) -> Result<(), String> {
     runtime::restart(&id).await.map_err(err_str)
 }
+/// `container clean` — trims the writable disk image(s) of one or more
+/// running containers back down to size. Takes a slice (unlike the
+/// single-id actions above) since the CLI itself accepts multiple ids
+/// and the bulk-action bar can target several containers in one call.
+#[tauri::command]
+pub async fn clean_containers(ids: Vec<String>) -> Result<(), String> {
+    runtime::clean_containers(&ids).await.map_err(err_str)
+}
 #[tauri::command]
 pub async fn delete_image(reference: String) -> Result<(), String> {
     runtime::delete_image(&reference).await.map_err(err_str)

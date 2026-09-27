@@ -30,6 +30,11 @@ describe('api fixture fallback (outside Tauri)', () => {
     await expect(api.execContainer('x')).resolves.toBeUndefined();
   });
 
+  it('cleanContainers resolves as a no-op in browser-dev mode', async () => {
+    await expect(api.cleanContainers(['x'])).resolves.toBeUndefined();
+    await expect(api.cleanContainers(['x', 'y'])).resolves.toBeUndefined();
+  });
+
   it('event subscriptions return a no-op unsubscribe fn outside Tauri', async () => {
     const unlisten = await api.onContainersTick(() => {});
     expect(typeof unlisten).toBe('function');

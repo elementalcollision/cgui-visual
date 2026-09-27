@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **"Reclaim space" container action.** Wraps Apple container 1.4's
+  `container clean`, which fstrims a running container's writable root
+  filesystem and any writable block mounts, returning space freed inside
+  its sparse ext4 disk images back to macOS. Non-destructive — no files
+  or data are removed. Available on running containers from the
+  container row, the detail pane, and the bulk-action bar (applied to
+  the selected running containers). Older CLIs without the subcommand
+  surface a clear "requires Apple container 1.4 or later" error instead
+  of the raw plugin-not-found failure.
+
 ## [0.5.2] — 2026-09-27
 
 Verified against Apple's `container` CLI 1.4.1.

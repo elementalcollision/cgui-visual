@@ -61,6 +61,10 @@ export const api = {
   killContainer:    (id: string, signal?: string) => inTauri ? invokeStrict<void>('kill_container', { id, signal }) : Promise.resolve(),
   deleteContainer:  (id: string) => inTauri ? invokeStrict<void>('delete_container',  { id }) : Promise.resolve(),
   restartContainer: (id: string) => inTauri ? invokeStrict<void>('restart_container', { id }) : Promise.resolve(),
+  // Reclaim space (`container clean`) — takes a list of ids since the CLI
+  // supports cleaning several containers in one invocation; callers pass
+  // a single-element array for the per-row/detail-pane action.
+  cleanContainers: (ids: string[]) => inTauri ? invokeStrict<void>('clean_containers', { ids }) : Promise.resolve(),
 
   // Streams: backend spawns a child process, frontend subscribes to events.
   startLogStream: (id: string, opts?: { boot?: boolean; tail?: number }) =>
