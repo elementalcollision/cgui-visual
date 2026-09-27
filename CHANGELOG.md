@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-09-27
+
 Verified against Apple's `container` CLI 1.4.1.
 
 ### Added
@@ -21,6 +23,14 @@ Verified against Apple's `container` CLI 1.4.1.
   which stack/service it came from. A stack with one invalid derived name
   now fails before starting any of its containers, instead of half
   starting.
+
+### Changed
+
+- **Dependency and CI updates.** `tauri-action` v0 → v1 (the updater
+  tarball is now named `cgui_<ver>_universal.app.tar.gz`; the updater
+  manifest and tap workflows match it by suffix), `actions/checkout` v7,
+  `actions/setup-node` v7, plus minor/patch bumps across the npm and
+  Cargo lockfiles (vite, vitest, postcss, undici, serde_with, …).
 
 ### Fixed
 
@@ -260,7 +270,8 @@ Initial macOS-only release. Tauri + React + TypeScript GUI for Apple's
   binary. Apple's `container` CLI is similarly optional but required for
   any real data.
 
-[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/elementalcollision/cgui-visual/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/elementalcollision/cgui-visual/compare/v0.3.0...v0.4.0
