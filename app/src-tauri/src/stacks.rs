@@ -307,8 +307,26 @@ fn run_args(stack: &str, svc: &ServiceToml) -> Vec<String> {
     argv
 }
 
+/// Validate every service's derived container name (`{stack}_{service}`)
+/// up front so a stack never half-starts on a name Apple container 1.4+
+/// would reject partway through `topo_order`.
+fn validate_stack_names(stack: &StackToml) -> Result<()> {
+    for svc in &stack.services {
+        let cname = format!("{}_{}", stack.name, svc.name);
+        runtime::validate_entity_name("container", &cname).map_err(|e| {
+            anyhow!(
+                "stack '{}' service '{}': {e:#}; shorten the stack or service name",
+                stack.name,
+                svc.name
+            )
+        })?;
+    }
+    Ok(())
+}
+
 pub async fn stack_up(name: &str) -> Result<Vec<String>> {
     let stack = load_one(name)?;
+    validate_stack_names(&stack)?;
     let mut log: Vec<String> = Vec::new();
     for svc in topo_order(&stack) {
         let argv = run_args(&stack.name, svc);
@@ -583,6 +601,29 @@ mod tests {
             .collect();
         assert_eq!(order.len(), 2);
         assert!(order.contains(&"a") && order.contains(&"b"));
+    }
+
+    #[test]
+    fn validate_stack_names_rejects_any_service_over_63_chars() {
+        // Stack name kept short; the service name alone pushes
+        // `{stack}_{service}` past the 63-char limit.
+        let s = StackToml {
+            name: "s".into(),
+            services: vec![ServiceToml {
+                name: "a".repeat(70),
+                image: "x".into(),
+                ..Default::default()
+            }],
+        };
+        let err = validate_stack_names(&s).unwrap_err().to_string();
+        assert!(err.contains("stack 's'"));
+        assert!(err.contains("service 'aaaaaaaaaa"));
+    }
+
+    #[test]
+    fn validate_stack_names_accepts_short_names() {
+        let s = stack(&[("web", &[]), ("db", &["web"])]);
+        assert!(validate_stack_names(&s).is_ok());
     }
 
     #[test]
