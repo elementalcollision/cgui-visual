@@ -6,7 +6,7 @@ import type { ThemeTokens } from './theme';
 import type { Container, Image, Volume, Network, Stack } from './types';
 import { Icon, Sparkline, Bar, StatusDot, BulkActionBar, SelectCheckbox, iconBtn, pillBtn, tableHeader, tableRow, fmtCreated } from './components';
 import { api } from './api';
-import { withToast } from './toast';
+import { toast, withToast } from './toast';
 
 // Aggregate CPU / Memory / Network I/O / Disk I/O across the live container
 // list. CPU sparkline zip-sums per-container cpuHistory; the others render
@@ -81,9 +81,9 @@ export function ContainersView({ t, search, selected, setSelected, onInspect, on
 
   // Bulk action runner. Wraps the per-id call set in a single confirm,
   // settles in parallel, and toasts pass/fail counts.
-  const bulkRun = async (verb: string, ids: string[], op: (id: string) => Promise<unknown>) => {
+  const bulkRun = async (verb: string, ids: string[], op: (id: string) => Promise<unknown>, skipConfirm = false) => {
     if (!ids.length) return;
-    if (!confirm(`${verb} ${ids.length} container${ids.length === 1 ? '' : 's'}?`)) return;
+    if (!skipConfirm && !confirm(`${verb} ${ids.length} container${ids.length === 1 ? '' : 's'}?`)) return;
     const results = await Promise.allSettled(ids.map(op));
     const ok = results.filter(r => r.status === 'fulfilled').length;
     const fail = results.length - ok;
@@ -158,6 +158,17 @@ export function ContainersView({ t, search, selected, setSelected, onInspect, on
                 onClick={() => bulkRun('Restart', pickedRows.map(c => c.id), api.restartContainer)}>
           <Icon name="play" size={11} color={t.fg2} />Restart
         </button>
+        <button style={pillBtn(t)}
+                disabled={!pickedRows.some(c => c.status === 'running')}
+                title="Trim the containers' disk images to return freed space to macOS (container clean). Running containers only; no data is removed."
+                onClick={() => bulkRun(
+                  'Reclaim space',
+                  pickedRows.filter(c => c.status === 'running').map(c => c.id),
+                  id => api.cleanContainers([id]),
+                  true,
+                )}>
+          <Icon name="sparkle" size={11} color={t.fg2} />Reclaim space
+        </button>
         <button style={pillBtn(t, t.danger)}
                 onClick={() => bulkRun('Delete', pickedRows.map(c => c.id), api.deleteContainer)}>
           <Icon name="trash" size={11} color={t.danger} />Delete
@@ -219,6 +230,15 @@ export function ContainersView({ t, search, selected, setSelected, onInspect, on
                   <span style={{ fontFamily: t.mono, fontSize: 11, color: t.fg3, marginRight: 8 }}>{c.uptime}</span>
                   <button onClick={e => { e.stopPropagation(); onInspect(c); }} style={iconBtn()} title="Inspect"><Icon name="info" size={13} color={t.fg2} /></button>
                   <button onClick={e => { e.stopPropagation(); onLogs(c); }} style={iconBtn()} title="Logs"><Icon name="logs" size={13} color={t.fg2} /></button>
+                  {c.status === 'running' &&
+                    <button onClick={e => {
+                      e.stopPropagation();
+                      withToast(`reclaim space in ${c.name}`, api.cleanContainers([c.id]))
+                        .then(() => toast(`Reclaimed space in ${c.name}`, 'info'))
+                        .catch(() => {});
+                    }} style={iconBtn()} title="Reclaim space — trim the container's disk images to return freed space to macOS (container clean). Running containers only; no data is removed.">
+                      <Icon name="sparkle" size={13} color={t.fg2} />
+                    </button>}
                   {c.status === 'running'
                     ? <button onClick={e => { e.stopPropagation(); withToast(`stop ${c.name}`, api.stopContainer(c.id)).catch(() => {}); }} style={iconBtn()} title="Stop"><Icon name="stop" size={13} color={t.fg2} /></button>
                     : <button onClick={e => { e.stopPropagation(); withToast(`start ${c.name}`, api.startContainer(c.id)).catch(() => {}); }} style={iconBtn()} title="Start"><Icon name="play" size={13} color={t.success} /></button>}

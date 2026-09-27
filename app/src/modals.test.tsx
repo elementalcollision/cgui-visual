@@ -1,8 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { TrivyModal, DoctorModal, OnboardingModal, parseInspect, fuzzyScore, parseImageInspect } from './modals';
+import { TrivyModal, DoctorModal, OnboardingModal, DetailModal, parseInspect, fuzzyScore, parseImageInspect } from './modals';
 import { getTheme } from './theme';
+import { containers } from './fixtures';
+import { api } from './api';
 
 const t = getTheme(true);
 
@@ -155,6 +157,24 @@ describe('parseImageInspect (ImageInspectModal projection)', () => {
     expect(p.layers[0].createdBy).toMatch(/apk add jq/);
     expect(p.layers[0].diffId).toBe('sha256:xyz');
     expect(p.architecture).toBe('amd64');
+  });
+});
+
+describe('DetailModal — Reclaim space action', () => {
+  it('shows a Reclaim space button for a running container and calls the API', async () => {
+    const user = userEvent.setup();
+    const spy = vi.spyOn(api, 'cleanContainers').mockResolvedValue(undefined);
+    const running = containers.find(c => c.status === 'running')!;
+    render(<DetailModal item={running} t={t} onClose={() => {}} onExec={() => {}} />);
+    const btn = screen.getByRole('button', { name: /Reclaim space/ });
+    await user.click(btn);
+    expect(spy).toHaveBeenCalledWith([running.id]);
+  });
+
+  it('hides the Reclaim space button for a stopped container', async () => {
+    const stopped = containers.find(c => c.status !== 'running')!;
+    render(<DetailModal item={stopped} t={t} onClose={() => {}} onExec={() => {}} />);
+    expect(screen.queryByRole('button', { name: /Reclaim space/ })).not.toBeInTheDocument();
   });
 });
 

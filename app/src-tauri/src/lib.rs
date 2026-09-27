@@ -398,6 +398,7 @@ pub fn run() {
             commands::kill_container,
             commands::delete_container,
             commands::restart_container,
+            commands::clean_containers,
             commands::start_log_stream,
             commands::start_pull,
             commands::load_prefs,
