@@ -33,7 +33,7 @@ jobs:
     outputs:
       release_id: ${{ steps.create.outputs.id }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - id: create
         uses: actions/github-script@v9
         with:
@@ -55,7 +55,7 @@ jobs:
     name: Build (macOS universal)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v6
         with:
