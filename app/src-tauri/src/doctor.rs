@@ -40,9 +40,11 @@ pub async fn run() -> Vec<DoctorCheck> {
         _ => out.push(err(format!("`{RUNTIME_BIN} --version` failed"))),
     }
 
-    // 4. system status (Apple-container-specific).
+    // 4. system status (Apple-container-specific). `--format json` gives
+    // `parse_system_running` a `status` field to key off on 1.4+, and
+    // older CLIs accept the flag too (see runtime::parse_system_running).
     match Command::new(RUNTIME_BIN)
-        .args(["system", "status"])
+        .args(["system", "status", "--format", "json"])
         .output()
         .await
     {

@@ -27,6 +27,43 @@ pub fn set_bin(name: &str) {
     *slot().write().unwrap() = name.to_string();
 }
 
+/// Validate a user-supplied container/machine name against the rules
+/// Apple's `container` 1.4+ enforces (`ManagedContainer.nameValid`):
+/// `^[a-zA-Z0-9][a-zA-Z0-9_.-]+$`, i.e. at least 2 characters, starting
+/// with a letter or digit, and 63 characters or fewer. Older CLIs accept
+/// this and more, so validating up front is purely additive.
+///
+/// Without this check the CLI rejects an invalid name with an unhelpful
+/// "container ID `…` is not a valid container ID" — this gives a
+/// specific, actionable reason instead.
+pub fn validate_entity_name(kind: &str, name: &str) -> Result<()> {
+    const MAX_LEN: usize = 63;
+    let len = name.chars().count();
+    if len > MAX_LEN {
+        return Err(anyhow!(
+            "{kind} name `{name}` is {len} characters; Apple container 1.4+ allows at most {MAX_LEN}"
+        ));
+    }
+    if len < 2 {
+        return Err(anyhow!(
+            "{kind} name `{name}` is too short; Apple container 1.4+ requires at least 2 characters"
+        ));
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphanumeric() {
+        return Err(anyhow!(
+            "{kind} name `{name}` must start with a letter or digit and contain only letters, digits, `_`, `.`, `-`"
+        ));
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) {
+        return Err(anyhow!(
+            "{kind} name `{name}` must start with a letter or digit and contain only letters, digits, `_`, `.`, `-`"
+        ));
+    }
+    Ok(())
+}
+
 /// Prepend the standard macOS install locations to our process's PATH
 /// so spawned children can resolve `container` / `docker` / `podman` /
 /// `trivy` regardless of how the app was launched.
@@ -605,12 +642,58 @@ fn volume_ref_counts(ls_bytes: &[u8]) -> std::collections::HashMap<String, u32> 
 }
 
 pub async fn list_networks() -> Result<Vec<Network>> {
-    let bytes = run(&["network", "ls", "--format", "json"]).await?;
+    // Mirrors `list_volumes` above: fetch the network list and the
+    // container list in parallel, then derive per-network attached-
+    // container counts from the latter.
+    let (net_res, ctr_res) = tokio::join!(
+        run(&["network", "ls", "--format", "json"]),
+        run(&["ls", "--all", "--format", "json"]),
+    );
+    let bytes = net_res?;
     let raw: Vec<Value> = serde_json::from_slice(&bytes).unwrap_or_default();
-    Ok(raw.into_iter().map(parse_network).collect())
+    // A failed `ls` just means we can't compute counts — fall back to 0
+    // rather than failing the whole network list over it.
+    let refs = ctr_res.map(|b| network_ref_counts(&b)).unwrap_or_default();
+    Ok(raw.into_iter().map(|n| parse_network(n, &refs)).collect())
 }
 
-fn parse_network(v: Value) -> Network {
+// Scan container ls output for attached networks and return a
+// name → running-container count map.
+//
+// `status.networks[]` (present on every 1.x container, `[]` when
+// stopped) is the source of truth: each entry is `{"network": "<name>",
+// "hostname": ..., "ipv4Address": ..., ...}` for a container that is
+// actually attached right now. `configuration.networks[]` lists the
+// networks a container *would* attach to on start, so a stopped
+// container still carries entries there — counting those would count
+// stopped containers as "attached" and double-count once they start.
+// We therefore only fall back to `configuration.networks` when `status`
+// has no `networks` key at all (an older CLI shape that predates the
+// per-container network list existing anywhere).
+fn network_ref_counts(ls_bytes: &[u8]) -> std::collections::HashMap<String, u32> {
+    use std::collections::HashMap;
+    let raw: Vec<Value> = serde_json::from_slice(ls_bytes).unwrap_or_default();
+    let mut out: HashMap<String, u32> = HashMap::new();
+    for c in raw {
+        let status_networks = c.get("status").and_then(|s| s.get("networks"));
+        let nets = match status_networks {
+            Some(nets) => nets.as_array(),
+            None => c
+                .get("configuration")
+                .and_then(|cfg| cfg.get("networks"))
+                .and_then(Value::as_array),
+        };
+        let Some(nets) = nets else { continue };
+        for n in nets {
+            if let Some(name) = n.get("network").and_then(Value::as_str) {
+                *out.entry(name.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+    out
+}
+
+fn parse_network(v: Value, refs: &std::collections::HashMap<String, u32>) -> Network {
     // 0.x called the nested block `config`; 1.0 renamed it
     // `configuration` and added `ipv4Gateway` to `status`.
     let cfg = v
@@ -649,6 +732,7 @@ fn parse_network(v: Value) -> Network {
         .and_then(Value::as_str)
         .unwrap_or("—")
         .to_string();
+    let container_count = refs.get(name.as_str()).copied().unwrap_or(0);
     Network {
         id: name.clone(),
         name,
@@ -657,7 +741,7 @@ fn parse_network(v: Value) -> Network {
         subnet,
         gateway,
         dns: vec![],
-        containers: 0,
+        containers: container_count,
     }
 }
 
@@ -796,6 +880,9 @@ pub fn run_image_argv(args: &RunArgs) -> Vec<String> {
 }
 
 pub async fn run_image(args: RunArgs) -> Result<String> {
+    if let Some(name) = args.name.as_deref().filter(|s| !s.is_empty()) {
+        validate_entity_name("container", name)?;
+    }
     let argv = run_image_argv(&args);
     let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
     // First-run image pulls + VM provisioning blow past the default
@@ -871,12 +958,21 @@ pub async fn system_stop() -> Result<()> {
         .map(|_| ())
 }
 
-/// True when `container system status` reports the services up. The 1.0
-/// running output is a table with a `status   running` row; the stopped
-/// output is a prose line ("apiserver is not running ..."). A naive
+/// True when `container system status` reports the services up. 1.4.1's
+/// `--format json` emits a top-level `{"status": "running", ...}` (down
+/// states are `"unregistered"` or `"not running"`); try that first.
+/// Older CLIs (1.0–1.3) accept `--format json` too but may not emit a
+/// `status` field at all, so fall back to the pre-1.4 table-token check:
+/// a key/value table with a `status   running` row, vs. the stopped
+/// output's prose line ("apiserver is not running ..."). A naive
 /// substring search for "running" misfires on "not running", so match
 /// the status row precisely (exactly the two tokens `status running`).
 pub fn parse_system_running(body: &str) -> bool {
+    if let Ok(v) = serde_json::from_str::<Value>(body) {
+        if let Some(status) = v.get("status").and_then(Value::as_str) {
+            return status == "running";
+        }
+    }
     body.lines()
         .any(|l| l.split_whitespace().collect::<Vec<_>>() == ["status", "running"])
 }
@@ -886,7 +982,7 @@ pub fn parse_system_running(body: &str) -> bool {
 /// down) is reported as `false` rather than propagated, so callers can
 /// render a clean stopped state.
 pub async fn system_running() -> Result<bool> {
-    match run(&["system", "status"]).await {
+    match run(&["system", "status", "--format", "json"]).await {
         Ok(bytes) => Ok(parse_system_running(&String::from_utf8_lossy(&bytes))),
         Err(_) => Ok(false),
     }
@@ -1001,6 +1097,7 @@ pub async fn machine_create(
     memory: Option<String>,
     no_boot: bool,
 ) -> Result<()> {
+    validate_entity_name("machine", name)?;
     let mut argv: Vec<String> = vec![
         "machine".into(),
         "create".into(),
@@ -1482,12 +1579,69 @@ mod tests {
                 "ipv6Subnet": "fdea:57c1:ba3e:6cbe::/64"
             }
         });
-        let n = parse_network(v);
+        let n = parse_network(v, &std::collections::HashMap::new());
         assert_eq!(n.name, "default");
         assert_eq!(n.mode, "nat");
         assert_eq!(n.state, "active");
         assert_eq!(n.subnet, "192.168.64.0/24");
         assert_eq!(n.gateway, "192.168.64.1");
+        assert_eq!(n.containers, 0);
+    }
+
+    #[test]
+    fn parse_network_uses_ref_counts() {
+        let v = json!({
+            "id": "cgui-t-net",
+            "configuration": { "mode": "nat", "name": "cgui-t-net" },
+            "status": {}
+        });
+        let refs = std::collections::HashMap::from([("cgui-t-net".to_string(), 3u32)]);
+        let n = parse_network(v, &refs);
+        assert_eq!(n.containers, 3);
+    }
+
+    #[test]
+    fn network_ref_counts_counts_only_running_attachments() {
+        // Verbatim shape from `container ls --all --format json` on 1.4.1:
+        // a running container's `status.networks` lists what it's actually
+        // attached to; a stopped one reports `status.networks: []` even
+        // though `configuration.networks` still names its intended network.
+        let ls = json!([
+            {
+                "configuration": { "networks": [{ "network": "cgui-t-net" }] },
+                "status": {
+                    "state": "running",
+                    "networks": [{ "network": "cgui-t-net", "hostname": "a", "ipv4Address": "10.0.0.2" }]
+                }
+            },
+            {
+                "configuration": { "networks": [{ "network": "cgui-t-net" }] },
+                "status": { "state": "stopped", "networks": [] }
+            },
+            {
+                "configuration": { "networks": [{ "network": "default" }] },
+                "status": {
+                    "state": "running",
+                    "networks": [{ "network": "default" }]
+                }
+            }
+        ]);
+        let counts = network_ref_counts(serde_json::to_vec(&ls).unwrap().as_slice());
+        // Only the one running container attached to cgui-t-net counts —
+        // the stopped one's `configuration.networks` entry is not counted.
+        assert_eq!(counts.get("cgui-t-net"), Some(&1));
+        assert_eq!(counts.get("default"), Some(&1));
+    }
+
+    #[test]
+    fn network_ref_counts_falls_back_to_configuration_when_status_has_no_networks_key() {
+        // Pre-1.0 shape: no `status.networks` key exists at all, so we
+        // fall back to `configuration.networks`.
+        let ls = json!([
+            { "configuration": { "networks": [{ "network": "legacy-net" }] }, "status": { "state": "running" } }
+        ]);
+        let counts = network_ref_counts(serde_json::to_vec(&ls).unwrap().as_slice());
+        assert_eq!(counts.get("legacy-net"), Some(&1));
     }
 
     #[test]
@@ -1566,6 +1720,54 @@ mod tests {
     }
 
     #[test]
+    fn validate_entity_name_accepts_63_chars() {
+        let name = "a".repeat(63);
+        assert!(validate_entity_name("container", &name).is_ok());
+    }
+
+    #[test]
+    fn validate_entity_name_rejects_64_chars() {
+        let name = "a".repeat(64);
+        let err = validate_entity_name("container", &name)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("64 characters"));
+        assert!(err.contains("at most 63"));
+    }
+
+    #[test]
+    fn validate_entity_name_rejects_leading_underscore_dot_dash() {
+        for bad in ["_foo", ".foo", "-foo"] {
+            assert!(
+                validate_entity_name("container", bad).is_err(),
+                "expected {bad} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_entity_name_rejects_single_char() {
+        assert!(validate_entity_name("container", "a").is_err());
+    }
+
+    #[test]
+    fn validate_entity_name_rejects_disallowed_chars() {
+        for bad in ["foo bar", "foo/bar", "foo@bar", "foo:bar"] {
+            assert!(
+                validate_entity_name("container", bad).is_err(),
+                "expected {bad} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_entity_name_accepts_valid_names() {
+        for good in ["ab", "web-1", "db_primary", "app.v2", "Container123"] {
+            assert!(validate_entity_name("container", good).is_ok());
+        }
+    }
+
+    #[test]
     fn parse_system_running_matches_status_row_only() {
         // 1.0 running output: a key/value table with a status row.
         let up = "FIELD              VALUE\nstatus             running\nappRoot            /x\n";
@@ -1575,6 +1777,18 @@ mod tests {
         let down = "apiserver is not running and not registered with launchd";
         assert!(!parse_system_running(down));
         assert!(!parse_system_running(""));
+    }
+
+    #[test]
+    fn parse_system_running_reads_1_4_json() {
+        // 1.4.1 `--format json` running body (trimmed to the relevant field).
+        assert!(parse_system_running(r#"{"status":"running","host":{}}"#));
+        // 1.4.1 down states.
+        assert!(!parse_system_running(r#"{"status":"unregistered"}"#));
+        assert!(!parse_system_running(r#"{"status":"not running"}"#));
+        // Valid JSON with no `status` field at all falls back to the
+        // table-token check, which also finds nothing to match.
+        assert!(!parse_system_running(r#"{"host":{"cpus":8}}"#));
     }
 
     #[test]

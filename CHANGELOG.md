@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Verified against Apple's `container` CLI 1.4.1.
+
+### Added
+
+- **Clear error on invalid container/machine names.** Apple container 1.4+
+  rejects entity names that don't match `^[a-zA-Z0-9][a-zA-Z0-9_.-]+$` or
+  exceed 63 characters, surfacing only an unhelpful "container ID `…` is
+  not a valid container ID". Names are now validated up front — before
+  `container run` with a user-supplied `--name`, before `machine create`,
+  and before any service in a stack is started — with a message that
+  names the problem (length, leading character, disallowed character) and
+  which stack/service it came from. A stack with one invalid derived name
+  now fails before starting any of its containers, instead of half
+  starting.
+
+### Fixed
+
+- **`container system status` read via JSON, not table scraping.** 1.4.1's
+  `--format json` emits a top-level `"status"` field (`"running"` /
+  `"unregistered"` / `"not running"`, exit 1 when down); `parse_system_running`
+  now checks that field first and falls back to the old table-token match
+  for older CLIs that accept `--format json` but don't emit `status`.
+  `system_running()` and the Doctor check both now pass `--format json`.
+- **Network list shows real attached-container counts.** `container
+  network ls` doesn't report a container count itself, so the Networks
+  tab always showed `0`. It's now computed the same way volume ref-counts
+  are: a parallel `container ls --all --format json` call, counting each
+  network a *running* container is actually attached to
+  (`status.networks[]`), so stopped containers (whose intended network
+  only appears in `configuration.networks[]`) aren't double-counted.
+
 ## [0.5.1] — 2026-06-16
 
 ### Added
