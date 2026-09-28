@@ -30,7 +30,7 @@ tauri-plugin-notification = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-window-state = "2"
 portable-pty = "0.9"
-base64 = "0.22"
+base64 = "0.23"
 uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.39", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
