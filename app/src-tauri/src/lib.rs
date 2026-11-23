@@ -375,7 +375,13 @@ pub fn run() {
                             let _ = handle.emit("containers:tickAt", now_ms);
                             let _ = handle.emit("containers:tick", cs);
                         }
-                        Err(e) => eprintln!("containers tick failed: {e:#}"),
+                        Err(e) => {
+                            eprintln!("containers tick failed: {e:#}");
+                            // Let the UI show the failure state instead of
+                            // freezing on the last good list. Plain string,
+                            // re-sent each tick; the frontend dedupes.
+                            let _ = handle.emit("containers:tickError", format!("{e:#}"));
+                        }
                     }
                 }
             });

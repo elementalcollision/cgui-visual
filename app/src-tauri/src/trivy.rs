@@ -1,7 +1,7 @@
 // Permissive parser for `trivy image --format json` output. Mirrors cgui's
 // trivy.rs but emits the wire shape the UI's TrivyModal already renders.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::Duration;
 use tokio::process::Command;
@@ -75,9 +75,20 @@ pub async fn available() -> bool {
         .unwrap_or(false)
 }
 
-pub async fn scan(image: &str) -> Option<TrivyResult> {
+/// Outcome of a scan request. The three non-success-with-findings states
+/// are distinct on purpose: a missing binary or a failed/timed-out scan must
+/// never be rendered as a clean (0 CVE) result.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum ScanOutcome {
+    Ok { result: TrivyResult },
+    NotInstalled,
+    Failed { message: String },
+}
+
+pub async fn scan(image: &str) -> ScanOutcome {
     if !available().await {
-        return None;
+        return ScanOutcome::NotInstalled;
     }
     let fut = Command::new("trivy")
         .kill_on_drop(true)
@@ -91,15 +102,56 @@ pub async fn scan(image: &str) -> Option<TrivyResult> {
             image,
         ])
         .output();
-    let out = tokio::time::timeout(TRIVY_TIMEOUT, fut).await.ok()?.ok()?;
-    if !out.status.success() {
-        eprintln!(
-            "trivy scan failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-        return None;
+    let out = match tokio::time::timeout(TRIVY_TIMEOUT, fut).await {
+        Err(_) => {
+            return ScanOutcome::Failed {
+                message: format!("scan timed out after {}s", TRIVY_TIMEOUT.as_secs()),
+            }
+        }
+        Ok(Err(e)) => {
+            return ScanOutcome::Failed {
+                message: format!("could not run trivy: {e}"),
+            }
+        }
+        Ok(Ok(out)) => out,
+    };
+    match map_output(
+        out.status.success(),
+        out.status.code(),
+        &out.stdout,
+        &String::from_utf8_lossy(&out.stderr),
+        image,
+    ) {
+        Ok(result) => ScanOutcome::Ok { result },
+        Err(message) => ScanOutcome::Failed { message },
     }
-    let raw: Raw = serde_json::from_slice(&out.stdout).ok()?;
+}
+
+/// Map a finished `trivy image` process to a result or a user-facing
+/// failure message. Non-zero exit and unparseable JSON are failures, never
+/// an empty report.
+fn map_output(
+    success: bool,
+    code: Option<i32>,
+    stdout: &[u8],
+    stderr: &str,
+    image: &str,
+) -> Result<TrivyResult, String> {
+    if !success {
+        let detail = stderr.trim();
+        let code = code.map_or_else(|| "a signal".to_string(), |c| c.to_string());
+        return Err(if detail.is_empty() {
+            format!("trivy exited with {code} and no output")
+        } else {
+            format!("trivy exited with {code}: {detail}")
+        });
+    }
+    parse_report(stdout, image)
+}
+
+fn parse_report(stdout: &[u8], image: &str) -> Result<TrivyResult, String> {
+    let raw: Raw =
+        serde_json::from_slice(stdout).map_err(|e| format!("could not parse trivy output: {e}"))?;
 
     let mut findings: Vec<TrivyFinding> = Vec::new();
     for tgt in raw.results {
@@ -134,7 +186,7 @@ pub async fn scan(image: &str) -> Option<TrivyResult> {
         counts[sev_rank(&f.sev) as usize] += 1;
     }
 
-    Some(TrivyResult {
+    Ok(TrivyResult {
         image: raw.artifact.unwrap_or_else(|| image.to_string()),
         counts: json!({
             "CRITICAL": counts[0], "HIGH": counts[1],
@@ -242,5 +294,63 @@ mod tests {
         findings.sort_by_key(|a| sev_rank(&a.sev));
         assert_eq!(findings[0].sev, "CRITICAL");
         assert_eq!(findings[2].sev, "LOW");
+    }
+
+    #[test]
+    fn nonzero_exit_is_a_failure_with_stderr() {
+        let e = map_output(false, Some(1), b"", "FATAL image not found\n", "x").unwrap_err();
+        assert_eq!(e, "trivy exited with 1: FATAL image not found");
+        let e = map_output(false, None, b"", "", "x").unwrap_err();
+        assert!(e.contains("no output"), "{e}");
+    }
+
+    #[test]
+    fn garbage_stdout_is_a_failure_not_an_empty_report() {
+        assert!(map_output(true, Some(0), b"", "", "x").is_err());
+        assert!(map_output(true, Some(0), b"not json", "", "x")
+            .unwrap_err()
+            .starts_with("could not parse trivy output"));
+    }
+
+    #[test]
+    fn clean_and_findings_reports_are_ok_and_distinguishable() {
+        let clean = map_output(
+            true,
+            Some(0),
+            br#"{"ArtifactName":"a:1","Results":[]}"#,
+            "",
+            "a:1",
+        )
+        .unwrap();
+        assert!(clean.findings.is_empty());
+        assert_eq!(clean.counts["CRITICAL"], 0);
+        let dirty = map_output(
+            true,
+            Some(0),
+            br#"{"Results":[{"Vulnerabilities":[{"VulnerabilityID":"CVE-1","Severity":"HIGH"}]}]}"#,
+            "",
+            "img",
+        )
+        .unwrap();
+        assert_eq!(dirty.image, "img");
+        assert_eq!(dirty.findings.len(), 1);
+        assert_eq!(dirty.counts["HIGH"], 1);
+    }
+
+    #[test]
+    fn scan_outcome_serializes_with_status_tag() {
+        let v = serde_json::to_value(ScanOutcome::NotInstalled).unwrap();
+        assert_eq!(v, json!({"status": "notInstalled"}));
+        let v = serde_json::to_value(ScanOutcome::Failed {
+            message: "m".into(),
+        })
+        .unwrap();
+        assert_eq!(v, json!({"status": "failed", "message": "m"}));
+        let ok = ScanOutcome::Ok {
+            result: parse_report(br#"{"Results":[]}"#, "i").unwrap(),
+        };
+        let v = serde_json::to_value(ok).unwrap();
+        assert_eq!(v["status"], "ok");
+        assert_eq!(v["result"]["image"], "i");
     }
 }

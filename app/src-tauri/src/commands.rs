@@ -27,27 +27,30 @@ fn dev_fixture_or<T>(fixture: impl FnOnce() -> T, empty: impl FnOnce() -> T) -> 
     }
 }
 
-// Generic helper: run real impl when CLI is available, else fall back
-// to the dev fixture (or empty in release).
-async fn real_or_fixture<T, F, Fut>(
-    real: F,
-    fixture: impl FnOnce() -> T,
-    empty: impl FnOnce() -> T,
-) -> T
+/// The runtime binary can't be run at all. Debug builds fall back to the
+/// demo fixture so `cargo tauri dev` works on machines without Apple's
+/// `container`; release builds report the problem instead of an empty
+/// (indistinguishable-from-"nothing exists") list.
+fn fixture_or_missing<T>(fixture: impl FnOnce() -> T) -> Result<T, String> {
+    if cfg!(debug_assertions) {
+        Ok(fixture())
+    } else {
+        Err("The `container` CLI isn't installed or isn't on PATH".to_string())
+    }
+}
+
+// Generic list helper. Fixture fallback ONLY when the binary is genuinely
+// unavailable; a failing CLI call (e.g. services stopped) is an error the
+// UI must show, never an empty list or demo data.
+async fn list_or_fixture<T, F, Fut>(real: F, fixture: impl FnOnce() -> T) -> Result<T, String>
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<T>>,
 {
     if !runtime::available().await {
-        return dev_fixture_or(fixture, empty);
+        return fixture_or_missing(fixture);
     }
-    match real().await {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("runtime call failed: {e:#}");
-            dev_fixture_or(fixture, empty)
-        }
-    }
+    real().await.map_err(err_str)
 }
 
 // ─── Lists ────────────────────────────────────────────────────────────
@@ -55,43 +58,40 @@ where
 #[tauri::command]
 pub async fn list_containers(history: State<'_, Arc<History>>) -> Result<Vec<Container>, String> {
     if !runtime::available().await {
-        return Ok(dev_fixture_or(fixtures::containers, Vec::new));
+        return fixture_or_missing(fixtures::containers);
     }
-    match crate::state::poll_once(&history).await {
-        Ok(cs) => Ok(cs),
-        Err(e) => {
-            eprintln!("list_containers poll failed: {e:#}");
-            Ok(dev_fixture_or(fixtures::containers, Vec::new))
-        }
-    }
+    crate::state::poll_once(&history).await.map_err(err_str)
 }
 
 #[tauri::command]
-pub async fn list_images() -> Vec<Image> {
-    real_or_fixture(runtime::list_images, fixtures::images, Vec::new).await
+pub async fn list_images() -> Result<Vec<Image>, String> {
+    list_or_fixture(runtime::list_images, fixtures::images).await
 }
 
 #[tauri::command]
-pub async fn list_volumes() -> Vec<Volume> {
-    real_or_fixture(runtime::list_volumes, fixtures::volumes, Vec::new).await
+pub async fn list_volumes() -> Result<Vec<Volume>, String> {
+    list_or_fixture(runtime::list_volumes, fixtures::volumes).await
 }
 
 #[tauri::command]
-pub async fn list_networks() -> Vec<Network> {
-    real_or_fixture(runtime::list_networks, fixtures::networks, Vec::new).await
+pub async fn list_networks() -> Result<Vec<Network>, String> {
+    list_or_fixture(runtime::list_networks, fixtures::networks).await
 }
 
 #[tauri::command]
-pub async fn list_stacks() -> Vec<Stack> {
+pub async fn list_stacks() -> StackListing {
     let real = crate::stacks::list_stacks().await;
-    if !real.is_empty() {
+    if !real.stacks.is_empty() || !real.invalid.is_empty() {
         return real;
     }
     // Empty list from the real loader: in dev show the fictional MLPerf
     // stacks so designers have something to look at; in release return
     // an empty list so users see the genuine empty state instead of
     // four invented stacks they didn't create.
-    dev_fixture_or(fixtures::stacks, Vec::new)
+    StackListing {
+        stacks: dev_fixture_or(fixtures::stacks, Vec::new),
+        invalid: vec![],
+    }
 }
 
 #[tauri::command]
@@ -113,16 +113,8 @@ pub async fn stack_health(name: String) -> Result<Vec<(String, String)>, String>
 }
 
 #[tauri::command]
-pub async fn inspect_container(id: String) -> String {
-    if !runtime::available().await {
-        // Release: valid empty JSON so parseInspect doesn't crash on
-        // the frontend; dev: rich demo payload for design work.
-        return dev_fixture_or(fixtures::inspect_json, || "{}".to_string());
-    }
-    runtime::inspect(&id).await.unwrap_or_else(|e| {
-        eprintln!("inspect failed: {e:#}");
-        dev_fixture_or(fixtures::inspect_json, || "{}".to_string())
-    })
+pub async fn inspect_container(id: String) -> Result<String, String> {
+    list_or_fixture(|| runtime::inspect(&id), fixtures::inspect_json).await
 }
 
 #[tauri::command]
@@ -664,31 +656,26 @@ pub async fn doctor() -> Vec<DoctorCheck> {
 // ─── Trivy + updates (kept on fixtures for now) ───────────────────────
 
 #[tauri::command]
-pub async fn scan_image(image: String) -> TrivyResult {
-    let result = crate::trivy::scan(&image).await.unwrap_or_else(|| {
-        // Either trivy isn't on PATH or the scan failed. In dev show the
-        // demo findings so the modal isn't blank. In release return an
-        // empty result so users don't see invented CVEs against their
-        // image — Doctor already flags the missing trivy binary.
-        dev_fixture_or(
-            || {
-                let mut fb = fixtures::trivy();
-                fb.image = image.clone();
-                fb
-            },
-            || TrivyResult {
-                image: image.clone(),
-                counts: serde_json::json!({
-                    "CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0,
-                }),
-                findings: vec![],
-            },
-        )
-    });
-    // Persist a scan summary for the trend strip + new-CVEs diff (B7).
-    // Best-effort — record_scan no-ops if the DB isn't initialised.
-    crate::history::record_scan(&result.image, &result.findings);
-    result
+pub async fn scan_image(image: String) -> crate::trivy::ScanOutcome {
+    use crate::trivy::ScanOutcome;
+    let outcome = match crate::trivy::scan(&image).await {
+        // trivy isn't installed. In dev show the demo findings so the modal
+        // isn't blank; in release say so (Doctor flags it too) instead of
+        // returning a clean 0-CVE result.
+        ScanOutcome::NotInstalled if cfg!(debug_assertions) => {
+            let mut fb = fixtures::trivy();
+            fb.image = image.clone();
+            ScanOutcome::Ok { result: fb }
+        }
+        other => other,
+    };
+    // Persist a scan summary for the trend strip + new-CVEs diff (B7), only
+    // for scans that actually completed. Best-effort — record_scan no-ops
+    // if the DB isn't initialised.
+    if let ScanOutcome::Ok { result } = &outcome {
+        crate::history::record_scan(&result.image, &result.findings);
+    }
+    outcome
 }
 
 // Trivy scan history for one image (B7). Returns the most-recent-first
@@ -700,13 +687,8 @@ pub fn vuln_history(image: String, limit: Option<i64>) -> crate::history::VulnHi
 }
 
 #[tauri::command]
-pub async fn list_updates() -> Vec<Update> {
-    let real = crate::updates::check().await;
-    if real.is_empty() {
-        vec![]
-    } else {
-        real
-    }
+pub async fn list_updates() -> Result<Vec<Update>, String> {
+    crate::updates::check().await
 }
 
 // Kept for backward-compat with the frontend api.ts; new code should

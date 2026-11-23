@@ -120,6 +120,23 @@ pub struct Stack {
     pub file: String,
 }
 
+/// A `*.toml` file in the stacks folder that couldn't be read or parsed.
+/// Surfaced in the Stacks view so a typo doesn't make a stack vanish.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvalidStack {
+    pub file: String,
+    pub name: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StackListing {
+    pub stacks: Vec<Stack>,
+    pub invalid: Vec<InvalidStack>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TrivyFinding {

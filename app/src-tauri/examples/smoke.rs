@@ -47,11 +47,14 @@ async fn main() -> anyhow::Result<()> {
     }
 
     println!("\n== smoke: stacks::list_stacks");
-    let stacks = app_lib::stacks::list_stacks().await;
-    if stacks.is_empty() {
+    let listing = app_lib::stacks::list_stacks().await;
+    for bad in &listing.invalid {
+        println!("  invalid stack file {}: {}", bad.name, bad.error);
+    }
+    if listing.stacks.is_empty() {
         println!("  (no stacks at ~/.config/cgui/stacks/)");
     } else {
-        for s in &stacks {
+        for s in &listing.stacks {
             println!(
                 "  {} services={} health={}",
                 s.name,
@@ -65,7 +68,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     println!("\n== smoke: updates::check (live GitHub API)");
-    let updates = app_lib::updates::check().await;
+    let updates = app_lib::updates::check().await.unwrap_or_else(|e| {
+        println!("  update check failed: {e}");
+        Vec::new()
+    });
     if updates.is_empty() {
         println!("  (all components up to date or unreachable)");
     } else {
