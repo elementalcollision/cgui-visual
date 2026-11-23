@@ -44,13 +44,12 @@ export function splitList(text: string): string[] {
   return text.split(/[,\n]+/).map(s => s.trim()).filter(Boolean);
 }
 
-/** Volume name (same rule as containers: 2-63 chars, alphanumeric start). */
+/** Volume name: `^[A-Za-z0-9][A-Za-z0-9_.-]*$`, up to 255 characters. */
 export function validateVolumeName(name: string): string | null {
   const n = name.trim();
   if (!n) return 'Enter a volume name';
-  if (n.length < 2) return 'A volume name needs at least 2 characters';
-  if (n.length > 63) return 'A volume name is at most 63 characters';
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/.test(n)) return 'Use letters, digits, "_", "." and "-", starting with a letter or digit';
+  if (n.length > 255) return 'A volume name is at most 255 characters';
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(n)) return 'Use letters, digits, "_", "." and "-", starting with a letter or digit';
   return null;
 }
 
@@ -68,7 +67,7 @@ export function validateNetworkName(name: string): string | null {
 export function validateSize(size: string): string | null {
   const s = size.trim();
   if (!s) return null;
-  return /^[1-9][0-9]*[KkMmGgTtPp]?[Bb]?$/.test(s) ? null : 'Use a number with an optional suffix, e.g. 512M or 10G';
+  return /^\d+(\.\d+)?[KkMmGgTtPp]?[Bb]?$/.test(s) ? null : 'Use a number with an optional suffix, e.g. 512M or 10G';
 }
 
 /** IPv4 CIDR such as 192.168.100.0/24 (empty = CLI default). */

@@ -181,3 +181,197 @@ fn run_args_deserialize_aliases_from_the_ui() {
     let none: RunArgs = serde_json::from_str(r#"{"image":"alpine"}"#).unwrap();
     assert!(none.aliases.is_empty());
 }
+
+// ─── create volume / network ──────────────────────────────────────────
+
+#[test]
+fn volume_names() {
+    for n in ["data", "a", "My_Vol-1.x", &"x".repeat(255)] {
+        assert!(validate_volume_name(n).is_ok(), "{n}");
+    }
+    for n in [
+        "",
+        "-data",
+        "_data",
+        ".x",
+        "has space",
+        "a/b",
+        &"x".repeat(256),
+    ] {
+        assert!(validate_volume_name(n).is_err(), "{n:?}");
+    }
+}
+
+#[test]
+fn network_names() {
+    for n in ["net", "a", "my-net_1.x", "9lives", &"a".repeat(63)] {
+        assert!(validate_network_name(n).is_ok(), "{n}");
+    }
+    for n in [
+        "",
+        "Upper",
+        "-net",
+        "net-",
+        "_net",
+        "net.",
+        "has space",
+        &"a".repeat(64),
+    ] {
+        assert!(validate_network_name(n).is_err(), "{n:?}");
+    }
+}
+
+#[test]
+fn volume_sizes() {
+    for s in ["1G", "512m", "10GB", "1048576", "1.5G", "64M", "2T"] {
+        assert!(validate_volume_size(s).is_ok(), "{s}");
+    }
+    for s in ["", "G", "abc", "-1G", "1..5G", "1G2", "10 G", "1.G", ".5G"] {
+        assert!(validate_volume_size(s).is_err(), "{s:?}");
+    }
+}
+
+#[test]
+fn subnets_and_labels() {
+    assert!(validate_subnet_v4("192.168.100.0/24").is_ok());
+    for bad in [
+        "192.168.100.0",
+        "192.168.100.0/33",
+        "300.1.1.0/24",
+        "nope",
+        "10.0.0.0/",
+    ] {
+        assert!(validate_subnet_v4(bad).is_err(), "{bad}");
+    }
+    assert!(validate_subnet_v6("fd00:1234::/64").is_ok());
+    for bad in ["fd00::", "fd00::/129", "192.168.1.0/24", "zz::/64"] {
+        assert!(validate_subnet_v6(bad).is_err(), "{bad}");
+    }
+    assert!(validate_label("team=infra").is_ok());
+    assert!(validate_label("empty=").is_ok());
+    for bad in ["novalue", "=v", "a b=c", ""] {
+        assert!(validate_label(bad).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
+fn volume_create_argv_builds_flags_and_validates() {
+    let a = VolumeCreateArgs {
+        name: "data".into(),
+        size: Some(" 10G ".into()),
+        labels: vec!["team=infra".into(), "".into(), "env=dev".into()],
+    };
+    assert_eq!(
+        volume_create_argv(&a).unwrap(),
+        [
+            "volume",
+            "create",
+            "-s",
+            "10G",
+            "--label",
+            "team=infra",
+            "--label",
+            "env=dev",
+            "data"
+        ]
+    );
+    let bare = VolumeCreateArgs {
+        name: "data".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        volume_create_argv(&bare).unwrap(),
+        ["volume", "create", "data"]
+    );
+    let blank_size = VolumeCreateArgs {
+        name: "data".into(),
+        size: Some("  ".into()),
+        ..Default::default()
+    };
+    assert_eq!(volume_create_argv(&blank_size).unwrap().len(), 3);
+    for bad in [
+        VolumeCreateArgs {
+            name: "--all".into(),
+            ..Default::default()
+        },
+        VolumeCreateArgs {
+            name: "data".into(),
+            size: Some("big".into()),
+            ..Default::default()
+        },
+        VolumeCreateArgs {
+            name: "data".into(),
+            labels: vec!["nokey".into()],
+            ..Default::default()
+        },
+    ] {
+        assert!(volume_create_argv(&bad).is_err());
+    }
+}
+
+#[test]
+fn network_create_argv_builds_flags_and_validates() {
+    let a = NetworkCreateArgs {
+        name: "backend".into(),
+        subnet: Some("192.168.99.0/24".into()),
+        subnet_v6: Some("fd00:99::/64".into()),
+        internal: true,
+        labels: vec!["team=infra".into()],
+    };
+    assert_eq!(
+        network_create_argv(&a).unwrap(),
+        [
+            "network",
+            "create",
+            "--subnet",
+            "192.168.99.0/24",
+            "--subnet-v6",
+            "fd00:99::/64",
+            "--internal",
+            "--label",
+            "team=infra",
+            "backend"
+        ]
+    );
+    let bare = NetworkCreateArgs {
+        name: "backend".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        network_create_argv(&bare).unwrap(),
+        ["network", "create", "backend"]
+    );
+    for bad in [
+        NetworkCreateArgs {
+            name: "Backend".into(),
+            ..Default::default()
+        },
+        NetworkCreateArgs {
+            name: "-x".into(),
+            ..Default::default()
+        },
+        NetworkCreateArgs {
+            name: "n".into(),
+            subnet: Some("nope".into()),
+            ..Default::default()
+        },
+        NetworkCreateArgs {
+            name: "n".into(),
+            subnet_v6: Some("10.0.0.0/8".into()),
+            ..Default::default()
+        },
+    ] {
+        assert!(network_create_argv(&bad).is_err());
+    }
+}
+
+#[test]
+fn create_args_deserialize_from_the_ui() {
+    let v: VolumeCreateArgs =
+        serde_json::from_str(r#"{"name":"d","size":"1G","labels":["a=b"]}"#).unwrap();
+    assert_eq!((v.name.as_str(), v.size.as_deref()), ("d", Some("1G")));
+    let n: NetworkCreateArgs =
+        serde_json::from_str(r#"{"name":"n","subnetV6":"fd00::/64","internal":true}"#).unwrap();
+    assert!(n.internal);
+    assert_eq!(n.subnet_v6.as_deref(), Some("fd00::/64"));
+}

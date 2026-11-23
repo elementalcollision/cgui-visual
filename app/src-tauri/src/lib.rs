@@ -519,6 +519,8 @@ pub fn run() {
             commands::delete_image,
             commands::delete_volume,
             commands::delete_network,
+            commands::create_volume,
+            commands::create_network,
             commands::exec_container,
             commands::inspect_volume,
             commands::inspect_network,

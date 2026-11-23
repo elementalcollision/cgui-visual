@@ -93,6 +93,11 @@ export const api = {
   deleteImage:   (reference: string) => inTauri ? invokeStrict<void>('delete_image', { reference }) : Promise.resolve(),
   deleteVolume:  (name: string)      => inTauri ? invokeStrict<void>('delete_volume', { name }) : Promise.resolve(),
   deleteNetwork: (id: string)        => inTauri ? invokeStrict<void>('delete_network', { id }) : Promise.resolve(),
+  // Create (`container volume create` / `container network create`).
+  createVolume:  (args: { name: string; size?: string; labels?: string[] }) =>
+    inTauri ? invokeStrict<void>('create_volume', { args }) : Promise.resolve(),
+  createNetwork: (args: { name: string; subnet?: string; subnetV6?: string; internal?: boolean; labels?: string[] }) =>
+    inTauri ? invokeStrict<void>('create_network', { args }) : Promise.resolve(),
   execContainer: (id: string)        => inTauri ? invokeStrict<void>('exec_container', { id }) : Promise.resolve(),
 
   // Inspect: returns pretty JSON. In browser-dev mode hands back a small placeholder.

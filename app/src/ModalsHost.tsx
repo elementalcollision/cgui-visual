@@ -22,6 +22,8 @@ import {
   SettingsModal,
   JsonInspectModal,
   RunImageModal,
+  CreateVolumeModal,
+  CreateNetworkModal,
   OnboardingModal,
   CommandPaletteModal,
   ImageInspectModal,
@@ -105,6 +107,10 @@ export default function ModalsHost(props: {
       return <RunImageModal t={t} image={modal.image}
                             onLaunched={(id) => toast(`launched ${id}`, 'info')}
                             onClose={onClose} />;
+    case 'createVolume':
+      return <CreateVolumeModal t={t} onCreated={() => onResourcesChanged?.()} onClose={onClose} />;
+    case 'createNetwork':
+      return <CreateNetworkModal t={t} onCreated={() => onResourcesChanged?.()} onClose={onClose} />;
     case 'terminal':
       return (
         <Suspense fallback={null}>

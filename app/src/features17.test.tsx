@@ -4,12 +4,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { DetailModal, RunImageModal, parseInspect } from './modals';
+import { CreateNetworkModal, CreateVolumeModal, DetailModal, RunImageModal, parseInspect } from './modals';
+import { TopBar } from './components';
+import type { Tab } from './types';
 import { getTheme } from './theme';
 import { containers } from './fixtures';
 import { api } from './api';
 import { resetCliVersion } from './cliVersion';
-import { splitList, validateAlias, validateImageRef } from './validate';
+import { splitList, validateAlias, validateCidr, validateCidr6, validateImageRef, validateLabel, validateNetworkName, validateSize, validateVolumeName } from './validate';
 import { defaultCommitRef } from './containerActions';
 
 const t = getTheme(true);
@@ -190,5 +192,154 @@ describe('DNS aliases', () => {
     await user.click(screen.getByRole('button', { name: /^network/i }));
     expect(await screen.findByText('db.example.test')).toBeInTheDocument();
     expect(screen.getByText('backend (aliases)')).toBeInTheDocument();
+  });
+});
+
+describe('create volume', () => {
+  it('validates, calls the API with size and labels, then refreshes and closes', async () => {
+    const user = userEvent.setup();
+    const create = vi.spyOn(api, 'createVolume').mockResolvedValue(undefined);
+    const onCreated = vi.fn();
+    const onClose = vi.fn();
+    render(<CreateVolumeModal t={t} onCreated={onCreated} onClose={onClose} />);
+    const submit = screen.getByRole('button', { name: 'Create' });
+    expect(submit).toBeDisabled(); // empty name
+
+    await user.type(screen.getByLabelText('Name'), '-bad');
+    expect(screen.getByLabelText('Name')).toBeInvalid();
+    expect(submit).toBeDisabled();
+
+    await user.clear(screen.getByLabelText('Name'));
+    await user.type(screen.getByLabelText('Name'), 'mydata');
+    await user.type(screen.getByLabelText(/Size/), 'lots');
+    expect(screen.getByLabelText(/Size/)).toBeInvalid();
+    expect(submit).toBeDisabled();
+    await user.clear(screen.getByLabelText(/Size/));
+    await user.type(screen.getByLabelText(/Size/), '10G');
+    await user.type(screen.getByLabelText(/Labels/), 'team=infra');
+    expect(submit).toBeEnabled();
+
+    await user.click(submit);
+    await waitFor(() => expect(create).toHaveBeenCalledWith({ name: 'mydata', size: '10G', labels: ['team=infra'] }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalled());
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('sends only the name when the optional fields are empty', async () => {
+    const user = userEvent.setup();
+    const create = vi.spyOn(api, 'createVolume').mockResolvedValue(undefined);
+    render(<CreateVolumeModal t={t} onCreated={() => {}} onClose={() => {}} />);
+    await user.type(screen.getByLabelText('Name'), 'plain');
+    await user.keyboard('{Enter}'); // submitting the form works too
+    await waitFor(() => expect(create).toHaveBeenCalledWith({ name: 'plain', size: undefined, labels: undefined }));
+  });
+
+  it('stays open and re-enables Create when the CLI fails', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'createVolume').mockRejectedValue(new Error('volume already exists'));
+    const onCreated = vi.fn();
+    const onClose = vi.fn();
+    render(<CreateVolumeModal t={t} onCreated={onCreated} onClose={onClose} />);
+    await user.type(screen.getByLabelText('Name'), 'dup');
+    await user.click(screen.getByRole('button', { name: 'Create' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Create' })).toBeEnabled());
+    expect(onCreated).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
+describe('create network', () => {
+  it('rejects uppercase names and bad CIDRs, then submits every option', async () => {
+    const user = userEvent.setup();
+    const create = vi.spyOn(api, 'createNetwork').mockResolvedValue(undefined);
+    const onCreated = vi.fn();
+    render(<CreateNetworkModal t={t} onCreated={onCreated} onClose={() => {}} />);
+    const submit = screen.getByRole('button', { name: 'Create' });
+
+    await user.type(screen.getByLabelText('Name'), 'Backend');
+    expect(screen.getByLabelText('Name')).toBeInvalid();
+    expect(submit).toBeDisabled();
+    await user.clear(screen.getByLabelText('Name'));
+    await user.type(screen.getByLabelText('Name'), 'backend');
+
+    await user.type(screen.getByLabelText(/IPv4 subnet/), '192.168.1.0');
+    expect(screen.getByLabelText(/IPv4 subnet/)).toBeInvalid();
+    expect(submit).toBeDisabled();
+    await user.clear(screen.getByLabelText(/IPv4 subnet/));
+    await user.type(screen.getByLabelText(/IPv4 subnet/), '192.168.100.0/24');
+
+    await user.type(screen.getByLabelText(/IPv6 prefix/), 'fd00:1234::/64');
+    await user.click(screen.getByLabelText(/Host-only/));
+    await user.type(screen.getByLabelText(/Labels/), 'team=infra');
+    expect(submit).toBeEnabled();
+
+    await user.click(submit);
+    await waitFor(() => expect(create).toHaveBeenCalledWith({
+      name: 'backend', subnet: '192.168.100.0/24', subnetV6: 'fd00:1234::/64',
+      internal: true, labels: ['team=infra'],
+    }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalled());
+  });
+
+  it('sends just the name by default', async () => {
+    const user = userEvent.setup();
+    const create = vi.spyOn(api, 'createNetwork').mockResolvedValue(undefined);
+    render(<CreateNetworkModal t={t} onCreated={() => {}} onClose={() => {}} />);
+    await user.type(screen.getByLabelText('Name'), 'plain-net');
+    await user.click(screen.getByRole('button', { name: 'Create' }));
+    await waitFor(() => expect(create).toHaveBeenCalledWith({
+      name: 'plain-net', subnet: undefined, subnetV6: undefined, internal: undefined, labels: undefined,
+    }));
+  });
+});
+
+describe('TopBar "New…" button', () => {
+  const headings = Object.fromEntries(
+    ['containers', 'images', 'volumes', 'networks', 'stacks', 'logs'].map(k => [k, { title: k, sub: '' }]),
+  ) as Record<Tab, { title: string; sub: string }>;
+  const bar = (tab: Tab, onNew: (() => void) | null) => (
+    <TopBar tab={tab} t={t} search="" setSearch={() => {}} onPull={() => {}} onCollapse={() => {}}
+            runtime="container" dark setDark={() => {}} onUpdate={null} headings={headings} onNew={onNew} />
+  );
+
+  it('labels the button per tab and calls onNew', async () => {
+    const user = userEvent.setup();
+    const onNew = vi.fn();
+    const { rerender } = render(bar('volumes', onNew));
+    await user.click(screen.getByRole('button', { name: /New volume/ }));
+    expect(onNew).toHaveBeenCalledTimes(1);
+    rerender(bar('networks', onNew));
+    expect(screen.getByRole('button', { name: /New network/ })).toBeInTheDocument();
+  });
+
+  it('is absent when the tab has nothing to create', () => {
+    render(bar('containers', null));
+    expect(screen.queryByRole('button', { name: /New (volume|network)/ })).not.toBeInTheDocument();
+  });
+});
+
+describe('create-form validators', () => {
+  it('volume and network names follow the CLI rules', () => {
+    expect(validateVolumeName('data_1.x')).toBeNull();
+    expect(validateVolumeName('x'.repeat(255))).toBeNull();
+    expect(validateVolumeName('x'.repeat(256))).not.toBeNull();
+    expect(validateVolumeName('-x')).not.toBeNull();
+    expect(validateNetworkName('my-net_1')).toBeNull();
+    expect(validateNetworkName('a')).toBeNull();
+    for (const bad of ['Up', '-x', 'x-', 'a b', 'a'.repeat(64), '']) {
+      expect(validateNetworkName(bad), bad).not.toBeNull();
+    }
+  });
+
+  it('sizes, CIDRs and labels', () => {
+    for (const ok of ['', '512M', '10g', '1.5G', '2TB', '1048576']) expect(validateSize(ok), ok).toBeNull();
+    for (const bad of ['G', 'abc', '-1G', '1G2']) expect(validateSize(bad), bad).not.toBeNull();
+    expect(validateCidr('')).toBeNull();
+    expect(validateCidr('10.0.0.0/8')).toBeNull();
+    for (const bad of ['10.0.0.0', '10.0.0.0/33', '999.0.0.0/8', 'nope']) expect(validateCidr(bad), bad).not.toBeNull();
+    expect(validateCidr6('fd00::/64')).toBeNull();
+    for (const bad of ['fd00::', 'fd00::/129', '10.0.0.0/8']) expect(validateCidr6(bad), bad).not.toBeNull();
+    expect(validateLabel('a=b')).toBeNull();
+    expect(validateLabel('novalue')).not.toBeNull();
   });
 });

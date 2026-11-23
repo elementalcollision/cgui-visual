@@ -559,6 +559,16 @@ pub async fn delete_volume(name: String) -> Result<(), String> {
     runtime::delete_volume(&name).await.map_err(err_str)
 }
 #[tauri::command]
+pub async fn create_volume(args: runtime::VolumeCreateArgs) -> Result<(), String> {
+    runtime::create_volume(args).await.map_err(err_str)
+}
+
+#[tauri::command]
+pub async fn create_network(args: runtime::NetworkCreateArgs) -> Result<(), String> {
+    runtime::create_network(args).await.map_err(err_str)
+}
+
+#[tauri::command]
 pub async fn delete_network(id: String) -> Result<(), String> {
     runtime::delete_network(&id).await.map_err(err_str)
 }

@@ -83,6 +83,14 @@ struct Guard {
 impl Guard {
     /// Register a resource the test creates itself (via the app's own
     /// functions) so it is still cleaned up if the test panics.
+    fn track_volume(&mut self, n: &str) -> String {
+        self.volumes.push(n.to_string());
+        n.to_string()
+    }
+    fn track_network(&mut self, n: &str) -> String {
+        self.networks.push(n.to_string());
+        n.to_string()
+    }
     fn track_image(&mut self, r: &str) -> String {
         self.images.push(r.to_string());
         r.to_string()
@@ -483,6 +491,72 @@ async fn commit_running_and_stopped_container() {
     // Bad references never reach the CLI.
     assert!(runtime::commit_container(&cname, "Bad Ref").await.is_err());
     assert!(runtime::commit_container(&cname, "-x").await.is_err());
+}
+
+/// Create a volume (with size + label) and a network (with subnet + label)
+/// through the app's own argv builders; both show up in the list views.
+#[tokio::test]
+#[ignore]
+async fn create_volume_and_network_with_options() {
+    live_only!();
+    let mut g = Guard::default();
+
+    let vol = g.track_volume(&name("mk-vol"));
+    runtime::create_volume(runtime::VolumeCreateArgs {
+        name: vol.clone(),
+        size: Some("64M".into()),
+        labels: vec!["team=live".into()],
+    })
+    .await
+    .expect("create volume");
+    let listed = runtime::list_volumes().await.unwrap();
+    let v = listed
+        .iter()
+        .find(|v| v.name == vol)
+        .expect("volume listed");
+    assert!((v.size - 64.0 / 1024.0).abs() < 1e-6, "size {}", v.size);
+    let inspected = runtime::inspect_volume(&vol).await.unwrap();
+    assert!(
+        inspected.contains("team") && inspected.contains("live"),
+        "{inspected}"
+    );
+    // Creating it again is a CLI error that reaches the caller.
+    assert!(runtime::create_volume(runtime::VolumeCreateArgs {
+        name: vol.clone(),
+        ..Default::default()
+    })
+    .await
+    .is_err());
+
+    let net = g.track_network(&name("mk-net"));
+    // A pid-derived 192.168.X.0/24 keeps parallel/previous runs from colliding.
+    let octet = 100 + (std::process::id() % 100);
+    let subnet = format!("192.168.{octet}.0/24");
+    runtime::create_network(runtime::NetworkCreateArgs {
+        name: net.clone(),
+        subnet: Some(subnet.clone()),
+        labels: vec!["team=live".into()],
+        ..Default::default()
+    })
+    .await
+    .expect("create network");
+    let nets = runtime::list_networks().await.unwrap();
+    let n = nets.iter().find(|n| n.name == net).expect("network listed");
+    assert_eq!(n.subnet, subnet);
+
+    // Bad input never reaches the CLI.
+    assert!(runtime::create_volume(runtime::VolumeCreateArgs {
+        name: "-x".into(),
+        ..Default::default()
+    })
+    .await
+    .is_err());
+    assert!(runtime::create_network(runtime::NetworkCreateArgs {
+        name: "Bad_Upper".into(),
+        ..Default::default()
+    })
+    .await
+    .is_err());
 }
 
 /// DNS aliases (1.6+): run with `--network net,alias=...` and read them back

@@ -10,7 +10,7 @@ import { askConfirm, askText } from './dialogs';
 import { errMessage, looksLikeServicesDown } from './loadState';
 import { useCliAtLeast } from './cliVersion';
 import { commitContainerFlow } from './containerActions';
-import { splitList, validateAlias } from './validate';
+import { splitList, validateAlias, validateCidr, validateCidr6, validateLabel, validateNetworkName, validateSize, validateVolumeName } from './validate';
 
 function Backdrop({ onClose, children }: { onClose: () => void; children: ReactNode }) {
   return (
@@ -1538,6 +1538,179 @@ export function JsonInspectModal({ t, title, subtitle, fetcher, onClose }: {
         </div>
       </div>
     </Backdrop>
+  );
+}
+
+// Small create forms for volumes and networks (`container volume create`,
+// `container network create`). Fields validate inline; Create stays disabled
+// until the form is valid, and CLI errors surface via withToast.
+function useCreateFormStyles(t: ThemeTokens) {
+  return {
+    input: {
+      width: '100%', padding: '8px 10px', background: t.bg, border: `1px solid ${t.border}`,
+      borderRadius: 6, color: t.fg1, fontSize: 12, fontFamily: t.mono, outline: 'none',
+      boxSizing: 'border-box' as const,
+    },
+    label: { fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase' as const, color: t.fg3, marginBottom: 6, display: 'block' },
+    opt: { color: t.fg3, fontWeight: 400, textTransform: 'none' as const, letterSpacing: 0 },
+  };
+}
+
+function FieldNote({ t, error, children }: { t: ThemeTokens; error?: string | null; children?: ReactNode }) {
+  if (!error && !children) return null;
+  return <div style={{ fontSize: 10, color: error ? t.danger : t.fg3, marginTop: 4, lineHeight: 1.4 }}>{error ?? children}</div>;
+}
+
+function CreateModalShell({ t, title, subtitle, busy, canSubmit, submitLabel, onSubmit, onClose, children }: {
+  t: ThemeTokens; title: string; subtitle: string; busy: boolean; canSubmit: boolean;
+  submitLabel: string; onSubmit: () => void; onClose: () => void; children: ReactNode;
+}) {
+  return (
+    <Backdrop onClose={onClose}>
+      <form onSubmit={e => { e.preventDefault(); if (canSubmit && !busy) onSubmit(); }}
+            style={{ width: 460, background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 80px rgba(0,0,0,0.4)' }}>
+        <div style={{ padding: '18px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+          <Icon name="plus" size={20} color={t.accent} />
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 18, fontWeight: 600, color: t.fg1 }}>{title}</div>
+            <div style={{ fontSize: 12, color: t.fg3, fontFamily: t.mono, marginTop: 4 }}>{subtitle}</div>
+          </div>
+          <button type="button" onClick={onClose} style={iconBtn()}><Icon name="x" size={16} color={t.fg2} /></button>
+        </div>
+        <div style={{ padding: '18px 22px', display: 'flex', flexDirection: 'column', gap: 14, maxHeight: '62vh', overflow: 'auto' }}>
+          {children}
+        </div>
+        <div style={{ padding: '12px 22px', borderTop: `1px solid ${t.border}`, display: 'flex', gap: 8, justifyContent: 'flex-end', background: t.surfaceAlt }}>
+          <button type="button" style={pillBtn(t)} onClick={onClose} disabled={busy}>Cancel</button>
+          <button type="submit" disabled={!canSubmit || busy}
+                  style={{ padding: '6px 14px', background: t.fg1, color: t.bg, border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: busy ? 'wait' : 'pointer', opacity: !canSubmit || busy ? 0.5 : 1 }}>
+            {busy ? 'Creating…' : submitLabel}
+          </button>
+        </div>
+      </form>
+    </Backdrop>
+  );
+}
+
+export function CreateVolumeModal({ t, onCreated, onClose }: {
+  t: ThemeTokens; onCreated: () => void; onClose: () => void;
+}) {
+  const s = useCreateFormStyles(t);
+  const [name, setName] = useState('');
+  const [size, setSize] = useState('');
+  const [labels, setLabels] = useState('');
+  const [busy, setBusy] = useState(false);
+  const labelList = labels.split('\n').map(l => l.trim()).filter(Boolean);
+  const nameError = name.trim() ? validateVolumeName(name) : null;
+  const sizeError = validateSize(size);
+  const labelError = labelList.map(validateLabel).find(Boolean) ?? null;
+  const canSubmit = !!name.trim() && !nameError && !sizeError && !labelError;
+  const submit = () => {
+    const n = name.trim();
+    setBusy(true);
+    withToast(`create volume ${n}`, api.createVolume({
+      name: n,
+      size: size.trim() || undefined,
+      labels: labelList.length ? labelList : undefined,
+    }))
+      .then(() => { toast(`Created volume ${n}`, 'info'); onCreated(); onClose(); })
+      .catch(() => setBusy(false));
+  };
+  return (
+    <CreateModalShell t={t} title="New volume" subtitle="container volume create" busy={busy}
+                      canSubmit={canSubmit} submitLabel="Create" onSubmit={submit} onClose={onClose}>
+      <div>
+        <label style={s.label} htmlFor="vol-name">Name</label>
+        <input id="vol-name" style={{ ...s.input, borderColor: nameError ? t.danger : t.border }} autoFocus
+               value={name} onChange={e => setName(e.target.value)} placeholder="mydata" spellCheck={false}
+               aria-invalid={nameError ? true : undefined} />
+        <FieldNote t={t} error={nameError} />
+      </div>
+      <div>
+        <label style={s.label} htmlFor="vol-size">Size <span style={s.opt}>(optional)</span></label>
+        <input id="vol-size" style={{ ...s.input, borderColor: sizeError ? t.danger : t.border }}
+               value={size} onChange={e => setSize(e.target.value)} placeholder="10G" spellCheck={false}
+               aria-invalid={sizeError ? true : undefined} />
+        <FieldNote t={t} error={sizeError}>Maximum size, with an optional K, M, G, T or P suffix. Leave empty for the CLI default (a large sparse disk that only uses space as it fills).</FieldNote>
+      </div>
+      <div>
+        <label style={s.label} htmlFor="vol-labels">Labels <span style={s.opt}>(key=value, one per line)</span></label>
+        <textarea id="vol-labels" style={{ ...s.input, minHeight: 48, resize: 'vertical', borderColor: labelError ? t.danger : t.border }}
+                  value={labels} onChange={e => setLabels(e.target.value)} placeholder="team=infra" spellCheck={false}
+                  aria-invalid={labelError ? true : undefined} />
+        <FieldNote t={t} error={labelError} />
+      </div>
+    </CreateModalShell>
+  );
+}
+
+export function CreateNetworkModal({ t, onCreated, onClose }: {
+  t: ThemeTokens; onCreated: () => void; onClose: () => void;
+}) {
+  const s = useCreateFormStyles(t);
+  const [name, setName] = useState('');
+  const [subnet, setSubnet] = useState('');
+  const [subnetV6, setSubnetV6] = useState('');
+  const [internal, setInternal] = useState(false);
+  const [labels, setLabels] = useState('');
+  const [busy, setBusy] = useState(false);
+  const labelList = labels.split('\n').map(l => l.trim()).filter(Boolean);
+  const nameError = name.trim() ? validateNetworkName(name) : null;
+  const subnetError = validateCidr(subnet);
+  const subnetV6Error = validateCidr6(subnetV6);
+  const labelError = labelList.map(validateLabel).find(Boolean) ?? null;
+  const canSubmit = !!name.trim() && !nameError && !subnetError && !subnetV6Error && !labelError;
+  const submit = () => {
+    const n = name.trim();
+    setBusy(true);
+    withToast(`create network ${n}`, api.createNetwork({
+      name: n,
+      subnet: subnet.trim() || undefined,
+      subnetV6: subnetV6.trim() || undefined,
+      internal: internal || undefined,
+      labels: labelList.length ? labelList : undefined,
+    }))
+      .then(() => { toast(`Created network ${n}`, 'info'); onCreated(); onClose(); })
+      .catch(() => setBusy(false));
+  };
+  return (
+    <CreateModalShell t={t} title="New network" subtitle="container network create" busy={busy}
+                      canSubmit={canSubmit} submitLabel="Create" onSubmit={submit} onClose={onClose}>
+      <div>
+        <label style={s.label} htmlFor="net-name">Name</label>
+        <input id="net-name" style={{ ...s.input, borderColor: nameError ? t.danger : t.border }} autoFocus
+               value={name} onChange={e => setName(e.target.value)} placeholder="backend" spellCheck={false}
+               aria-invalid={nameError ? true : undefined} />
+        <FieldNote t={t} error={nameError}>Lowercase letters, digits, ".", "_" and "-".</FieldNote>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <div>
+          <label style={s.label} htmlFor="net-subnet">IPv4 subnet <span style={s.opt}>(optional)</span></label>
+          <input id="net-subnet" style={{ ...s.input, borderColor: subnetError ? t.danger : t.border }}
+                 value={subnet} onChange={e => setSubnet(e.target.value)} placeholder="192.168.100.0/24" spellCheck={false}
+                 aria-invalid={subnetError ? true : undefined} />
+          <FieldNote t={t} error={subnetError} />
+        </div>
+        <div>
+          <label style={s.label} htmlFor="net-subnet6">IPv6 prefix <span style={s.opt}>(optional)</span></label>
+          <input id="net-subnet6" style={{ ...s.input, borderColor: subnetV6Error ? t.danger : t.border }}
+                 value={subnetV6} onChange={e => setSubnetV6(e.target.value)} placeholder="fd00:1234::/64" spellCheck={false}
+                 aria-invalid={subnetV6Error ? true : undefined} />
+          <FieldNote t={t} error={subnetV6Error} />
+        </div>
+      </div>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: t.fg1, cursor: 'pointer' }}>
+        <input type="checkbox" checked={internal} onChange={e => setInternal(e.target.checked)} style={{ accentColor: t.accent }} />
+        Host-only (--internal): no access to the outside network
+      </label>
+      <div>
+        <label style={s.label} htmlFor="net-labels">Labels <span style={s.opt}>(key=value, one per line)</span></label>
+        <textarea id="net-labels" style={{ ...s.input, minHeight: 48, resize: 'vertical', borderColor: labelError ? t.danger : t.border }}
+                  value={labels} onChange={e => setLabels(e.target.value)} placeholder="team=infra" spellCheck={false}
+                  aria-invalid={labelError ? true : undefined} />
+        <FieldNote t={t} error={labelError} />
+      </div>
+    </CreateModalShell>
   );
 }
 

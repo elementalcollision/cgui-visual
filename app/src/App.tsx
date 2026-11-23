@@ -443,6 +443,8 @@ export default function App() {
                 onPrune={onPrune}
                 onImport={tab === 'images' ? onImportImage : null}
                 onBuild={tab === 'images' ? () => setModal({ type: 'build' }) : null}
+                onNew={tab === 'volumes' ? () => setModal({ type: 'createVolume' })
+                  : tab === 'networks' ? () => setModal({ type: 'createNetwork' }) : null}
                 onCollapse={() => setCollapsed(!collapsed)}
                 runtime={runtime}
                 dark={dark}
