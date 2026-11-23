@@ -430,6 +430,76 @@ async fn aborting_logs_stream_kills_its_process() {
     assert!(gone, "`logs -f {cname}` survived task abort");
 }
 
+/// The Logs view's display stream (same registry path as `start_log_stream`)
+/// must end when its container is deleted: `logs -f` itself never exits.
+#[tokio::test]
+#[ignore]
+async fn display_stream_ends_when_container_is_deleted() {
+    live_only!();
+    let mut g = Guard::default();
+    let cname = g.container(&name("dstream"));
+    let args = RunArgs {
+        command: Some("ping 127.0.0.1".into()),
+        ..run_args(&cname)
+    };
+    runtime::run_image(args).await.expect("run");
+
+    let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = lines.clone();
+    let emit: app_lib::logstreams::Emit =
+        std::sync::Arc::new(move |l| sink.lock().unwrap().push(l));
+    let sid = format!("live-{}", std::process::id());
+    app_lib::logstreams::spawn_follow(
+        sid.clone(),
+        cname.clone(),
+        false,
+        &["logs", "-f", &cname],
+        emit,
+    )
+    .expect("spawn display stream");
+
+    let mut seen = false;
+    for _ in 0..20 {
+        if pgrep_logs(&cname) {
+            seen = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(seen, "`logs -f {cname}` process should be running");
+    // Wait past the reconcile's minimum stream age; a running container
+    // keeps its stream.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let (cs, _) = runtime::list_containers_raw().await.expect("list");
+    assert!(app_lib::logstreams::reconcile(&cs).is_empty());
+    assert!(pgrep_logs(&cname), "running container keeps its stream");
+
+    cli_ok(&["delete", "--force", &cname]);
+    let (cs, _) = runtime::list_containers_raw().await.expect("list");
+    assert!(!cs.iter().any(|c| c.id == cname), "container deleted");
+    let ended = app_lib::logstreams::reconcile(&cs);
+    assert_eq!(ended, vec![sid.clone()]);
+
+    let mut gone = false;
+    for _ in 0..40 {
+        if !pgrep_logs(&cname) {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(gone, "`logs -f {cname}` survived reconcile");
+    let got = lines.lock().unwrap().clone();
+    assert_eq!(
+        got.last().map(String::as_str),
+        Some(app_lib::logstreams::MARKER_REMOVED),
+        "last line is the end marker: {got:?}"
+    );
+    // Frontend's later stop must be harmless; a second reconcile is empty.
+    app_lib::logstreams::stop(&sid);
+    assert!(app_lib::logstreams::reconcile(&cs).is_empty());
+}
+
 /// F18: a quoted `sh -c "..."` command must reach the container as one
 /// script argument (whitespace splitting used to break it and the
 /// container exited immediately); flag-like ids never reach the CLI.
