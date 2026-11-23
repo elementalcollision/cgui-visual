@@ -38,6 +38,7 @@ export default function App() {
   const [menubarMode, setMenubarMode] = useState(false);
   const [globalHotkey, setGlobalHotkey] = useState('');
   const [notifyOnExit, setNotifyOnExit] = useState(true);
+  const [backgroundLogs, setBackgroundLogs] = useState(true);
   // ms-since-epoch of the last successful container poll (A12). 0 = never.
   const [lastTickAt, setLastTickAt] = useState(0);
   // Re-render driver for the "Ns ago" label so it counts up between ticks.
@@ -99,6 +100,7 @@ export default function App() {
       setMenubarMode(p.menubarMode);
       setGlobalHotkey(p.globalHotkey);
       setNotifyOnExit(p.notifyOnExit);
+      setBackgroundLogs(p.backgroundLogs ?? true);
       prefsLoaded.current = true;
     });
   }, []);
@@ -143,10 +145,10 @@ export default function App() {
     if (!prefsLoaded.current) return;
     const p: Prefs = {
       dark, sidebarCollapsed: collapsed, lastTab: tab,
-      menubarMode, globalHotkey, notifyOnExit,
+      menubarMode, globalHotkey, notifyOnExit, backgroundLogs,
     };
     api.savePrefs(p);
-  }, [dark, collapsed, tab, menubarMode, globalHotkey, notifyOnExit]);
+  }, [dark, collapsed, tab, menubarMode, globalHotkey, notifyOnExit, backgroundLogs]);
 
   // Push hotkey changes to the backend so they take effect immediately
   // without a restart. Surfaces parser/conflict errors via toast.
@@ -492,6 +494,7 @@ export default function App() {
               menubarMode={menubarMode} setMenubarMode={setMenubarMode}
               globalHotkey={globalHotkey} setGlobalHotkey={setGlobalHotkey}
               notifyOnExit={notifyOnExit} setNotifyOnExit={setNotifyOnExit}
+              backgroundLogs={backgroundLogs} setBackgroundLogs={setBackgroundLogs}
               containers={containers} images={paletteImages} stacks={paletteStacks}
               setTab={setTab} setModal={setModal} setLogTarget={setLogTarget}
               onResourcesChanged={() => setPruneTick(n => n + 1)}

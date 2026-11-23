@@ -18,11 +18,12 @@ export type Prefs = {
   menubarMode: boolean;
   globalHotkey: string;
   notifyOnExit: boolean;
+  backgroundLogs: boolean;
 };
 
 const PREFS_DEFAULT: Prefs = {
   dark: true, sidebarCollapsed: false, lastTab: 'containers',
-  menubarMode: false, globalHotkey: '', notifyOnExit: true,
+  menubarMode: false, globalHotkey: '', notifyOnExit: true, backgroundLogs: true,
 };
 
 async function call<T>(cmd: string, fallback: T, args?: Record<string, unknown>): Promise<T> {
