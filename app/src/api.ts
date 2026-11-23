@@ -92,6 +92,11 @@ export const api = {
   deleteImage:   (reference: string) => inTauri ? invokeStrict<void>('delete_image', { reference }) : Promise.resolve(),
   deleteVolume:  (name: string)      => inTauri ? invokeStrict<void>('delete_volume', { name }) : Promise.resolve(),
   deleteNetwork: (id: string)        => inTauri ? invokeStrict<void>('delete_network', { id }) : Promise.resolve(),
+  // Create (`container volume create` / `container network create`).
+  createVolume:  (args: { name: string; size?: string; labels?: string[] }) =>
+    inTauri ? invokeStrict<void>('create_volume', { args }) : Promise.resolve(),
+  createNetwork: (args: { name: string; subnet?: string; subnetV6?: string; internal?: boolean; labels?: string[] }) =>
+    inTauri ? invokeStrict<void>('create_network', { args }) : Promise.resolve(),
   execContainer: (id: string)        => inTauri ? invokeStrict<void>('exec_container', { id }) : Promise.resolve(),
 
   // Inspect: returns pretty JSON. In browser-dev mode hands back a small placeholder.
@@ -104,18 +109,32 @@ export const api = {
   runImage: (args: {
     image: string; name?: string; ports?: string[]; env?: string[]; command?: string;
     cpus?: number; memory?: string; volumes?: string[]; labels?: string[];
-    network?: string; workdir?: string; user?: string; platform?: string;
+    network?: string; aliases?: string[]; workdir?: string; user?: string; platform?: string;
     rm?: boolean; rosetta?: boolean;
   }) =>
     inTauri ? invokeStrict<string>('run_image', { args }) : Promise.resolve('dev-mode-no-op'),
 
   // Container machines (phase 4): named VMs that containers run in.
   machineList: () => call<{ id: string; status: string; cpus: number; memory: number; diskSize: number; isDefault: boolean; createdDate: string }[]>('machine_list', []),
-  machineCreate: (name: string, image: string, cpus?: number, memory?: string, noBoot = true) =>
-    inTauri ? invokeStrict<void>('machine_create', { name, image, cpus, memory, noBoot }) : Promise.resolve(),
+  // `userOpts` (container 1.6+): the machine account's name/uid/gid/home.
+  machineCreate: (name: string, image: string, cpus?: number, memory?: string, noBoot = true,
+                  userOpts?: { user?: string; uid?: number; gid?: number; home?: string }) =>
+    inTauri ? invokeStrict<void>('machine_create', { name, image, cpus, memory, noBoot, userOpts }) : Promise.resolve(),
+  // One-shot `machine logs` (stdio, or the VM boot log with `boot`).
+  machineLogs: (name: string, opts?: { boot?: boolean; tail?: number }) =>
+    inTauri ? invokeStrict<string>('machine_logs', { name, boot: opts?.boot, tail: opts?.tail })
+            : Promise.resolve(`[dev mode] ${opts?.boot ? 'boot' : 'stdio'} log for ${name}\n`),
+  machineInspect: (name: string) =>
+    inTauri ? invokeStrict<string>('machine_inspect', { name })
+            : Promise.resolve(`[\n  {\n    "id": "${name}"\n  }\n]`),
   machineStop: (name: string) => inTauri ? invokeStrict<void>('machine_stop', { name }) : Promise.resolve(),
   machineDelete: (name: string) => inTauri ? invokeStrict<void>('machine_delete', { name }) : Promise.resolve(),
   machineSetDefault: (name: string) => inTauri ? invokeStrict<void>('machine_set_default', { name }) : Promise.resolve(),
+
+  // Commit a container's filesystem to a new image (`container commit`,
+  // 1.6+). Resolves to the committed reference as the CLI reports it.
+  commitContainer: (id: string, reference: string) =>
+    inTauri ? invokeStrict<string>('commit_container', { id, reference }) : Promise.resolve(reference),
 
   // Tag an existing image with a new reference.
   tagImage: (source: string, target: string) =>
@@ -134,6 +153,11 @@ export const api = {
     containers: { total: 1, active: 0, sizeInBytes: 760791040, reclaimable: 760791040 },
     volumes:    { total: 0, active: 0, sizeInBytes: 0, reclaimable: 0 },
   }),
+
+  // Detected Apple container CLI version (`1.7.1`), or null when unknown.
+  // The backend caches it; restarting the services clears that cache.
+  // Browser dev mode reports a current version so gated features are usable.
+  cliVersion: () => call<string | null>('cli_version', '1.7.1'),
 
   // First-run onboarding probe. Outside Tauri (browser dev mode) the
   // fallback returns true so the OnboardingModal doesn't trigger when the

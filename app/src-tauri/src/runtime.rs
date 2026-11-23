@@ -149,6 +149,11 @@ pub struct StatRow {
     pub block_read_bytes: u64,
     #[serde(rename = "blockWriteBytes", default)]
     pub block_write_bytes: u64,
+    /// CPU use as a fraction of ONE core (1.0 = one core fully busy),
+    /// sampled by the CLI over ~2 s. Present since container 1.7.1; older
+    /// CLIs omit it and state.rs falls back to `cpu_usage_usec` deltas.
+    #[serde(rename = "cpuUtilization", default)]
+    pub cpu_utilization: Option<f64>,
 }
 
 const RUN_TIMEOUT: Duration = Duration::from_secs(8);
@@ -995,6 +1000,10 @@ pub struct RunArgs {
     pub labels: Vec<String>, // "key=value" each
     #[serde(default)]
     pub network: Option<String>,
+    /// DNS aliases for the container on `network` (container 1.6+):
+    /// emitted as `--network <net>,alias=A,alias=B`. See `network_spec`.
+    #[serde(default)]
+    pub aliases: Vec<String>,
     #[serde(default)]
     pub workdir: Option<String>,
     #[serde(default)]
@@ -1088,7 +1097,61 @@ pub fn split_command(input: &str) -> Result<Vec<String>> {
     Ok(words)
 }
 
+/// Validate a network DNS alias (container 1.6+, `--network net,alias=NAME`):
+/// a hostname of 1-63 character DNS labels (letters, digits, inner `-`),
+/// at most 253 characters in all. The CLI additionally wants a fully
+/// qualified name (two or more labels, e.g. `api.example.test`) unless a
+/// default DNS domain is configured, and says so itself; we don't duplicate
+/// that rule because the configured domain isn't known here.
+///
+/// This also guarantees an alias can't smuggle `,` / `=` into the
+/// `--network` option list.
+pub fn validate_alias(alias: &str) -> Result<()> {
+    if alias.is_empty() {
+        return Err(anyhow!("network alias must not be empty"));
+    }
+    if alias.len() > 253 {
+        return Err(anyhow!(
+            "network alias `{alias}` is longer than 253 characters"
+        ));
+    }
+    let name = alias.strip_suffix('.').unwrap_or(alias);
+    for label in name.split('.') {
+        let ok = (1..=63).contains(&label.len())
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            && !label.starts_with('-')
+            && !label.ends_with('-');
+        if !ok {
+            return Err(anyhow!(
+                "network alias `{alias}` is not a valid DNS name: each part must be 1-63 letters, digits or `-`, not starting or ending with `-`"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The value for `--network`: the network name (or `default` when only
+/// aliases were given) followed by `,alias=NAME` per alias. `None` when
+/// there is neither a network nor an alias, so the CLI default applies.
+/// Aliases must already be validated (`validate_alias`).
+pub fn network_spec(network: Option<&str>, aliases: &[String]) -> Option<String> {
+    let net = network.filter(|s| !s.is_empty());
+    let aliases: Vec<&String> = aliases.iter().filter(|a| !a.is_empty()).collect();
+    if aliases.is_empty() {
+        return net.map(String::from);
+    }
+    let mut spec = net.unwrap_or("default").to_string();
+    for a in aliases {
+        spec.push_str(",alias=");
+        spec.push_str(a);
+    }
+    Some(spec)
+}
+
 pub fn run_image_argv(args: &RunArgs) -> Result<Vec<String>> {
+    for a in args.aliases.iter().filter(|a| !a.is_empty()) {
+        validate_alias(a)?;
+    }
     let mut argv: Vec<String> = vec!["run".into(), "-d".into()];
     let mut opt = |flag: &str, val: Option<&str>| {
         if let Some(v) = val.filter(|s| !s.is_empty()) {
@@ -1099,7 +1162,10 @@ pub fn run_image_argv(args: &RunArgs) -> Result<Vec<String>> {
     opt("--name", args.name.as_deref());
     opt("--cpus", args.cpus.map(|c| c.to_string()).as_deref());
     opt("--memory", args.memory.as_deref());
-    opt("--network", args.network.as_deref());
+    opt(
+        "--network",
+        network_spec(args.network.as_deref(), &args.aliases).as_deref(),
+    );
     opt("--workdir", args.workdir.as_deref());
     opt("--user", args.user.as_deref());
     opt("--platform", args.platform.as_deref());
@@ -1158,6 +1224,84 @@ pub async fn tag_image(source: &str, target: &str) -> Result<()> {
     run(&["image", "tag", source, target]).await.map(|_| ())
 }
 
+/// Basic sanity check for a *new* image reference (a name the user types, as
+/// opposed to one already in the image list): `[host[:port]/]repo[:tag]
+/// [@digest]` with a lowercase repository, a plain tag, no whitespace, and
+/// nothing flag-like. The CLI is stricter still ("invalid format for image
+/// reference"); this just turns the common mistakes into a specific message.
+pub fn validate_image_ref(kind: &str, reference: &str) -> Result<()> {
+    reject_flag_like(kind, reference)?;
+    if reference.len() > 255 {
+        return Err(anyhow!(
+            "{kind} `{reference}` is longer than 255 characters"
+        ));
+    }
+    if reference
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+    {
+        return Err(anyhow!(
+            "{kind} `{reference}` must not contain spaces or control characters"
+        ));
+    }
+    let no_digest = reference.split('@').next().unwrap_or(reference);
+    let (name, tag) = match no_digest.rfind(':') {
+        // A `:` before the last `/` belongs to a registry host:port.
+        Some(i) if !no_digest[i..].contains('/') => (&no_digest[..i], Some(&no_digest[i + 1..])),
+        _ => (no_digest, None),
+    };
+    if name.is_empty() || name.ends_with('/') || name.starts_with('/') {
+        return Err(anyhow!("{kind} `{reference}` has no repository name"));
+    }
+    if name.chars().any(|c| {
+        !(c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-' | '/' | ':'))
+    }) {
+        return Err(anyhow!(
+            "{kind} `{reference}`: the repository name must be lowercase letters, digits, `.`, `_`, `-` and `/`"
+        ));
+    }
+    if let Some(tag) = tag {
+        if tag.is_empty()
+            || tag.len() > 128
+            || !tag
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        {
+            return Err(anyhow!(
+                "{kind} `{reference}` has an invalid tag (letters, digits, `.`, `_`, `-`; up to 128 characters)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `container commit <id> <reference>` (1.6+): snapshot a container's
+/// filesystem (running or stopped) into a new image. Copying the disk can
+/// take a while on large containers, so this uses the long timeout.
+/// Returns the CLI's stdout (the resolved reference).
+pub async fn commit_container(id: &str, reference: &str) -> Result<String> {
+    reject_flag_like("container id", id)?;
+    validate_image_ref("image reference", reference)?;
+    let bytes = run_with_timeout(&["commit", id, reference], RUN_LONG_TIMEOUT)
+        .await
+        .map_err(map_commit_unsupported)?;
+    Ok(String::from_utf8_lossy(&bytes).trim().to_string())
+}
+
+/// `container commit` is new in 1.6; older CLIs fail with an
+/// `unknown command`/plugin-not-found error. Say what is needed instead.
+fn map_commit_unsupported(e: anyhow::Error) -> anyhow::Error {
+    let msg = e.to_string();
+    if msg.contains("exit status: 64")
+        && (msg.contains("Plugin 'container-commit' not found")
+            || msg.contains("unknown command 'commit'"))
+    {
+        anyhow!("`container commit` requires Apple container 1.6 or later")
+    } else {
+        e
+    }
+}
+
 // ─── Builder VM lifecycle (`container builder …`, 1.0 parity) ─────────
 // `builder status --format json` returns the builder container in the
 // same shape as `ls`, so parse_container is reused. None = no builder
@@ -1205,12 +1349,14 @@ pub async fn builder_delete() -> Result<()> {
 // `start` is idempotent; `stop` tears the services down.
 
 pub async fn system_start() -> Result<()> {
+    clear_cli_version_cache();
     run_with_timeout(&["system", "start"], RUN_LONG_TIMEOUT)
         .await
         .map(|_| ())
 }
 
 pub async fn system_stop() -> Result<()> {
+    clear_cli_version_cache();
     run_with_timeout(&["system", "stop"], RUN_LONG_TIMEOUT)
         .await
         .map(|_| ())
@@ -1264,6 +1410,31 @@ pub async fn system_running() -> Result<bool> {
         Ok(bytes) => Ok(parse_system_running(&String::from_utf8_lossy(&bytes))),
         Err(_) => Ok(false),
     }
+}
+
+// ─── CLI capability gate ──────────────────────────────────────────────
+// Features that need a newer CLI (commit 1.6+, DNS aliases 1.6+, native CPU
+// 1.7.1+, ...) are gated in the UI on the detected CLI version. The version
+// is cached for the process lifetime; start/stop/restart of the services
+// clears it so an upgrade followed by a services restart is picked up.
+
+static CLI_VERSION: RwLock<Option<String>> = RwLock::new(None);
+
+fn clear_cli_version_cache() {
+    *CLI_VERSION.write().unwrap() = None;
+}
+
+/// Version of the CLI binary (`container --version`), e.g. `1.7.1`. `None`
+/// when the binary can't be run or prints nothing parseable. Only successful
+/// detections are cached.
+pub async fn cli_version() -> Option<String> {
+    if let Some(v) = CLI_VERSION.read().unwrap().clone() {
+        return Some(v);
+    }
+    let bytes = run(&["--version"]).await.ok()?;
+    let v = crate::updates::extract_version(&String::from_utf8_lossy(&bytes))?;
+    *CLI_VERSION.write().unwrap() = Some(v.clone());
+    Some(v)
 }
 
 // Args for a streamed `container build`. Mirrors the BuildModal form.
@@ -1373,14 +1544,71 @@ pub async fn machine_list() -> Result<Vec<Machine>> {
     serde_json::from_slice(&bytes).context("parse `machine list` json")
 }
 
+/// Optional account settings for the machine's user (container 1.6+):
+/// `-u/--user`, `--uid`, `--gid`, `--home`. Unset fields keep the CLI
+/// defaults (the host user's name/ids, home `/home/<user>`).
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineUserOpts {
+    /// `name` or `uid[:gid]` (the CLI's `-u` format).
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub uid: Option<u32>,
+    #[serde(default)]
+    pub gid: Option<u32>,
+    /// Absolute home directory inside the machine.
+    #[serde(default)]
+    pub home: Option<String>,
+}
+
+/// Validate and render `MachineUserOpts` as CLI flags (empty when unset).
+pub fn machine_user_args(opts: &MachineUserOpts) -> Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    let text = |o: &Option<String>| {
+        o.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
+    if let Some(user) = text(&opts.user) {
+        reject_flag_like("machine user", &user)?;
+        if user.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(anyhow!("machine user `{user}` must not contain spaces"));
+        }
+        out.push("--user".into());
+        out.push(user);
+    }
+    if let Some(uid) = opts.uid {
+        out.push("--uid".into());
+        out.push(uid.to_string());
+    }
+    if let Some(gid) = opts.gid {
+        out.push("--gid".into());
+        out.push(gid.to_string());
+    }
+    if let Some(home) = text(&opts.home) {
+        if !home.starts_with('/') || home.chars().any(|c| c.is_control()) {
+            return Err(anyhow!(
+                "machine home `{home}` must be an absolute path such as /home/dev"
+            ));
+        }
+        out.push("--home".into());
+        out.push(home);
+    }
+    Ok(out)
+}
+
 /// Create a machine. Pulls the image on first use, so long timeout.
 /// `no_boot` creates without booting (cheaper; boots on first use).
+/// `user` carries the optional 1.6+ account flags.
 pub async fn machine_create(
     name: &str,
     image: &str,
     cpus: Option<u32>,
     memory: Option<String>,
     no_boot: bool,
+    user: &MachineUserOpts,
 ) -> Result<()> {
     validate_entity_name("machine", name)?;
     reject_flag_like("image reference", image)?;
@@ -1401,11 +1629,40 @@ pub async fn machine_create(
     if no_boot {
         argv.push("--no-boot".into());
     }
+    argv.extend(machine_user_args(user)?);
     argv.push(image.into());
     let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
     run_with_timeout(&argv_ref, RUN_LONG_TIMEOUT)
         .await
         .map(|_| ())
+}
+
+/// `container machine logs [--boot] [-n N] <name>`: a one-shot fetch (no
+/// `--follow`). `boot` shows the VM boot log instead of stdio. `tail` limits
+/// to the last N lines (clamped to 1..=5000); the CLI prints everything when
+/// omitted, which can be huge, so callers pass one. A machine that has
+/// never booted has no log file and the CLI says so.
+pub async fn machine_logs(name: &str, boot: bool, tail: Option<u32>) -> Result<String> {
+    reject_flag_like("machine name", name)?;
+    let mut argv: Vec<String> = vec!["machine".into(), "logs".into()];
+    if boot {
+        argv.push("--boot".into());
+    }
+    if let Some(n) = tail {
+        argv.push("-n".into());
+        argv.push(n.clamp(1, 5000).to_string());
+    }
+    argv.push(name.into());
+    let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let bytes = run_with_timeout(&argv_ref, LIFECYCLE_TIMEOUT).await?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// `container machine inspect <name>` as pretty JSON (the CLI already
+/// pretty-prints it; non-JSON output is passed through).
+pub async fn machine_inspect(name: &str) -> Result<String> {
+    reject_flag_like("machine name", name)?;
+    inspect_args(&["machine", "inspect", name]).await
 }
 
 pub async fn machine_stop(name: &str) -> Result<()> {
@@ -1552,6 +1809,215 @@ pub async fn system_df() -> Result<DiskUsage> {
     let bytes = run(&["system", "df", "--format", "json"]).await?;
     serde_json::from_slice(&bytes).context("parse `system df` json")
 }
+// ─── Create volume / network ──────────────────────────────────────────
+// `container volume create [-s SIZE] [--label k=v]... <name>` and
+// `container network create [--subnet CIDR] [--subnet-v6 PREFIX]
+// [--internal] [--label k=v]... <name>`. Values are validated here so the
+// user gets a specific reason instead of the CLI's terse error.
+
+/// Volume name: `^[A-Za-z0-9][A-Za-z0-9_.-]*$`, up to 255 characters (the
+/// CLI accepts far longer names than containers, which cap at 63).
+pub fn validate_volume_name(name: &str) -> Result<()> {
+    let ok = !name.is_empty()
+        && name.len() <= 255
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+    if ok {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "volume name `{name}` must be 1-255 letters, digits, `_`, `.` or `-`, starting with a letter or digit"
+        ))
+    }
+}
+
+/// Network name: `^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$` (lowercase,
+/// up to 63 characters, alphanumeric at both ends).
+pub fn validate_network_name(name: &str) -> Result<()> {
+    let b = name.as_bytes();
+    let inner =
+        |c: &u8| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'.' | b'_' | b'-');
+    let edge = |c: &u8| c.is_ascii_lowercase() || c.is_ascii_digit();
+    let ok = !b.is_empty()
+        && b.len() <= 63
+        && b.first().is_some_and(edge)
+        && b.last().is_some_and(edge)
+        && b.iter().all(inner);
+    if ok {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "network name `{name}` must be 1-63 lowercase letters, digits, `.`, `_` or `-`, starting and ending with a letter or digit"
+        ))
+    }
+}
+
+/// Volume size: a number with an optional K/M/G/T/P suffix (and optional
+/// trailing `B`), e.g. `512M`, `10G`, `1.5G`. The CLI enforces the minimum.
+pub fn validate_volume_size(size: &str) -> Result<()> {
+    let s = size.trim_end_matches(['b', 'B']);
+    let s = s
+        .strip_suffix(['k', 'K', 'm', 'M', 'g', 'G', 't', 'T', 'p', 'P'])
+        .unwrap_or(s);
+    let (int, frac) = s.split_once('.').unwrap_or((s, "0"));
+    let digits = |p: &str| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit());
+    if digits(int) && digits(frac) && !size.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "volume size `{size}` must be a number with an optional K, M, G, T or P suffix, e.g. 512M or 10G"
+        ))
+    }
+}
+
+/// `key=value` label with a non-empty key and no whitespace in the key.
+pub fn validate_label(label: &str) -> Result<()> {
+    match label.split_once('=') {
+        Some((k, _)) if !k.is_empty() && !k.chars().any(char::is_whitespace) => Ok(()),
+        _ => Err(anyhow!("label `{label}` must be key=value")),
+    }
+}
+
+/// IPv4 subnet in CIDR form (`192.168.100.0/24`).
+pub fn validate_subnet_v4(cidr: &str) -> Result<()> {
+    let ok = cidr.split_once('/').is_some_and(|(ip, len)| {
+        ip.parse::<std::net::Ipv4Addr>().is_ok() && len.parse::<u8>().is_ok_and(|l| l <= 32)
+    });
+    if ok {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "subnet `{cidr}` must be an IPv4 CIDR such as 192.168.100.0/24"
+        ))
+    }
+}
+
+/// IPv6 prefix in CIDR form (`fd00:1234::/64`).
+pub fn validate_subnet_v6(cidr: &str) -> Result<()> {
+    let ok = cidr.split_once('/').is_some_and(|(ip, len)| {
+        ip.parse::<std::net::Ipv6Addr>().is_ok() && len.parse::<u8>().is_ok_and(|l| l <= 128)
+    });
+    if ok {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "IPv6 prefix `{cidr}` must be a CIDR such as fd00:1234::/64"
+        ))
+    }
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VolumeCreateArgs {
+    pub name: String,
+    /// `-s`: e.g. `10G`. Empty/None = the CLI default (a large sparse disk).
+    #[serde(default)]
+    pub size: Option<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
+}
+
+pub fn volume_create_argv(args: &VolumeCreateArgs) -> Result<Vec<String>> {
+    validate_volume_name(&args.name)?;
+    let mut argv: Vec<String> = vec!["volume".into(), "create".into()];
+    if let Some(size) = args
+        .size
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        validate_volume_size(size)?;
+        argv.push("-s".into());
+        argv.push(size.into());
+    }
+    for l in args
+        .labels
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+    {
+        validate_label(l)?;
+        argv.push("--label".into());
+        argv.push(l.into());
+    }
+    argv.push(args.name.clone());
+    Ok(argv)
+}
+
+pub async fn create_volume(args: VolumeCreateArgs) -> Result<()> {
+    let argv = volume_create_argv(&args)?;
+    let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
+    run_with_timeout(&argv_ref, LIFECYCLE_TIMEOUT)
+        .await
+        .map(|_| ())
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkCreateArgs {
+    pub name: String,
+    /// `--subnet`, IPv4 CIDR.
+    #[serde(default)]
+    pub subnet: Option<String>,
+    /// `--subnet-v6`, IPv6 prefix.
+    #[serde(default)]
+    pub subnet_v6: Option<String>,
+    /// `--internal`: restrict to a host-only network.
+    #[serde(default)]
+    pub internal: bool,
+    #[serde(default)]
+    pub labels: Vec<String>,
+}
+
+pub fn network_create_argv(args: &NetworkCreateArgs) -> Result<Vec<String>> {
+    validate_network_name(&args.name)?;
+    let mut argv: Vec<String> = vec!["network".into(), "create".into()];
+    let some = |o: &Option<String>| {
+        o.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
+    if let Some(s) = some(&args.subnet) {
+        validate_subnet_v4(&s)?;
+        argv.push("--subnet".into());
+        argv.push(s);
+    }
+    if let Some(s) = some(&args.subnet_v6) {
+        validate_subnet_v6(&s)?;
+        argv.push("--subnet-v6".into());
+        argv.push(s);
+    }
+    if args.internal {
+        argv.push("--internal".into());
+    }
+    for l in args
+        .labels
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+    {
+        validate_label(l)?;
+        argv.push("--label".into());
+        argv.push(l.into());
+    }
+    argv.push(args.name.clone());
+    Ok(argv)
+}
+
+pub async fn create_network(args: NetworkCreateArgs) -> Result<()> {
+    let argv = network_create_argv(&args)?;
+    let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
+    run_with_timeout(&argv_ref, LIFECYCLE_TIMEOUT)
+        .await
+        .map(|_| ())
+}
+
 pub async fn delete_volume(name: &str) -> Result<()> {
     reject_flag_like("volume name", name)?;
     run(&["volume", "delete", name]).await.map(|_| ())
@@ -1655,6 +2121,12 @@ where
 #[cfg(test)]
 #[path = "runtime_fixtures_test.rs"]
 mod fixtures_test;
+
+// Tests for the container 1.6/1.7 features (commit, aliases, create
+// volume/network, machine options, native CPU).
+#[cfg(test)]
+#[path = "runtime_features_test.rs"]
+mod features_test;
 
 #[cfg(test)]
 mod tests {
@@ -1898,9 +2370,16 @@ mod tests {
         assert!(copy_path("web:/etc/hosts", bad).await.is_err());
         assert!(export_container(bad, "/tmp/o.tar").await.is_err());
         assert!(export_container("web", bad).await.is_err());
-        assert!(machine_create("ok-machine", bad, None, None, true)
-            .await
-            .is_err());
+        assert!(machine_create(
+            "ok-machine",
+            bad,
+            None,
+            None,
+            true,
+            &MachineUserOpts::default()
+        )
+        .await
+        .is_err());
         assert!(machine_stop(bad).await.is_err());
         assert!(machine_delete(bad).await.is_err());
         assert!(machine_set_default(bad).await.is_err());
@@ -2135,6 +2614,7 @@ mod tests {
             volumes: vec!["data:/data".into()],
             labels: vec!["team=infra".into()],
             network: Some("default".into()),
+            aliases: vec![],
             workdir: Some("/srv".into()),
             user: Some("1000:1000".into()),
             platform: Some("linux/arm64".into()),

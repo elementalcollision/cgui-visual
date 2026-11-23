@@ -211,6 +211,8 @@ export type Modal =
   | { type: 'networkInspect'; id: string; name: string }
   | { type: 'imageInspect'; reference: string }
   | { type: 'runImage'; image: string }
+  | { type: 'createVolume' }
+  | { type: 'createNetwork' }
   | { type: 'onboarding' }
   | { type: 'commandPalette' }
   | { type: 'terminal'; container: Container }

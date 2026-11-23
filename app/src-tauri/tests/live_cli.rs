@@ -75,10 +75,31 @@ struct Guard {
     containers: Vec<String>,
     volumes: Vec<String>,
     networks: Vec<String>,
+    images: Vec<String>,
+    machines: Vec<String>,
     files: Vec<std::path::PathBuf>,
 }
 
 impl Guard {
+    /// Register a resource the test creates itself (via the app's own
+    /// functions) so it is still cleaned up if the test panics.
+    fn track_volume(&mut self, n: &str) -> String {
+        self.volumes.push(n.to_string());
+        n.to_string()
+    }
+    fn track_network(&mut self, n: &str) -> String {
+        self.networks.push(n.to_string());
+        n.to_string()
+    }
+    fn track_image(&mut self, r: &str) -> String {
+        self.images.push(r.to_string());
+        r.to_string()
+    }
+    #[allow(dead_code)]
+    fn track_machine(&mut self, n: &str) -> String {
+        self.machines.push(n.to_string());
+        n.to_string()
+    }
     fn container(&mut self, n: &str) -> String {
         self.containers.push(n.to_string());
         n.to_string()
@@ -103,6 +124,12 @@ impl Drop for Guard {
     fn drop(&mut self) {
         for c in &self.containers {
             let _ = cli(&["delete", "--force", c]);
+        }
+        for m in &self.machines {
+            let _ = cli(&["machine", "delete", m]);
+        }
+        for i in &self.images {
+            let _ = cli(&["image", "delete", i]);
         }
         for v in &self.volumes {
             let _ = cli(&["volume", "delete", v]);
@@ -489,4 +516,257 @@ async fn reopening_log_view_does_not_duplicate_history() {
         assert!(seen.insert(l.line.clone()), "duplicate row: {}", l.line);
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Commit (1.6+): works on a running and on a stopped container, and the
+/// new image shows up in `image ls`.
+#[tokio::test]
+#[ignore]
+async fn commit_running_and_stopped_container() {
+    live_only!();
+    let mut g = Guard::default();
+    let cname = g.container(&name("commit"));
+    runtime::run_image(run_args(&cname)).await.expect("run");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let live_ref = g.track_image(&format!("{}:live", name("commit-img")));
+    runtime::commit_container(&cname, &live_ref)
+        .await
+        .expect("commit running");
+    runtime::stop(&cname).await.expect("stop");
+    let stopped_ref = g.track_image(&format!("{}:stopped", name("commit-img")));
+    runtime::commit_container(&cname, &stopped_ref)
+        .await
+        .expect("commit stopped");
+
+    let images = runtime::list_images().await.unwrap();
+    for r in [&live_ref, &stopped_ref] {
+        assert!(
+            images.iter().any(|i| i.reference.ends_with(r.as_str())),
+            "{r} missing from {:?}",
+            images.iter().map(|i| &i.reference).collect::<Vec<_>>()
+        );
+    }
+
+    // Bad references never reach the CLI.
+    assert!(runtime::commit_container(&cname, "Bad Ref").await.is_err());
+    assert!(runtime::commit_container(&cname, "-x").await.is_err());
+}
+
+/// Create a volume (with size + label) and a network (with subnet + label)
+/// through the app's own argv builders; both show up in the list views.
+#[tokio::test]
+#[ignore]
+async fn create_volume_and_network_with_options() {
+    live_only!();
+    let mut g = Guard::default();
+
+    let vol = g.track_volume(&name("mk-vol"));
+    runtime::create_volume(runtime::VolumeCreateArgs {
+        name: vol.clone(),
+        size: Some("64M".into()),
+        labels: vec!["team=live".into()],
+    })
+    .await
+    .expect("create volume");
+    let listed = runtime::list_volumes().await.unwrap();
+    let v = listed
+        .iter()
+        .find(|v| v.name == vol)
+        .expect("volume listed");
+    assert!((v.size - 64.0 / 1024.0).abs() < 1e-6, "size {}", v.size);
+    let inspected = runtime::inspect_volume(&vol).await.unwrap();
+    assert!(
+        inspected.contains("team") && inspected.contains("live"),
+        "{inspected}"
+    );
+    // Creating it again is a CLI error that reaches the caller.
+    assert!(runtime::create_volume(runtime::VolumeCreateArgs {
+        name: vol.clone(),
+        ..Default::default()
+    })
+    .await
+    .is_err());
+
+    let net = g.track_network(&name("mk-net"));
+    // A pid-derived 192.168.X.0/24 keeps parallel/previous runs from colliding.
+    let octet = 100 + (std::process::id() % 100);
+    let subnet = format!("192.168.{octet}.0/24");
+    runtime::create_network(runtime::NetworkCreateArgs {
+        name: net.clone(),
+        subnet: Some(subnet.clone()),
+        labels: vec!["team=live".into()],
+        ..Default::default()
+    })
+    .await
+    .expect("create network");
+    let nets = runtime::list_networks().await.unwrap();
+    let n = nets.iter().find(|n| n.name == net).expect("network listed");
+    assert_eq!(n.subnet, subnet);
+
+    // Bad input never reaches the CLI.
+    assert!(runtime::create_volume(runtime::VolumeCreateArgs {
+        name: "-x".into(),
+        ..Default::default()
+    })
+    .await
+    .is_err());
+    assert!(runtime::create_network(runtime::NetworkCreateArgs {
+        name: "Bad_Upper".into(),
+        ..Default::default()
+    })
+    .await
+    .is_err());
+}
+
+/// Machines (1.6+ user options): create a small alpine machine with a custom
+/// account, then read it back via inspect, fetch both log kinds, delete it.
+/// Alpine is already pulled by `ensure_alpine`, so nothing large downloads.
+#[tokio::test]
+#[ignore]
+async fn machine_user_options_inspect_and_logs() {
+    live_only!();
+    let mut g = Guard::default();
+    let m = g.track_machine(&name("mach"));
+    let opts = runtime::MachineUserOpts {
+        user: Some("cguilive".into()),
+        uid: Some(1234),
+        gid: Some(1234),
+        home: Some("/home/cguilive".into()),
+    };
+    runtime::machine_create(&m, "alpine:latest", None, None, false, &opts)
+        .await
+        .expect("machine create");
+
+    let listed = runtime::machine_list().await.unwrap();
+    assert!(listed.iter().any(|x| x.id == m), "{listed:?}");
+
+    let inspected = runtime::machine_inspect(&m).await.expect("inspect");
+    // `machine inspect` prints a one-element array.
+    let v: serde_json::Value = serde_json::from_str(&inspected).expect("json");
+    let v = &v[0];
+    assert_eq!(v["id"], m.as_str());
+    assert_eq!(v["userSetup"]["username"], "cguilive");
+    assert_eq!(v["userSetup"]["uid"], 1234);
+    assert_eq!(v["userSetup"]["home"], "/home/cguilive");
+
+    let boot = runtime::machine_logs(&m, true, Some(20))
+        .await
+        .expect("boot log");
+    assert!(!boot.trim().is_empty(), "boot log empty");
+    assert!(boot.lines().count() <= 20, "-n not honoured");
+    // stdio may legitimately be empty, but the call must succeed once booted.
+    runtime::machine_logs(&m, false, Some(5))
+        .await
+        .expect("stdio log");
+
+    runtime::machine_delete(&m).await.expect("delete");
+    let after = runtime::machine_list().await.unwrap();
+    assert!(after.iter().all(|x| x.id != m));
+}
+
+/// DNS aliases (1.6+): run with `--network net,alias=...` and read them back
+/// from `ls` (`configuration.networks[].options.aliases`) and `inspect`.
+#[tokio::test]
+#[ignore]
+async fn run_with_dns_aliases_reads_back() {
+    live_only!();
+    let mut g = Guard::default();
+    let net = g.network(&name("al-net"));
+    let cname = g.container(&name("alias"));
+    let args = RunArgs {
+        network: Some(net.clone()),
+        aliases: vec!["web.example.test".into(), "www.example.test".into()],
+        ..run_args(&cname)
+    };
+    runtime::run_image(args).await.expect("run with aliases");
+
+    let ls: serde_json::Value =
+        serde_json::from_str(&cli_ok(&["ls", "--all", "--format", "json"])).unwrap();
+    let mine = ls
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["configuration"]["id"] == cname.as_str())
+        .expect("container in ls");
+    let nets = mine["configuration"]["networks"].as_array().unwrap();
+    assert_eq!(nets[0]["network"], net.as_str());
+    let aliases: Vec<&str> = nets[0]["options"]["aliases"]
+        .as_array()
+        .expect("aliases in ls json")
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect();
+    assert_eq!(aliases, ["web.example.test", "www.example.test"]);
+
+    // The same data is in `inspect` (what the detail modal shows).
+    let inspected = runtime::inspect(&cname).await.expect("inspect");
+    assert!(inspected.contains("web.example.test"), "{inspected}");
+
+    // An alias without a dot needs a default DNS domain; the CLI says so
+    // and we surface its message rather than hiding it.
+    let single = RunArgs {
+        network: Some(net.clone()),
+        aliases: vec!["justone".into()],
+        ..run_args(&g.container(&name("alias-bad")))
+    };
+    if let Err(e) = runtime::run_image(single).await {
+        assert!(format!("{e:#}").contains("fully qualified"), "{e:#}");
+    }
+    // Invalid names never reach the CLI.
+    let bad = RunArgs {
+        aliases: vec!["a,alias=b".into()],
+        ..run_args(&name("alias-inj"))
+    };
+    assert!(runtime::run_image(bad).await.is_err());
+}
+
+/// Stats (1.7.1+): `cpuUtilization` is a fraction of ONE core, and the
+/// first poll already reports it (no baseline poll needed).
+#[tokio::test]
+#[ignore]
+async fn stats_native_cpu_utilization() {
+    live_only!();
+    let mut g = Guard::default();
+    let cname = g.container(&name("cpu"));
+    let busy = RunArgs {
+        command: Some("sh -c 'while :; do :; done'".into()),
+        ..run_args(&cname)
+    };
+    runtime::run_image(busy).await.expect("run");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let version = runtime::cli_version().await.expect("version");
+    let rows = runtime::stats_snapshot().await.expect("stats");
+    let row = rows.iter().find(|r| r.id == cname).expect("stat row");
+    let Some(frac) = row.cpu_utilization else {
+        eprintln!("CLI {version} has no cpuUtilization (needs 1.7.1+); skipping");
+        return;
+    };
+    assert!(
+        (0.5..=4.2).contains(&frac),
+        "a busy loop should use about one core, got {frac}"
+    );
+
+    // The UI value (percent of one core) from the very first poll.
+    let history = app_lib::state::History::new();
+    let cs = app_lib::state::poll_once(&history).await.expect("poll");
+    let c = cs.iter().find(|c| c.id == cname).expect("listed");
+    assert!(
+        (50.0..=420.0).contains(&c.cpu),
+        "first poll cpu% should come from cpuUtilization, got {}",
+        c.cpu
+    );
+}
+
+/// Capability gate: the cached CLI version parses and matches `--version`.
+#[tokio::test]
+#[ignore]
+async fn cli_version_is_detected_and_cached() {
+    live_only!();
+    let v = runtime::cli_version().await.expect("cli version");
+    assert!(v.chars().next().unwrap().is_ascii_digit(), "{v}");
+    let raw = cli_ok(&["--version"]);
+    assert!(raw.contains(&v), "`{raw}` should contain {v}");
+    assert_eq!(runtime::cli_version().await, Some(v));
 }

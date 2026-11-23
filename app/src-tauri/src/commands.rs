@@ -148,6 +148,15 @@ pub async fn run_image(args: runtime::RunArgs) -> Result<String, String> {
     runtime::run_image(args).await.map_err(err_str)
 }
 
+/// `container commit <id> <reference>` (1.6+). Returns the committed image's
+/// reference as the CLI reports it.
+#[tauri::command]
+pub async fn commit_container(id: String, reference: String) -> Result<String, String> {
+    runtime::commit_container(&id, &reference)
+        .await
+        .map_err(err_str)
+}
+
 #[tauri::command]
 pub async fn tag_image(source: String, target: String) -> Result<(), String> {
     runtime::tag_image(&source, &target).await.map_err(err_str)
@@ -302,6 +311,14 @@ pub async fn system_status() -> Result<bool, String> {
     runtime::system_running().await.map_err(err_str)
 }
 
+/// Detected CLI version (cached) for the UI's capability gate. `None` when
+/// the CLI isn't installed or its version can't be parsed; the UI then fails
+/// open and lets the CLI itself report any unsupported feature.
+#[tauri::command]
+pub async fn cli_version() -> Option<String> {
+    runtime::cli_version().await
+}
+
 // ─── Container machines (phase 4) ─────────────────────────────────────
 
 #[tauri::command]
@@ -319,10 +336,35 @@ pub async fn machine_create(
     cpus: Option<u32>,
     memory: Option<String>,
     no_boot: Option<bool>,
+    user_opts: Option<runtime::MachineUserOpts>,
 ) -> Result<(), String> {
-    runtime::machine_create(&name, &image, cpus, memory, no_boot.unwrap_or(true))
+    runtime::machine_create(
+        &name,
+        &image,
+        cpus,
+        memory,
+        no_boot.unwrap_or(true),
+        &user_opts.unwrap_or_default(),
+    )
+    .await
+    .map_err(err_str)
+}
+
+/// One-shot `container machine logs` (stdio, or the VM boot log).
+#[tauri::command]
+pub async fn machine_logs(
+    name: String,
+    boot: Option<bool>,
+    tail: Option<u32>,
+) -> Result<String, String> {
+    runtime::machine_logs(&name, boot.unwrap_or(false), tail)
         .await
         .map_err(err_str)
+}
+
+#[tauri::command]
+pub async fn machine_inspect(name: String) -> Result<String, String> {
+    runtime::machine_inspect(&name).await.map_err(err_str)
 }
 
 #[tauri::command]
@@ -528,6 +570,16 @@ pub async fn delete_image(reference: String) -> Result<(), String> {
 pub async fn delete_volume(name: String) -> Result<(), String> {
     runtime::delete_volume(&name).await.map_err(err_str)
 }
+#[tauri::command]
+pub async fn create_volume(args: runtime::VolumeCreateArgs) -> Result<(), String> {
+    runtime::create_volume(args).await.map_err(err_str)
+}
+
+#[tauri::command]
+pub async fn create_network(args: runtime::NetworkCreateArgs) -> Result<(), String> {
+    runtime::create_network(args).await.map_err(err_str)
+}
+
 #[tauri::command]
 pub async fn delete_network(id: String) -> Result<(), String> {
     runtime::delete_network(&id).await.map_err(err_str)

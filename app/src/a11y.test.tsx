@@ -5,7 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { DialogBackdrop } from './a11y';
 import { ContainersView, ImagesView, VolumesView, NetworksView } from './views';
 import { Sidebar, TopBar } from './components';
-import { SettingsModal, DoctorModal, HelpModal, RunImageModal, DetailModal, TrivyModal } from './modals';
+import { SettingsModal, DoctorModal, HelpModal, RunImageModal, DetailModal, TrivyModal, CreateVolumeModal, CreateNetworkModal, MachineLogsModal } from './modals';
 import { ToastTray, toast } from './toast';
 import { containers } from './fixtures';
 import { getTheme } from './theme';
@@ -196,7 +196,7 @@ describe('Settings toggles', () => {
   it('Dark mode, Menu-bar mode and Notify on exit are labelled switches', () => {
     render(
       <SettingsModal
-        t={t} onClose={() => {}} runtime="container" setRuntime={() => {}}
+        t={t} onClose={() => {}}
         dark setDark={() => {}}
         menubarMode={false} setMenubarMode={() => {}}
         globalHotkey="" setGlobalHotkey={() => {}}
@@ -250,7 +250,7 @@ describe('every button has an accessible name', () => {
       <>
         <Sidebar tab="containers" setTab={() => {}} collapsed t={t} onSettings={() => {}} onDoctor={() => {}} runningCount={1} stacksCount={1} />
         <TopBar tab="images" t={t} search="" setSearch={() => {}} onPull={() => {}} onCollapse={() => {}}
-          onPrune={() => {}} onImport={() => {}} onBuild={() => {}} runtime="container" dark setDark={() => {}}
+          onPrune={() => {}} onImport={() => {}} onBuild={() => {}} dark setDark={() => {}}
           onUpdate={() => {}} updateCount={2} headings={headings} />
       </>,
     );
@@ -271,11 +271,25 @@ describe('every button has an accessible name', () => {
     expect(unnamed(container)).toEqual([]);
   });
 
+  it('create volume / create network / machine logs modals', async () => {
+    const { container } = render(
+      <>
+        <CreateVolumeModal t={t} onCreated={() => {}} onClose={() => {}} />
+        <CreateNetworkModal t={t} onCreated={() => {}} onClose={() => {}} />
+        <MachineLogsModal t={t} name="cgui-m" onClose={() => {}} />
+      </>,
+    );
+    const dialogs = screen.getAllByRole('dialog');
+    expect(dialogs).toHaveLength(3);
+    for (const d of dialogs) expect(d).toHaveAccessibleName();
+    expect(unnamed(container)).toEqual([]);
+  });
+
   it('settings and doctor modals', async () => {
     const { container } = render(
       <>
         <SettingsModal
-          t={t} onClose={() => {}} runtime="container" setRuntime={() => {}}
+          t={t} onClose={() => {}}
           dark setDark={() => {}} menubarMode setMenubarMode={() => {}}
           globalHotkey="" setGlobalHotkey={() => {}} notifyOnExit setNotifyOnExit={() => {}}
         />

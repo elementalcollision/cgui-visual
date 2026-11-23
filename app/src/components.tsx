@@ -222,7 +222,7 @@ export function Sidebar({ tab, setTab, collapsed, t, onSettings, onDoctor, runni
 }
 
 // ─── top toolbar ──────────────────────────────────────────────────────
-export function TopBar({ tab, t, search, setSearch, onPull, onPrune, onImport, onBuild, onCollapse, dark, setDark, onUpdate, updateCount = 0, updatesSeen = false, headings }: {
+export function TopBar({ tab, t, search, setSearch, onPull, onPrune, onImport, onBuild, onNew, onCollapse, dark, setDark, onUpdate, updateCount = 0, updatesSeen = false, headings }: {
   tab: Tab; t: ThemeTokens;
   search: string; setSearch: (s: string) => void;
   onPull: () => void; onCollapse: () => void;
@@ -233,6 +233,8 @@ export function TopBar({ tab, t, search, setSearch, onPull, onPrune, onImport, o
   onImport?: (() => void) | null;
   /** Open the Dockerfile build modal. Images tab only. */
   onBuild?: (() => void) | null;
+  /** Create a new volume / network. Volumes and Networks tabs only. */
+  onNew?: (() => void) | null;
   dark: boolean; setDark: (v: boolean) => void;
   onUpdate: (() => void) | null;
   /** Live count from `listUpdates`. Drives the badge label. */
@@ -289,6 +291,12 @@ export function TopBar({ tab, t, search, setSearch, onPull, onPrune, onImport, o
         <button onClick={onBuild} title="Build an image from a Dockerfile" style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 12px', height: 32, background: 'transparent', color: t.fg2, border: `1px solid ${t.border}`, borderRadius: 6, fontSize: 13, fontFamily: 'inherit', cursor: 'pointer' }}>
           <Icon name="layers" size={13} color={t.fg2} />
           Build
+        </button>
+      )}
+      {onNew && (
+        <button onClick={onNew} title={`Create a new ${tab === 'volumes' ? 'volume' : 'network'}`} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 12px', height: 32, background: 'transparent', color: t.fg2, border: `1px solid ${t.border}`, borderRadius: 6, fontSize: 13, fontFamily: 'inherit', cursor: 'pointer' }}>
+          <Icon name="plus" size={13} color={t.fg2} />
+          {tab === 'volumes' ? 'New volume…' : 'New network…'}
         </button>
       )}
       {onImport && (

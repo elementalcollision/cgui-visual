@@ -9,6 +9,9 @@ import { toast, withToast } from './toast';
 import { askConfirm, askText } from './dialogs';
 import { DialogBackdrop } from './a11y';
 import { errMessage, looksLikeServicesDown } from './loadState';
+import { useCliAtLeast } from './cliVersion';
+import { commitContainerFlow } from './containerActions';
+import { splitList, validateAlias, validateCidr, validateCidr6, validateLabel, validateNetworkName, validateSize, validateVolumeName } from './validate';
 
 // Shared modal shell (role=dialog, Esc, focus trap/restore, drag-safe backdrop
 // click) lives in a11y.tsx. `title` is the dialog's accessible name; always
@@ -25,7 +28,7 @@ type InspectTab = 'trends' | 'env' | 'mounts' | 'network' | 'ports' | 'health' |
 interface ParsedInspect {
   env: { key: string; value: string }[];
   mounts: { source: string; destination: string; type: string; readOnly?: boolean }[];
-  network: { name: string; ip: string; mac?: string }[];
+  network: { name: string; ip: string; mac?: string; aliases?: string[] }[];
   ports: { container: string; host: string }[];
   health?: { status: string; failingStreak?: number; log: { exitCode: number; output: string }[] };
 }
@@ -71,14 +74,37 @@ export function parseInspect(text: string): ParsedInspect | null {
 
   // ── Network: docker NetworkSettings.Networks is { netName: { IPAddress } };
   //         older payloads have just IPAddress at top level.
-  const networks: { name: string; ip: string; mac?: string }[] = [];
+  const networks: { name: string; ip: string; mac?: string; aliases?: string[] }[] = [];
   const dockerNets = ns.Networks ?? ns.networks;
+  // Apple `container inspect`: `configuration.networks[]` holds the per-network
+  // options (DNS `aliases`, hostname, mtu; aliases need container 1.6+) and
+  // `status.networks[]` the live address once running.
+  const appleCfgNets: any[] = Array.isArray(root.configuration?.networks) ? root.configuration.networks : [];
+  const appleStatusNets: any[] = Array.isArray(root.status?.networks) ? root.status.networks : [];
+  const cleanAliases = (a: unknown): string[] | undefined =>
+    Array.isArray(a) && a.length ? a.filter((x): x is string => typeof x === 'string') : undefined;
   if (dockerNets && typeof dockerNets === 'object') {
     for (const [name, info] of Object.entries(dockerNets as Record<string, any>)) {
       networks.push({
         name,
         ip: info?.IPAddress ?? info?.ipAddress ?? '',
         mac: info?.MacAddress ?? info?.macAddress,
+        aliases: cleanAliases(info?.Aliases ?? info?.aliases),
+      });
+    }
+  } else if (appleCfgNets.length || appleStatusNets.length) {
+    const names = [...new Set([
+      ...appleCfgNets.map(n => n?.network),
+      ...appleStatusNets.map(n => n?.network),
+    ].filter((n): n is string => typeof n === 'string'))];
+    for (const name of names) {
+      const cfg = appleCfgNets.find(n => n?.network === name);
+      const live = appleStatusNets.find(n => n?.network === name);
+      networks.push({
+        name,
+        ip: live?.ipv4Address ?? '',
+        mac: live?.macAddress,
+        aliases: cleanAliases(cfg?.options?.aliases),
       });
     }
   } else if (ns.IPAddress || ns.ipAddress) {
@@ -224,6 +250,7 @@ function InspectPanel({ t, tab, parsed, json, container }: {
         rows={parsed.network.flatMap(n => {
           const out: { k: string; v: string }[] = [{ k: n.name, v: n.ip || '—' }];
           if (n.mac) out.push({ k: `${n.name} (mac)`, v: n.mac });
+          if (n.aliases?.length) out.push({ k: `${n.name} (aliases)`, v: n.aliases.join(', ') });
           return out;
         })}
       />
@@ -394,12 +421,15 @@ function Muted({ t, children }: { t: ThemeTokens; children: ReactNode }) {
   return <div style={{ fontSize: 12, color: t.fg3, fontStyle: 'italic' }}>{children}</div>;
 }
 
-export function DetailModal({ item, t, onClose, onExec }: {
+export function DetailModal({ item, t, onClose, onExec, onImagesChanged }: {
   item: Container; t: ThemeTokens; onClose: () => void;
   // Open the embedded terminal for this container. The host (ModalsHost)
   // swaps the modal type so the DetailModal closes as the Terminal mounts.
   onExec: (c: Container) => void;
+  // A commit created a new image: refresh the Images list.
+  onImagesChanged?: () => void;
 }) {
+  const commitGate = useCliAtLeast('1.6.0');
   const [json, setJson] = useState<string>('Loading…');
   const [tab, setTab] = useState<InspectTab>('trends');
   useEffect(() => {
@@ -469,6 +499,9 @@ export function DetailModal({ item, t, onClose, onExec }: {
                     if (!dest) return;
                     withToast(`export ${c.name}`, api.exportContainer(c.id, dest)).catch(() => {});
                   }}>Export tar…</button>
+          <button style={{ ...pillBtn(t), opacity: commitGate.ok ? 1 : 0.5 }} disabled={!commitGate.ok}
+                  title={commitGate.title ?? 'Save this container’s filesystem as a new image (container commit). Works on running and stopped containers.'}
+                  onClick={() => { void commitContainerFlow(c, onImagesChanged); }}>Commit to image…</button>
           <div style={{ flex: 1 }} />
           {c.status === 'running' && (
             <button style={pillBtn(t)}
@@ -1475,6 +1508,72 @@ export function ImageInspectModal({ t, reference, onClose }: {
 }
 
 // Generic JSON inspect modal — shared by volume + network.
+// One-shot `container machine logs` viewer: machine output (stdio) or the VM
+// boot log, last N lines, with Refresh. Not a live follow.
+export function MachineLogsModal({ t, name, onClose }: {
+  t: ThemeTokens; name: string; onClose: () => void;
+}) {
+  const [boot, setBoot] = useState(false);
+  const [tail, setTail] = useState(200);
+  const [tick, setTick] = useState(0);
+  const [state, setState] = useState<{ text: string; error: string | null; loading: boolean }>({ text: '', error: null, loading: true });
+  const preRef = useRef<HTMLPreElement>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setState(s => ({ ...s, loading: true }));
+    api.machineLogs(name, { boot, tail })
+      .then(text => { if (!cancelled) setState({ text, error: null, loading: false }); })
+      .catch(e => { if (!cancelled) setState({ text: '', error: errMessage(e), loading: false }); });
+    return () => { cancelled = true; };
+  }, [name, boot, tail, tick]);
+  useEffect(() => {
+    const el = preRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [state.text]);
+  // A machine that has never booted has no stdio log file; say that plainly.
+  const friendly = state.error && /doesn.t exist|No such file/i.test(state.error)
+    ? `No ${boot ? 'boot ' : ''}log yet: ${name} hasn't booted. Start it (run a command in it) and refresh.`
+    : state.error;
+  const seg = (active: boolean) => ({
+    ...pillBtn(t), background: active ? t.accentSoft : 'transparent', color: active ? t.accent : t.fg2,
+  });
+  return (
+    <Backdrop onClose={onClose} title={`Machine logs — ${name}`}>
+      <div style={{ width: 760, maxHeight: '85vh', background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 80px rgba(0,0,0,0.4)' }}>
+        <div style={{ padding: '18px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+          <Icon name="logs" size={20} color={t.accent} />
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 18, fontWeight: 600, color: t.fg1 }}>Machine logs</div>
+            <div style={{ fontSize: 12, color: t.fg3, fontFamily: t.mono, marginTop: 4 }}>container machine logs{boot ? ' --boot' : ''} {name}</div>
+          </div>
+          <button onClick={onClose} style={iconBtn()} aria-label="Close" title="Close"><Icon name="x" size={16} color={t.fg2} /></button>
+        </div>
+        <div style={{ padding: '10px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button style={seg(!boot)} aria-pressed={!boot} onClick={() => setBoot(false)}>Output</button>
+          <button style={seg(boot)} aria-pressed={boot} onClick={() => setBoot(true)}>Boot log</button>
+          <div style={{ flex: 1 }} />
+          <label style={{ fontSize: 11, color: t.fg3, display: 'flex', alignItems: 'center', gap: 6 }}>
+            Last
+            <select aria-label="Lines to show" value={tail} onChange={e => setTail(Number(e.target.value))}
+                    style={{ background: t.surfaceAlt, color: t.fg1, border: `1px solid ${t.border}`, borderRadius: 4, fontSize: 12, padding: '3px 6px' }}>
+              {[100, 200, 1000, 5000].map(n => <option key={n} value={n}>{n}</option>)}
+            </select>
+            lines
+          </label>
+          <button style={pillBtn(t)} onClick={() => setTick(n => n + 1)} disabled={state.loading}>Refresh</button>
+        </div>
+        <pre ref={preRef} style={{ flex: 1, overflow: 'auto', margin: 0, padding: '14px 22px', minHeight: 240, fontFamily: t.mono, fontSize: 11, lineHeight: 1.6, color: friendly ? t.fg3 : t.fg2, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+          {state.loading && !state.text ? 'Loading…' : friendly ?? (state.text.trim() ? state.text : '(empty)')}
+        </pre>
+        <div style={{ padding: '12px 22px', borderTop: `1px solid ${t.border}`, display: 'flex', gap: 8, justifyContent: 'flex-end', background: t.surfaceAlt }}>
+          <button style={pillBtn(t)} onClick={() => navigator.clipboard?.writeText(state.text)} disabled={!state.text}>Copy</button>
+          <button style={pillBtn(t)} onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </Backdrop>
+  );
+}
+
 export function JsonInspectModal({ t, title, subtitle, fetcher, onClose }: {
   t: ThemeTokens; title: string; subtitle: string;
   fetcher: () => Promise<string>; onClose: () => void;
@@ -1508,6 +1607,179 @@ export function JsonInspectModal({ t, title, subtitle, fetcher, onClose }: {
   );
 }
 
+// Small create forms for volumes and networks (`container volume create`,
+// `container network create`). Fields validate inline; Create stays disabled
+// until the form is valid, and CLI errors surface via withToast.
+function useCreateFormStyles(t: ThemeTokens) {
+  return {
+    input: {
+      width: '100%', padding: '8px 10px', background: t.bg, border: `1px solid ${t.border}`,
+      borderRadius: 6, color: t.fg1, fontSize: 12, fontFamily: t.mono, outline: 'none',
+      boxSizing: 'border-box' as const,
+    },
+    label: { fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase' as const, color: t.fg3, marginBottom: 6, display: 'block' },
+    opt: { color: t.fg3, fontWeight: 400, textTransform: 'none' as const, letterSpacing: 0 },
+  };
+}
+
+function FieldNote({ t, error, children }: { t: ThemeTokens; error?: string | null; children?: ReactNode }) {
+  if (!error && !children) return null;
+  return <div style={{ fontSize: 10, color: error ? t.danger : t.fg3, marginTop: 4, lineHeight: 1.4 }}>{error ?? children}</div>;
+}
+
+function CreateModalShell({ t, title, subtitle, busy, canSubmit, submitLabel, onSubmit, onClose, children }: {
+  t: ThemeTokens; title: string; subtitle: string; busy: boolean; canSubmit: boolean;
+  submitLabel: string; onSubmit: () => void; onClose: () => void; children: ReactNode;
+}) {
+  return (
+    <Backdrop onClose={onClose} title={title}>
+      <form onSubmit={e => { e.preventDefault(); if (canSubmit && !busy) onSubmit(); }}
+            style={{ width: 460, background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 80px rgba(0,0,0,0.4)' }}>
+        <div style={{ padding: '18px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+          <Icon name="plus" size={20} color={t.accent} />
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 18, fontWeight: 600, color: t.fg1 }}>{title}</div>
+            <div style={{ fontSize: 12, color: t.fg3, fontFamily: t.mono, marginTop: 4 }}>{subtitle}</div>
+          </div>
+          <button type="button" onClick={onClose} style={iconBtn()} aria-label="Close" title="Close"><Icon name="x" size={16} color={t.fg2} /></button>
+        </div>
+        <div style={{ padding: '18px 22px', display: 'flex', flexDirection: 'column', gap: 14, maxHeight: '62vh', overflow: 'auto' }}>
+          {children}
+        </div>
+        <div style={{ padding: '12px 22px', borderTop: `1px solid ${t.border}`, display: 'flex', gap: 8, justifyContent: 'flex-end', background: t.surfaceAlt }}>
+          <button type="button" style={pillBtn(t)} onClick={onClose} disabled={busy}>Cancel</button>
+          <button type="submit" disabled={!canSubmit || busy}
+                  style={{ padding: '6px 14px', background: t.fg1, color: t.bg, border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: busy ? 'wait' : 'pointer', opacity: !canSubmit || busy ? 0.5 : 1 }}>
+            {busy ? 'Creating…' : submitLabel}
+          </button>
+        </div>
+      </form>
+    </Backdrop>
+  );
+}
+
+export function CreateVolumeModal({ t, onCreated, onClose }: {
+  t: ThemeTokens; onCreated: () => void; onClose: () => void;
+}) {
+  const s = useCreateFormStyles(t);
+  const [name, setName] = useState('');
+  const [size, setSize] = useState('');
+  const [labels, setLabels] = useState('');
+  const [busy, setBusy] = useState(false);
+  const labelList = labels.split('\n').map(l => l.trim()).filter(Boolean);
+  const nameError = name.trim() ? validateVolumeName(name) : null;
+  const sizeError = validateSize(size);
+  const labelError = labelList.map(validateLabel).find(Boolean) ?? null;
+  const canSubmit = !!name.trim() && !nameError && !sizeError && !labelError;
+  const submit = () => {
+    const n = name.trim();
+    setBusy(true);
+    withToast(`create volume ${n}`, api.createVolume({
+      name: n,
+      size: size.trim() || undefined,
+      labels: labelList.length ? labelList : undefined,
+    }))
+      .then(() => { toast(`Created volume ${n}`, 'info'); onCreated(); onClose(); })
+      .catch(() => setBusy(false));
+  };
+  return (
+    <CreateModalShell t={t} title="New volume" subtitle="container volume create" busy={busy}
+                      canSubmit={canSubmit} submitLabel="Create" onSubmit={submit} onClose={onClose}>
+      <div>
+        <label style={s.label} htmlFor="vol-name">Name</label>
+        <input id="vol-name" style={{ ...s.input, borderColor: nameError ? t.danger : t.border }} autoFocus
+               value={name} onChange={e => setName(e.target.value)} placeholder="mydata" spellCheck={false}
+               aria-invalid={nameError ? true : undefined} />
+        <FieldNote t={t} error={nameError} />
+      </div>
+      <div>
+        <label style={s.label} htmlFor="vol-size">Size <span style={s.opt}>(optional)</span></label>
+        <input id="vol-size" style={{ ...s.input, borderColor: sizeError ? t.danger : t.border }}
+               value={size} onChange={e => setSize(e.target.value)} placeholder="10G" spellCheck={false}
+               aria-invalid={sizeError ? true : undefined} />
+        <FieldNote t={t} error={sizeError}>Maximum size, with an optional K, M, G, T or P suffix. Leave empty for the CLI default (a large sparse disk that only uses space as it fills).</FieldNote>
+      </div>
+      <div>
+        <label style={s.label} htmlFor="vol-labels">Labels <span style={s.opt}>(key=value, one per line)</span></label>
+        <textarea id="vol-labels" style={{ ...s.input, minHeight: 48, resize: 'vertical', borderColor: labelError ? t.danger : t.border }}
+                  value={labels} onChange={e => setLabels(e.target.value)} placeholder="team=infra" spellCheck={false}
+                  aria-invalid={labelError ? true : undefined} />
+        <FieldNote t={t} error={labelError} />
+      </div>
+    </CreateModalShell>
+  );
+}
+
+export function CreateNetworkModal({ t, onCreated, onClose }: {
+  t: ThemeTokens; onCreated: () => void; onClose: () => void;
+}) {
+  const s = useCreateFormStyles(t);
+  const [name, setName] = useState('');
+  const [subnet, setSubnet] = useState('');
+  const [subnetV6, setSubnetV6] = useState('');
+  const [internal, setInternal] = useState(false);
+  const [labels, setLabels] = useState('');
+  const [busy, setBusy] = useState(false);
+  const labelList = labels.split('\n').map(l => l.trim()).filter(Boolean);
+  const nameError = name.trim() ? validateNetworkName(name) : null;
+  const subnetError = validateCidr(subnet);
+  const subnetV6Error = validateCidr6(subnetV6);
+  const labelError = labelList.map(validateLabel).find(Boolean) ?? null;
+  const canSubmit = !!name.trim() && !nameError && !subnetError && !subnetV6Error && !labelError;
+  const submit = () => {
+    const n = name.trim();
+    setBusy(true);
+    withToast(`create network ${n}`, api.createNetwork({
+      name: n,
+      subnet: subnet.trim() || undefined,
+      subnetV6: subnetV6.trim() || undefined,
+      internal: internal || undefined,
+      labels: labelList.length ? labelList : undefined,
+    }))
+      .then(() => { toast(`Created network ${n}`, 'info'); onCreated(); onClose(); })
+      .catch(() => setBusy(false));
+  };
+  return (
+    <CreateModalShell t={t} title="New network" subtitle="container network create" busy={busy}
+                      canSubmit={canSubmit} submitLabel="Create" onSubmit={submit} onClose={onClose}>
+      <div>
+        <label style={s.label} htmlFor="net-name">Name</label>
+        <input id="net-name" style={{ ...s.input, borderColor: nameError ? t.danger : t.border }} autoFocus
+               value={name} onChange={e => setName(e.target.value)} placeholder="backend" spellCheck={false}
+               aria-invalid={nameError ? true : undefined} />
+        <FieldNote t={t} error={nameError}>Lowercase letters, digits, ".", "_" and "-".</FieldNote>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <div>
+          <label style={s.label} htmlFor="net-subnet">IPv4 subnet <span style={s.opt}>(optional)</span></label>
+          <input id="net-subnet" style={{ ...s.input, borderColor: subnetError ? t.danger : t.border }}
+                 value={subnet} onChange={e => setSubnet(e.target.value)} placeholder="192.168.100.0/24" spellCheck={false}
+                 aria-invalid={subnetError ? true : undefined} />
+          <FieldNote t={t} error={subnetError} />
+        </div>
+        <div>
+          <label style={s.label} htmlFor="net-subnet6">IPv6 prefix <span style={s.opt}>(optional)</span></label>
+          <input id="net-subnet6" style={{ ...s.input, borderColor: subnetV6Error ? t.danger : t.border }}
+                 value={subnetV6} onChange={e => setSubnetV6(e.target.value)} placeholder="fd00:1234::/64" spellCheck={false}
+                 aria-invalid={subnetV6Error ? true : undefined} />
+          <FieldNote t={t} error={subnetV6Error} />
+        </div>
+      </div>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: t.fg1, cursor: 'pointer' }}>
+        <input type="checkbox" checked={internal} onChange={e => setInternal(e.target.checked)} style={{ accentColor: t.accent }} />
+        Host-only (--internal): no access to the outside network
+      </label>
+      <div>
+        <label style={s.label} htmlFor="net-labels">Labels <span style={s.opt}>(key=value, one per line)</span></label>
+        <textarea id="net-labels" style={{ ...s.input, minHeight: 48, resize: 'vertical', borderColor: labelError ? t.danger : t.border }}
+                  value={labels} onChange={e => setLabels(e.target.value)} placeholder="team=infra" spellCheck={false}
+                  aria-invalid={labelError ? true : undefined} />
+        <FieldNote t={t} error={labelError} />
+      </div>
+    </CreateModalShell>
+  );
+}
+
 export function RunImageModal({ t, image, onLaunched, onClose }: {
   t: ThemeTokens; image: string;
   onLaunched: (id: string) => void; onClose: () => void;
@@ -1525,6 +1797,11 @@ export function RunImageModal({ t, image, onLaunched, onClose }: {
   const [volumes, setVolumes] = useState('');
   const [labels, setLabels] = useState('');
   const [network, setNetwork] = useState('');
+  // DNS aliases (container 1.6+): `--network <net>,alias=NAME,...`.
+  const aliasGate = useCliAtLeast('1.6.0');
+  const [aliases, setAliases] = useState('');
+  const aliasList = splitList(aliases);
+  const aliasError = aliasList.map(validateAlias).find(Boolean) ?? null;
   const [workdir, setWorkdir] = useState('');
   const [user, setUser] = useState('');
   const [platform, setPlatform] = useState('');
@@ -1532,6 +1809,7 @@ export function RunImageModal({ t, image, onLaunched, onClose }: {
   const [rosetta, setRosetta] = useState(false);
 
   const submit = () => {
+    if (aliasError) return;
     setBusy(true);
     // `withToast` surfaces backend errors (image-pull failure, port
     // already in use, container_system not running, etc.) — previously
@@ -1550,6 +1828,7 @@ export function RunImageModal({ t, image, onLaunched, onClose }: {
         volumes: volumes.split('\n').map(l => l.trim()).filter(Boolean),
         labels: labels.split('\n').map(l => l.trim()).filter(Boolean),
         network: network.trim() || undefined,
+        aliases: aliasList.length ? aliasList : undefined,
         workdir: workdir.trim() || undefined,
         user: user.trim() || undefined,
         platform: platform.trim() || undefined,
@@ -1627,6 +1906,17 @@ export function RunImageModal({ t, image, onLaunched, onClose }: {
                   <input style={inputStyle} value={network} onChange={e => setNetwork(e.target.value)} placeholder="default" />
                 </div>
                 <div>
+                  <label style={labelStyle} htmlFor="run-aliases">DNS aliases</label>
+                  <input id="run-aliases" style={{ ...inputStyle, opacity: aliasGate.ok ? 1 : 0.5, borderColor: aliasError ? t.danger : t.border }}
+                         value={aliases} onChange={e => setAliases(e.target.value)}
+                         disabled={!aliasGate.ok} title={aliasGate.title}
+                         aria-invalid={aliasError ? true : undefined}
+                         placeholder="api.example.test, db.example.test" spellCheck={false} />
+                  <div style={{ fontSize: 10, color: aliasError ? t.danger : t.fg3, marginTop: 4, lineHeight: 1.4 }}>
+                    {aliasError ?? 'Extra names for this container on the network (comma separated). Use fully qualified names unless a default DNS domain is set; uses the default network when none is chosen.'}
+                  </div>
+                </div>
+                <div>
                   <label style={labelStyle}>Platform</label>
                   <input style={inputStyle} value={platform} onChange={e => setPlatform(e.target.value)} placeholder="linux/arm64" />
                 </div>
@@ -1663,7 +1953,7 @@ export function RunImageModal({ t, image, onLaunched, onClose }: {
         <div style={{ padding: '12px 22px', borderTop: `1px solid ${t.border}`, display: 'flex', gap: 8, justifyContent: 'flex-end', background: t.surfaceAlt }}>
           <button style={pillBtn(t)} onClick={onClose} disabled={busy}>Cancel</button>
           <button style={{ padding: '6px 14px', background: t.fg1, color: t.bg, border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: busy ? 'wait' : 'pointer', opacity: busy ? 0.6 : 1 }}
-                  onClick={submit} disabled={busy}>{busy ? 'Starting…' : 'Run'}</button>
+                  onClick={submit} disabled={busy || !!aliasError}>{busy ? 'Starting…' : 'Run'}</button>
         </div>
       </div>
     </Backdrop>
@@ -1903,7 +2193,7 @@ function ServicesPanel({ t }: { t: ThemeTokens }) {
   );
 }
 
-function MachinesPanel({ t }: { t: ThemeTokens }) {
+export function MachinesPanel({ t }: { t: ThemeTokens }) {
   type M = { id: string; status: string; cpus: number; memory: number; diskSize: number; isDefault: boolean; createdDate: string };
   const [machines, setMachines] = useState<M[] | null>(null);
   const [busy, setBusy] = useState(false);
@@ -1914,6 +2204,25 @@ function MachinesPanel({ t }: { t: ThemeTokens }) {
   const [image, setImage] = useState('alpine:latest');
   const [cpus, setCpus] = useState('');
   const [memory, setMemory] = useState('');
+  // Account options (container 1.6+): -u/--user, --uid, --gid, --home.
+  const userGate = useCliAtLeast('1.6.0');
+  const [showUser, setShowUser] = useState(false);
+  const [mUser, setMUser] = useState('');
+  const [mUid, setMUid] = useState('');
+  const [mGid, setMGid] = useState('');
+  const [mHome, setMHome] = useState('');
+  const homeError = mHome.trim() && !mHome.trim().startsWith('/') ? 'The home directory must be an absolute path, e.g. /home/dev' : null;
+  const userError = /\s/.test(mUser.trim()) ? 'The user must not contain spaces' : null;
+  const userOpts = {
+    user: mUser.trim() || undefined,
+    uid: mUid.trim() ? Number(mUid.trim()) : undefined,
+    gid: mGid.trim() ? Number(mGid.trim()) : undefined,
+    home: mHome.trim() || undefined,
+  };
+  const hasUserOpts = Object.values(userOpts).some(v => v !== undefined);
+  // Per-machine tools: `machine logs` and `machine inspect`.
+  const [logsFor, setLogsFor] = useState<string | null>(null);
+  const [inspectFor, setInspectFor] = useState<string | null>(null);
   const act = (label: string, p: Promise<void>) => {
     setBusy(true);
     withToast(label, p).then(reload).catch(() => {}).finally(() => setBusy(false));
@@ -1943,6 +2252,10 @@ function MachinesPanel({ t }: { t: ThemeTokens }) {
               {m.status} · {m.cpus} cpu · {gib(m.memory)} mem · {gib(m.diskSize)} disk
             </div>
           </div>
+          <button style={pillBtn(t)} title="Show this machine's logs (container machine logs)"
+                  onClick={() => setLogsFor(m.id)}>Logs</button>
+          <button style={pillBtn(t)} title="Show this machine's configuration (container machine inspect)"
+                  onClick={() => setInspectFor(m.id)}>Inspect</button>
           {!m.isDefault && (
             <button style={{ ...pillBtn(t), opacity: busy ? 0.5 : 1 }} disabled={busy}
                     onClick={() => act(`set default ${m.id}`, api.machineSetDefault(m.id))}>Set default</button>
@@ -1966,16 +2279,37 @@ function MachinesPanel({ t }: { t: ThemeTokens }) {
             <input style={inputStyle} value={name} onChange={e => setName(e.target.value)} placeholder="machine name" spellCheck={false} />
             <input style={inputStyle} value={image} onChange={e => setImage(e.target.value)} placeholder="image (e.g. alpine:latest)" spellCheck={false} />
           </div>
+          <button type="button" onClick={() => setShowUser(v => !v)} disabled={!userGate.ok} title={userGate.title}
+                  style={{ background: 'none', border: 'none', cursor: userGate.ok ? 'pointer' : 'not-allowed', color: t.fg2, fontSize: 12, display: 'flex', alignItems: 'center', gap: 6, padding: 0, fontFamily: 'inherit', alignSelf: 'flex-start', opacity: userGate.ok ? 1 : 0.5 }}>
+            <span style={{ display: 'inline-block', transform: showUser && userGate.ok ? 'rotate(90deg)' : 'none', transition: 'transform 120ms ease' }}>
+              <Icon name="chevron" size={12} color={t.fg3} />
+            </span>
+            User options
+          </button>
+          {showUser && userGate.ok && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input style={inputStyle} aria-label="Machine user" value={mUser} onChange={e => setMUser(e.target.value)} placeholder="user (name or uid[:gid])" spellCheck={false} aria-invalid={userError ? true : undefined} />
+                <input style={{ ...inputStyle, flex: '0 0 80px' }} aria-label="Machine UID" value={mUid} onChange={e => setMUid(e.target.value.replace(/[^0-9]/g, ''))} placeholder="uid" />
+                <input style={{ ...inputStyle, flex: '0 0 80px' }} aria-label="Machine GID" value={mGid} onChange={e => setMGid(e.target.value.replace(/[^0-9]/g, ''))} placeholder="gid" />
+              </div>
+              <input style={{ ...inputStyle, flex: 'none', borderColor: homeError ? t.danger : t.border }} aria-label="Machine home" value={mHome} onChange={e => setMHome(e.target.value)} placeholder="home directory (default /home/<user>)" spellCheck={false} aria-invalid={homeError ? true : undefined} />
+              <div style={{ fontSize: 10, color: homeError || userError ? t.danger : t.fg3 }}>
+                {homeError ?? userError ?? 'The machine account defaults to your macOS user, uid and gid.'}
+              </div>
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <input style={{ ...inputStyle, flex: '0 0 90px' }} value={cpus} onChange={e => setCpus(e.target.value.replace(/[^0-9]/g, ''))} placeholder="cpus" />
             <input style={{ ...inputStyle, flex: '0 0 90px' }} value={memory} onChange={e => setMemory(e.target.value)} placeholder="mem (4G)" />
             <div style={{ flex: 1 }} />
             <button style={pillBtn(t)} onClick={() => setShowCreate(false)}>Cancel</button>
-            <button style={{ ...pillBtn(t), opacity: name.trim() && image.trim() ? 1 : 0.5 }}
-                    disabled={!name.trim() || !image.trim() || busy}
+            <button style={{ ...pillBtn(t), opacity: name.trim() && image.trim() && !homeError && !userError ? 1 : 0.5 }}
+                    disabled={!name.trim() || !image.trim() || busy || !!homeError || !!userError}
                     onClick={() => {
                       act(`create ${name.trim()}`, api.machineCreate(name.trim(), image.trim(),
-                        cpus.trim() ? Number(cpus.trim()) : undefined, memory.trim() || undefined));
+                        cpus.trim() ? Number(cpus.trim()) : undefined, memory.trim() || undefined, true,
+                        showUser && userGate.ok && hasUserOpts ? userOpts : undefined));
                       setShowCreate(false); setName('');
                     }}>Create</button>
           </div>
@@ -1983,6 +2317,11 @@ function MachinesPanel({ t }: { t: ThemeTokens }) {
             Created without booting — it boots on first use.
           </div>
         </div>
+      )}
+      {logsFor && <MachineLogsModal t={t} name={logsFor} onClose={() => setLogsFor(null)} />}
+      {inspectFor && (
+        <JsonInspectModal t={t} title={inspectFor} subtitle="container machine inspect"
+                          fetcher={() => api.machineInspect(inspectFor)} onClose={() => setInspectFor(null)} />
       )}
     </div>
   );

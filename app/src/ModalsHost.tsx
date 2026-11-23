@@ -22,6 +22,8 @@ import {
   SettingsModal,
   JsonInspectModal,
   RunImageModal,
+  CreateVolumeModal,
+  CreateNetworkModal,
   OnboardingModal,
   CommandPaletteModal,
   ImageInspectModal,
@@ -53,7 +55,10 @@ export default function ModalsHost(props: {
   setTab: (t: Tab) => void;
   setModal: (m: Modal) => void;
   setLogTarget: (id: string | undefined) => void;
+  // A modal created/changed an image, volume or network: refresh those lists.
+  onResourcesChanged?: () => void;
 }) {
+  const { onResourcesChanged } = props;
   const {
     modal, t, onClose, onUpdateClosed, onOnboardingResolved,
     menubarMode, setMenubarMode, globalHotkey, setGlobalHotkey, notifyOnExit, setNotifyOnExit,
@@ -68,6 +73,7 @@ export default function ModalsHost(props: {
       return <DetailModal
         item={modal.payload} t={t} onClose={onClose}
         onExec={c => setModal({ type: 'terminal', container: c })}
+        onImagesChanged={onResourcesChanged}
       />;
     case 'pull':
       return <PullModal t={t} onClose={onClose} />;
@@ -99,6 +105,10 @@ export default function ModalsHost(props: {
       return <RunImageModal t={t} image={modal.image}
                             onLaunched={(id) => toast(`launched ${id}`, 'info')}
                             onClose={onClose} />;
+    case 'createVolume':
+      return <CreateVolumeModal t={t} onCreated={() => onResourcesChanged?.()} onClose={onClose} />;
+    case 'createNetwork':
+      return <CreateNetworkModal t={t} onCreated={() => onResourcesChanged?.()} onClose={onClose} />;
     case 'terminal':
       return (
         <Suspense fallback={null}>

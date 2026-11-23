@@ -442,6 +442,8 @@ export default function App() {
                 onPrune={onPrune}
                 onImport={tab === 'images' ? onImportImage : null}
                 onBuild={tab === 'images' ? () => setModal({ type: 'build' }) : null}
+                onNew={tab === 'volumes' ? () => setModal({ type: 'createVolume' })
+                  : tab === 'networks' ? () => setModal({ type: 'createNetwork' }) : null}
                 onCollapse={() => setCollapsed(!collapsed)}
                 dark={dark}
                 setDark={setDark}
@@ -492,6 +494,7 @@ export default function App() {
               notifyOnExit={notifyOnExit} setNotifyOnExit={setNotifyOnExit}
               containers={containers} images={paletteImages} stacks={paletteStacks}
               setTab={setTab} setModal={setModal} setLogTarget={setLogTarget}
+              onResourcesChanged={() => setPruneTick(n => n + 1)}
             />
           </Suspense>
         )}
