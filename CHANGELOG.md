@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-11-23
+
+### Added
+
+- **Container logs are saved in the background.** cgui now keeps the log
+  history of every running container (up to 32 at once), whether or not a
+  Logs view is open. Previously only lines that arrived while you had a
+  container's logs open were saved.
+  - This matters because `container` keeps only a container's **current
+    run**: restarting a container wipes its earlier output, and deleting it
+    removes the log entirely. cgui's history now keeps those earlier runs.
+  - **No gaps or duplicates, even across restarts of cgui.** Lines written
+    while cgui was closed are filled in when it next runs, as long as the
+    container still exists. Containers that ran and exited while cgui was
+    closed are caught up too.
+  - Turn it off in **Settings → Logs → Save container logs in the
+    background**. Logs are stored locally for 7 days; boot logs are never
+    saved. Doctor shows how many containers are being followed.
+
+### Known limits
+
+- If a container restarts between two refreshes, the last lines of its
+  previous run may be missed; `container` discards them on restart.
+- Right after upgrading, log history saved by 0.7.0 for a container that's
+  still running appears once more alongside the newly saved current run.
+
 ## [0.7.0] — 2026-11-23
 
 New Apple `container` features, accessibility, and cgui is now Apple
@@ -521,7 +547,8 @@ Initial macOS-only release. Tauri + React + TypeScript GUI for Apple's
   binary. Apple's `container` CLI is similarly optional but required for
   any real data.
 
-[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/elementalcollision/cgui-visual/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/elementalcollision/cgui-visual/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/elementalcollision/cgui-visual/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/elementalcollision/cgui-visual/compare/v0.6.0...v0.6.1
