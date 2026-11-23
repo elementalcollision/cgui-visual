@@ -4,8 +4,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
-  Container, Image, Volume, Network, Stack,
-  TrivyResult, Update, DoctorCheck, HistoryPoint, VulnHistory, DiskUsage,
+  Container, Image, Volume, Network, StackListing,
+  ScanResponse, Update, DoctorCheck, HistoryPoint, VulnHistory, DiskUsage,
 } from './types';
 import * as fixtures from './fixtures';
 
@@ -36,6 +36,14 @@ async function call<T>(cmd: string, fallback: T, args?: Record<string, unknown>)
   }
 }
 
+// For list/inspect commands whose failures the UI must show (never as
+// empty data): outside Tauri (`vite dev`) return the fixture; inside
+// Tauri propagate the rejection so views can render an error state.
+async function callOrDevFallback<T>(cmd: string, fallback: T, args?: Record<string, unknown>): Promise<T> {
+  if (!inTauri) return fallback;
+  return invoke<T>(cmd, args);
+}
+
 // For commands where we want to surface errors to the user (actions like
 // stop/delete), don't swallow.
 async function invokeStrict<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -45,15 +53,17 @@ async function invokeStrict<T>(cmd: string, args?: Record<string, unknown>): Pro
 
 export const api = {
   // Lists / inspect
-  listContainers: () => call<Container[]>('list_containers', fixtures.containers),
-  listImages:     () => call<Image[]>('list_images', fixtures.images),
-  listVolumes:    () => call<Volume[]>('list_volumes', fixtures.volumes),
-  listNetworks:   () => call<Network[]>('list_networks', fixtures.networks),
-  listStacks:     () => call<Stack[]>('list_stacks', fixtures.stacks),
-  inspectContainer: (id: string) => call<string>('inspect_container', fixtures.inspectJson, { id }),
+  // These reject on CLI failure (services stopped, etc.) so views can show
+  // an explicit error state rather than "nothing exists".
+  listContainers: () => callOrDevFallback<Container[]>('list_containers', fixtures.containers),
+  listImages:     () => callOrDevFallback<Image[]>('list_images', fixtures.images),
+  listVolumes:    () => callOrDevFallback<Volume[]>('list_volumes', fixtures.volumes),
+  listNetworks:   () => callOrDevFallback<Network[]>('list_networks', fixtures.networks),
+  listStacks:     () => callOrDevFallback<StackListing>('list_stacks', { stacks: fixtures.stacks, invalid: [] }),
+  inspectContainer: (id: string) => callOrDevFallback<string>('inspect_container', fixtures.inspectJson, { id }),
   doctor:         () => call<DoctorCheck[]>('doctor', fixtures.doctor),
-  scanImage:      (image: string) => call<TrivyResult>('scan_image', fixtures.trivy, { image }),
-  listUpdates:    () => call<Update[]>('list_updates', fixtures.updates),
+  scanImage:      (image: string) => callOrDevFallback<ScanResponse>('scan_image', { status: 'ok', result: fixtures.trivy }, { image }),
+  listUpdates:    () => callOrDevFallback<Update[]>('list_updates', fixtures.updates),
 
   // Container actions — strict; UI surfaces errors via console + (later) toasts.
   startContainer:   (id: string) => inTauri ? invokeStrict<void>('start_container',   { id }) : Promise.resolve(),
@@ -225,6 +235,12 @@ export const api = {
   onContainersTick: async (cb: (cs: Container[]) => void): Promise<UnlistenFn> => {
     if (!inTauri) return () => {};
     return listen<Container[]>('containers:tick', e => cb(e.payload));
+  },
+  // Emitted on each poll tick while the container poll is failing (payload:
+  // the CLI's error text). No-op outside Tauri.
+  onContainersError: async (cb: (message: string) => void): Promise<UnlistenFn> => {
+    if (!inTauri) return () => {};
+    return listen<string>('containers:tickError', e => cb(e.payload));
   },
   onLogLine: async (streamId: string, cb: (line: string) => void): Promise<UnlistenFn> => {
     if (!inTauri) {

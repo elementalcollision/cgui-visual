@@ -51,8 +51,12 @@ const COMPONENTS: &[Component] = &[
     },
 ];
 
-pub async fn check() -> Vec<Update> {
+/// An empty list means "up to date". When every release lookup failed
+/// (offline, rate-limited) that's an error, not "up to date".
+pub async fn check() -> Result<Vec<Update>, String> {
     let mut out = Vec::new();
+    let mut looked_up = 0usize;
+    let mut failed = 0usize;
     for c in COMPONENTS {
         // Skip silently when the companion isn't installed locally.
         // The in-app self-updater handles cgui-visual's own updates
@@ -60,7 +64,9 @@ pub async fn check() -> Vec<Update> {
         let Some(installed) = installed_version(c).await else {
             continue;
         };
+        looked_up += 1;
         let Some(release) = fetch_release(c.repo).await else {
+            failed += 1;
             continue;
         };
         let latest = strip_v_prefix(&release.tag_name);
@@ -78,7 +84,17 @@ pub async fn check() -> Vec<Update> {
             url: format!("https://github.com/{}/releases/tag/v{latest}", c.repo),
         });
     }
-    out
+    lookup_verdict(looked_up, failed)?;
+    Ok(out)
+}
+
+fn lookup_verdict(looked_up: usize, failed: usize) -> Result<(), String> {
+    if looked_up > 0 && failed == looked_up {
+        return Err(
+            "couldn't reach GitHub to check for updates (offline or rate-limited)".to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Resolve the installed version of a component, or None when the
@@ -160,6 +176,15 @@ mod tests {
         assert_eq!(extract_version("v0.13.0").as_deref(), Some("0.13.0"));
         assert_eq!(extract_version("cgui 1.4.5\n").as_deref(), Some("1.4.5"));
         assert_eq!(extract_version("no version here"), None);
+    }
+
+    #[test]
+    fn lookup_verdict_only_errors_when_every_lookup_failed() {
+        assert!(lookup_verdict(0, 0).is_ok()); // nothing installed
+        assert!(lookup_verdict(2, 0).is_ok());
+        assert!(lookup_verdict(2, 1).is_ok()); // partial: report what we have
+        assert!(lookup_verdict(2, 2).is_err());
+        assert!(lookup_verdict(1, 1).is_err());
     }
 
     #[test]

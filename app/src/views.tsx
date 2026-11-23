@@ -7,6 +7,7 @@ import type { Container, Image, Volume, Network, Stack } from './types';
 import { Icon, Sparkline, Bar, StatusDot, BulkActionBar, SelectCheckbox, iconBtn, pillBtn, tableHeader, tableRow, fmtCreated } from './components';
 import { api, newStreamId } from './api';
 import { toast, withToast } from './toast';
+import { useLoad, LoadErrorState, EmptyState, errMessage } from './loadState';
 
 // Aggregate CPU / Memory / Network I/O / Disk I/O across the live container
 // list. CPU sparkline zip-sums per-container cpuHistory; the others render
@@ -31,11 +32,16 @@ function buildKPIs(containers: Container[]) {
 
 const COLS_CONTAINERS = '24px 1fr 1.2fr 80px 110px 90px 110px 100px';
 
-export function ContainersView({ t, search, selected, setSelected, onInspect, onLogs, containers }: {
+export function ContainersView({ t, search, selected, setSelected, onInspect, onLogs, containers, loadError = null, loaded = true, onRetry }: {
   t: ThemeTokens; search: string;
   selected: string; setSelected: (id: string) => void;
   onInspect: (c: Container) => void; onLogs: (c: Container) => void;
   containers: Container[];
+  /** Latest container-poll failure; replaces the list when set. */
+  loadError?: string | null;
+  /** False until the first successful poll (suppresses the empty state). */
+  loaded?: boolean;
+  onRetry?: () => void | Promise<unknown>;
 }) {
   const rows = useMemo(() => containers.filter(c =>
     !search ||
@@ -108,6 +114,10 @@ export function ContainersView({ t, search, selected, setSelected, onInspect, on
     return [...m.entries()].map(([k, items]) => ({ stack: k === '__solo' ? null : k, items }));
   }, [rows]);
 
+  if (loadError) {
+    return <div style={{ flex: 1, overflow: 'auto', background: t.bg }}><LoadErrorState t={t} message={loadError} onRetry={onRetry ?? (() => {})} /></div>;
+  }
+
   return (
     <div style={{ flex: 1, overflow: 'auto', background: t.bg }}>
       <div style={{ padding: '16px 20px 8px', display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16 }}>
@@ -174,6 +184,10 @@ export function ContainersView({ t, search, selected, setSelected, onInspect, on
           <Icon name="trash" size={11} color={t.danger} />Delete
         </button>
       </BulkActionBar>
+
+      {loaded && containers.length === 0 && (
+        <EmptyState t={t}>No containers. Run an image to create one.</EmptyState>
+      )}
 
       {grouped.map((g, gi) => (
         <Fragment key={gi}>
@@ -263,9 +277,8 @@ export function ImagesView({ t, search, onScan, onRun, onInspect, reloadKey = 0 
   /** Bump to force a list refresh after out-of-view mutations (prune). */
   reloadKey?: number;
 }) {
-  const [items, setItems] = useState<Image[]>([]);
-  const reload = () => api.listImages().then(setItems);
-  useEffect(() => { reload(); }, [reloadKey]);
+  const { data, error, loading, reload } = useLoad(api.listImages, reloadKey);
+  const items = useMemo(() => data ?? [], [data]);
   const rows = items.filter(i => !search || i.ref.toLowerCase().includes(search.toLowerCase()));
   const onDelete = (img: Image) => {
     if (!confirm(`Delete image ${img.ref}?\nThis cannot be undone.`)) return;
@@ -341,6 +354,9 @@ export function ImagesView({ t, search, onScan, onRun, onInspect, reloadKey = 0 
     reload();
   };
 
+  if (error) return <div style={{ flex: 1, overflow: 'auto', background: t.bg }}><LoadErrorState t={t} message={error} onRetry={reload} /></div>;
+  if (!loading && items.length === 0) return <div style={{ flex: 1, overflow: 'auto', background: t.bg }}><EmptyState t={t}>No images. Pull one to get started.</EmptyState></div>;
+
   return (
     <div style={{ flex: 1, overflow: 'auto', background: t.bg }}>
       <div style={tableHeader(t, COLS_IMAGES)}>
@@ -414,9 +430,8 @@ export function VolumesView({ t, search, onInspect, reloadKey = 0 }: {
   t: ThemeTokens; search: string; onInspect: (v: Volume) => void;
   reloadKey?: number;
 }) {
-  const [items, setItems] = useState<Volume[]>([]);
-  const reload = () => api.listVolumes().then(setItems);
-  useEffect(() => { reload(); }, [reloadKey]);
+  const { data, error, loading, reload } = useLoad(api.listVolumes, reloadKey);
+  const items = useMemo(() => data ?? [], [data]);
   const onDelete = (v: Volume) => {
     if (!confirm(`Delete volume ${v.name}?\nAll data in this volume will be lost.`)) return;
     withToast(`delete ${v.name}`, api.deleteVolume(v.name)).then(reload).catch(() => {});
@@ -428,6 +443,8 @@ export function VolumesView({ t, search, onInspect, reloadKey = 0 }: {
         v.driver.toLowerCase().includes(q) ||
         v.mountpoint.toLowerCase().includes(q))
     : items;
+  if (error) return <div style={{ flex: 1, overflow: 'auto', background: t.bg }}><LoadErrorState t={t} message={error} onRetry={reload} /></div>;
+  if (!loading && items.length === 0) return <div style={{ flex: 1, overflow: 'auto', background: t.bg }}><EmptyState t={t}>No volumes</EmptyState></div>;
   return (
     <div style={{ flex: 1, overflow: 'auto', background: t.bg, padding: 16 }}>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(380px, 1fr))', gap: 14 }}>
@@ -475,9 +492,8 @@ export function NetworksView({ t, search, onInspect, reloadKey = 0 }: {
   t: ThemeTokens; search: string; onInspect: (n: Network) => void;
   reloadKey?: number;
 }) {
-  const [items, setItems] = useState<Network[]>([]);
-  const reload = () => api.listNetworks().then(setItems);
-  useEffect(() => { reload(); }, [reloadKey]);
+  const { data, error, loading, reload } = useLoad(api.listNetworks, reloadKey);
+  const items = useMemo(() => data ?? [], [data]);
   const q = search.trim().toLowerCase();
   const rows = q
     ? items.filter(n =>
@@ -494,6 +510,8 @@ export function NetworksView({ t, search, onInspect, reloadKey = 0 }: {
     if (!confirm(`Delete network ${n.name}?`)) return;
     withToast(`delete ${n.name}`, api.deleteNetwork(n.id)).then(reload).catch(() => {});
   };
+  if (error) return <div style={{ flex: 1, overflow: 'auto', background: t.bg }}><LoadErrorState t={t} message={error} onRetry={reload} /></div>;
+  if (!loading && items.length === 0) return <div style={{ flex: 1, overflow: 'auto', background: t.bg }}><EmptyState t={t}>No networks</EmptyState></div>;
   return (
     <div style={{ flex: 1, overflow: 'auto', background: t.bg }}>
       <div style={tableHeader(t, COLS_NETWORKS)}>
@@ -529,15 +547,15 @@ export function StacksView({ t, search, onGraph }: {
   t: ThemeTokens; search: string;
   onGraph: (stack: Stack) => void;
 }) {
-  const [items, setItems] = useState<Stack[]>([]);
   // Per-stack live overlays. Health: { stackName: { service: state } }.
   // Logs: latest up/down output per stack, displayed as a footer strip.
   const [health, setHealth] = useState<Record<string, Record<string, string>>>({});
   const [logs, setLogs] = useState<Record<string, string[]>>({});
   const [busy, setBusy] = useState<Record<string, boolean>>({});
 
-  const reload = () => api.listStacks().then(setItems);
-  useEffect(() => { reload(); }, []);
+  const { data, error, loading, reload } = useLoad(api.listStacks);
+  const items = useMemo(() => data?.stacks ?? [], [data]);
+  const invalid = data?.invalid ?? [];
 
   // Poll healthchecks for every stack on a 5 s tick. The per-stack call is
   // cheap (TCP connects with 2 s timeout) and runs in parallel server-side.
@@ -562,7 +580,18 @@ export function StacksView({ t, search, onGraph }: {
     setBusy(b => ({ ...b, [name]: true }));
     setLogs(l => ({ ...l, [name]: [`$ stack ${kind} ${name}…`] }));
     const p = kind === 'up' ? api.stackUp(name) : api.stackDown(name);
-    withToast(`stack ${kind} ${name}`, p)
+    // `down` failures arrive as one summary line followed by the step log
+    // (partial failure: some services may already be down). Toast the
+    // summary, keep the detail in the stack's log panel.
+    const run = kind === 'down'
+      ? p.catch(e => {
+          const [head, ...detail] = errMessage(e).split('\n');
+          toast(head);
+          setLogs(l => ({ ...l, [name]: detail.length ? detail : [`✗ ${head}`] }));
+          throw e;
+        })
+      : withToast(`stack ${kind} ${name}`, p);
+    run
       .then(out => setLogs(l => ({ ...l, [name]: out })))
       .catch(() => {})
       .finally(() => {
@@ -706,6 +735,8 @@ export function StacksView({ t, search, onGraph }: {
     }
   };
 
+  if (error) return <div style={{ flex: 1, overflow: 'auto', background: t.bg }}><LoadErrorState t={t} message={error} onRetry={reload} /></div>;
+
   return (
     <div style={{ flex: 1, overflow: 'auto', background: t.bg, padding: 16 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
@@ -721,6 +752,19 @@ export function StacksView({ t, search, onGraph }: {
           <Icon name="download" size={12} color={t.accent} />Import compose
         </button>
       </div>
+      {invalid.length > 0 && (
+        <div style={{ display: 'grid', gap: 8, marginBottom: 12 }}>
+          {invalid.map(b => (
+            <div key={b.file} role="alert" style={{ padding: '10px 14px', background: t.surface, border: `1px solid ${t.danger}`, borderLeft: `3px solid ${t.danger}`, borderRadius: 8 }}>
+              <div style={{ fontSize: 13, color: t.fg1, fontFamily: t.mono }}>invalid stack file {b.name}: {b.error}</div>
+              <div style={{ marginTop: 2, fontSize: 11, color: t.fg3, fontFamily: t.mono }}>{b.file}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {!loading && items.length === 0 && invalid.length === 0 && (
+        <EmptyState t={t}>No stacks. Import a compose file or restore a snapshot.</EmptyState>
+      )}
       <div style={{ display: 'grid', gap: 12 }}>
         {items
           .filter(s => {

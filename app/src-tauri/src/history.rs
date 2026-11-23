@@ -400,7 +400,6 @@ pub fn record_log(container_id: &str, line: &str) {
 
 /// Block (up to 2 s) until every line queued before this call is on
 /// disk. Intended for app exit; harmless to call at any time.
-#[allow(dead_code)] // wired up by the exit hook in lib.rs
 pub fn flush_logs() {
     let Some(tx) = LOG_TX.get() else { return };
     let (ack_tx, ack_rx) = mpsc::channel();

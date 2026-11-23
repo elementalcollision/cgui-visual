@@ -148,9 +148,10 @@ pub(crate) fn set_menubar_mode<R: tauri::Runtime>(app: &tauri::AppHandle<R>, on:
 // Children outlive us otherwise: the PTY children and `container logs -f`.
 fn on_exit() {
     pty::close_all();
-    // TODO(log-streams): call `commands::stop_all_log_streams()` here once
-    // the log-stream registry lands, so `container logs -f` children are
-    // killed on exit too.
+    // Kill every `container logs -f` child, then let the batching writer
+    // put already-queued lines on disk before the process goes away.
+    commands::stop_all_log_streams();
+    history::flush_logs();
 }
 
 fn register_summon_hotkey<R: tauri::Runtime>(
@@ -479,7 +480,13 @@ pub fn run() {
                             let _ = handle.emit("containers:tickAt", now_ms);
                             let _ = handle.emit("containers:tick", cs);
                         }
-                        Err(e) => eprintln!("containers tick failed: {e:#}"),
+                        Err(e) => {
+                            eprintln!("containers tick failed: {e:#}");
+                            // Let the UI show the failure state instead of
+                            // freezing on the last good list. Plain string,
+                            // re-sent each tick; the frontend dedupes.
+                            let _ = handle.emit("containers:tickError", format!("{e:#}"));
+                        }
                     }
                 }
             });

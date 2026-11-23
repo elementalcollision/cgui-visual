@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::process::Command;
 
-use crate::model::{Container, Service as UiService, Stack as UiStack};
+use crate::model::{Container, InvalidStack, Service as UiService, Stack as UiStack, StackListing};
 use crate::runtime;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -129,42 +129,113 @@ pub fn stack_path(name: &str) -> Result<PathBuf> {
     stack_path_in(&dir, name)
 }
 
-fn load_all_toml() -> Vec<(StackToml, PathBuf)> {
-    let Some(dir) = stacks_dir() else {
-        return vec![];
+/// Every readable, valid stack plus the files that were skipped and why.
+#[derive(Debug, Default)]
+pub struct LoadedStacks {
+    pub stacks: Vec<(StackToml, PathBuf)>,
+    pub invalid: Vec<InvalidStack>,
+}
+
+fn parse_error_text(src: &str, e: &toml::de::Error) -> String {
+    match e.span() {
+        Some(span) => {
+            let line = src[..span.start.min(src.len())].matches('\n').count() + 1;
+            format!("line {line}: {}", e.message())
+        }
+        None => e.message().to_string(),
+    }
+}
+
+/// Load every `*.toml` in `dir`. Files that can't be read or parsed are
+/// reported in `invalid` (never silently dropped) so one typo doesn't make
+/// a stack vanish; the valid ones are still returned. A missing folder is
+/// simply "no stacks".
+pub fn load_dir(dir: &std::path::Path) -> LoadedStacks {
+    let mut out = LoadedStacks::default();
+    let rd = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return out,
+        Err(e) => {
+            out.invalid.push(InvalidStack {
+                file: dir.display().to_string(),
+                name: dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                error: format!("cannot read stacks folder: {e}"),
+            });
+            return out;
+        }
     };
-    let Ok(rd) = std::fs::read_dir(&dir) else {
-        return vec![];
-    };
-    let mut out = Vec::new();
     for entry in rd.flatten() {
         let p = entry.path();
         if p.extension().and_then(|x| x.to_str()) != Some("toml") {
             continue;
         }
-        let Ok(s) = std::fs::read_to_string(&p) else {
-            continue;
+        let name = p
+            .file_stem()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let invalid = |error: String| InvalidStack {
+            file: p.display().to_string(),
+            name: name.clone(),
+            error,
         };
-        if let Ok(stack) = toml::from_str::<StackToml>(&s) {
-            out.push((stack, p));
+        let s = match std::fs::read_to_string(&p) {
+            Ok(s) => s,
+            Err(e) => {
+                out.invalid.push(invalid(format!("cannot read file: {e}")));
+                continue;
+            }
+        };
+        match toml::from_str::<StackToml>(&s) {
+            Ok(stack) => out.stacks.push((stack, p.clone())),
+            Err(e) => out.invalid.push(invalid(parse_error_text(&s, &e))),
         }
     }
-    out.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+    out.stacks.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+    out.invalid.sort_by(|a, b| a.file.cmp(&b.file));
     out
 }
 
-pub fn load_one(name: &str) -> Result<StackToml> {
-    let stacks = load_all_toml();
-    stacks
-        .into_iter()
-        .find_map(|(s, _)| (s.name == name).then_some(s))
-        .ok_or_else(|| anyhow!("stack '{name}' not found in ~/.config/cgui/stacks/"))
+fn load_all_toml() -> LoadedStacks {
+    match stacks_dir() {
+        Some(dir) => load_dir(&dir),
+        None => LoadedStacks::default(),
+    }
 }
 
-pub async fn list_stacks() -> Vec<UiStack> {
-    let stacks = load_all_toml();
+fn find_in(loaded: LoadedStacks, name: &str) -> Result<StackToml> {
+    if let Some(s) = loaded
+        .stacks
+        .into_iter()
+        .find_map(|(s, _)| (s.name == name).then_some(s))
+    {
+        return Ok(s);
+    }
+    if let Some(bad) = loaded.invalid.iter().find(|i| i.name == name) {
+        return Err(anyhow!(
+            "stack '{name}' has an invalid stack file ({}): {}",
+            bad.file,
+            bad.error
+        ));
+    }
+    Err(anyhow!(
+        "stack '{name}' not found in ~/.config/cgui/stacks/"
+    ))
+}
+
+pub fn load_one(name: &str) -> Result<StackToml> {
+    find_in(load_all_toml(), name)
+}
+
+pub async fn list_stacks() -> StackListing {
+    let LoadedStacks { stacks, invalid } = load_all_toml();
     if stacks.is_empty() {
-        return vec![];
+        return StackListing {
+            stacks: vec![],
+            invalid,
+        };
     }
 
     let containers: Vec<Container> = match runtime::list_containers_raw().await {
@@ -172,10 +243,13 @@ pub async fn list_stacks() -> Vec<UiStack> {
         Err(_) => vec![],
     };
 
-    stacks
-        .into_iter()
-        .map(|(s, path)| stack_to_ui(s, &path, &containers))
-        .collect()
+    StackListing {
+        stacks: stacks
+            .into_iter()
+            .map(|(s, path)| stack_to_ui(s, &path, &containers))
+            .collect(),
+        invalid,
+    }
 }
 
 fn stack_to_ui(s: StackToml, path: &std::path::Path, containers: &[Container]) -> UiStack {
@@ -398,20 +472,97 @@ pub async fn stack_up(name: &str) -> Result<Vec<String>> {
     Ok(log)
 }
 
+/// Result of one stop/delete step in `stack_down`.
+#[derive(Debug, PartialEq)]
+enum Step {
+    Done,
+    /// Failed in a way that still leaves the container stopped/absent
+    /// (not found, already stopped): logged but not an error.
+    Benign,
+    Failed(String),
+}
+
+fn classify_step(res: Result<String>, benign: fn(&str) -> bool) -> Step {
+    match res {
+        Ok(_) => Step::Done,
+        Err(e) => {
+            let msg = format!("{e:#}");
+            if benign(&msg) {
+                Step::Benign
+            } else {
+                Step::Failed(msg)
+            }
+        }
+    }
+}
+
+/// First line is a one-line summary (suitable for a toast); the rest is the
+/// step log so the UI can show exactly what happened.
+fn down_failure_message(
+    stack: &str,
+    total: usize,
+    failures: &[(String, String)],
+    log: &[String],
+) -> String {
+    let list = failures
+        .iter()
+        .map(|(svc, why)| format!("{svc} ({why})"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let mut msg = format!(
+        "stack '{stack}' down incomplete: {} of {total} service(s) failed: {list}",
+        failures.len()
+    );
+    for l in log {
+        msg.push('\n');
+        msg.push_str(l);
+    }
+    msg
+}
+
 pub async fn stack_down(name: &str) -> Result<Vec<String>> {
     let stack = load_one(name)?;
     let mut log: Vec<String> = Vec::new();
+    let mut failures: Vec<(String, String)> = Vec::new();
     // Reverse topo: stop dependents before what they depend on.
     let order: Vec<_> = topo_order(&stack).into_iter().rev().collect();
+    let total = order.len();
     for svc in order {
         let cname = format!("{}_{}", stack.name, svc.name);
         log.push(format!("$ container stop {cname}"));
-        let _ = runtime_run(&["stop", &cname]).await;
+        match classify_step(
+            runtime_run(&["stop", &cname]).await,
+            runtime::is_benign_stop_error,
+        ) {
+            Step::Done => {}
+            Step::Benign => log.push("  (not running / not found; ignored)".into()),
+            Step::Failed(msg) => {
+                log.push(format!("✗ {}: stop failed: {msg}", svc.name));
+                failures.push((svc.name.clone(), format!("stop: {msg}")));
+                // Deleting a container that failed to stop would only add a
+                // second, misleading "is running" error.
+                continue;
+            }
+        }
         log.push(format!("$ container delete {cname}"));
-        let _ = runtime_run(&["delete", &cname]).await;
+        match classify_step(
+            runtime_run(&["delete", &cname]).await,
+            runtime::is_benign_delete_error,
+        ) {
+            Step::Done => {}
+            Step::Benign => log.push("  (not found; ignored)".into()),
+            Step::Failed(msg) => {
+                log.push(format!("✗ {}: delete failed: {msg}", svc.name));
+                failures.push((svc.name.clone(), format!("delete: {msg}")));
+            }
+        }
     }
-    log.push(format!("✓ stack '{name}' down"));
-    Ok(log)
+    if failures.is_empty() {
+        log.push(format!("✓ stack '{name}' down"));
+        Ok(log)
+    } else {
+        Err(anyhow!(down_failure_message(name, total, &failures, &log)))
+    }
 }
 
 // Routes through runtime's shared timeout-and-kill path (and the active
@@ -848,5 +999,108 @@ mod tests {
         // Three+ entries → set membership.
         assert!(status_matches(401, &[401, 403, 404]));
         assert!(!status_matches(402, &[401, 403, 404]));
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("cgui-stacks-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn load_dir_reports_bad_files_and_keeps_valid_ones() {
+        let d = scratch_dir("bad");
+        std::fs::write(
+            d.join("good.toml"),
+            "name = \"good\"\n[[service]]\nname = \"web\"\nimage = \"nginx\"\n",
+        )
+        .unwrap();
+        // Typo: missing closing quote on line 2.
+        std::fs::write(d.join("typo.toml"), "name = \"typo\"\nfoo = \"oops\n").unwrap();
+        // Parses as TOML but isn't a stack (no `name`).
+        std::fs::write(
+            d.join("noname.toml"),
+            "[[service]]\nname = \"a\"\nimage = \"x\"\n",
+        )
+        .unwrap();
+        std::fs::write(d.join("notes.txt"), "ignored").unwrap();
+
+        let loaded = load_dir(&d);
+        assert_eq!(loaded.stacks.len(), 1);
+        assert_eq!(loaded.stacks[0].0.name, "good");
+        let names: Vec<_> = loaded.invalid.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["noname", "typo"]);
+        let typo = loaded.invalid.iter().find(|i| i.name == "typo").unwrap();
+        assert!(typo.error.starts_with("line 2:"), "{}", typo.error);
+        assert!(typo.file.ends_with("typo.toml"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn load_dir_missing_folder_is_empty_not_an_error() {
+        let d = std::env::temp_dir().join(format!("cgui-stacks-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let loaded = load_dir(&d);
+        assert!(loaded.stacks.is_empty() && loaded.invalid.is_empty());
+    }
+
+    #[test]
+    fn find_in_explains_invalid_file_instead_of_not_found() {
+        let d = scratch_dir("find");
+        std::fs::write(d.join("broken.toml"), "name = \n").unwrap();
+        let err = find_in(load_dir(&d), "broken").unwrap_err().to_string();
+        assert!(err.contains("invalid stack file"), "{err}");
+        let err = find_in(load_dir(&d), "other").unwrap_err().to_string();
+        assert!(err.contains("not found"), "{err}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn classify_step_separates_benign_from_real_failures() {
+        let not_found = Err(anyhow!(
+            "`container stop s_web` exited exit status: 1: Error: notFound: \"container with ID s_web not found\""
+        ));
+        assert_eq!(
+            classify_step(not_found, runtime::is_benign_stop_error),
+            Step::Benign
+        );
+        let down = Err(anyhow!(
+            "Error: Plugins are unavailable. Start the container system services and retry"
+        ));
+        assert!(matches!(
+            classify_step(down, runtime::is_benign_stop_error),
+            Step::Failed(_)
+        ));
+        let running = Err(anyhow!(
+            "invalidState: \"container s_web is running and can not be deleted\""
+        ));
+        assert!(matches!(
+            classify_step(running, runtime::is_benign_delete_error),
+            Step::Failed(_)
+        ));
+        assert_eq!(
+            classify_step(Ok(String::new()), runtime::is_benign_stop_error),
+            Step::Done
+        );
+    }
+
+    #[test]
+    fn down_failure_message_lists_services_then_log() {
+        let msg = down_failure_message(
+            "s",
+            3,
+            &[("web".into(), "stop: boom".into())],
+            &[
+                "$ container stop s_web".into(),
+                "✗ web: stop failed: boom".into(),
+            ],
+        );
+        let mut lines = msg.lines();
+        assert_eq!(
+            lines.next().unwrap(),
+            "stack 's' down incomplete: 1 of 3 service(s) failed: web (stop: boom)"
+        );
+        assert_eq!(lines.next().unwrap(), "$ container stop s_web");
     }
 }

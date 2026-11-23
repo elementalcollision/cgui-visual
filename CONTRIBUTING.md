@@ -57,10 +57,12 @@ npm run dev
 - **Frontend types in `src/types.ts` mirror Rust serde shapes in
   `src-tauri/src/model.rs`.** Add fields to both, with serde
   `rename_all = "camelCase"` on the Rust side.
-- **Every backend command has a fixture fallback** — `commands.rs` calls
-  `runtime::available()` and falls back to `fixtures::*` when the CLI
-  isn't on PATH. Don't break this; design work outside Tauri depends on
-  it.
+- **List/inspect commands fall back to fixtures only when the CLI isn't
+  on PATH (debug builds)** — `commands.rs` calls `runtime::available()`
+  and uses `fixtures::*` in that case; `api.ts` does the same outside
+  Tauri. A CLI call that *fails* (e.g. services stopped) must return an
+  error, never an empty list or fixture, so the UI can show it. Don't
+  break the dev fallback; design work outside Tauri depends on it.
 - **Streaming events use the pattern** `start_X(args)` invoke +
   `X:tick` event. See `start_log_stream` and `start_pull` for the
   template.
