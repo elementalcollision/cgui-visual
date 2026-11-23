@@ -26,6 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   left over from Docker; Apple's `container` never creates the socket, so the
   warning always showed. The `container system status` check already covers
   whether the runtime is up.
+- **Saved logs keep a quick restart's output.** `container` records a run's
+  start time only to the second. If a container stopped and started again
+  within one second, background log saving took the new run for the old one
+  and skipped as many of its first lines as the old run had printed. cgui
+  now checks each run's saved lines against what the log shows and stores a
+  new run separately, from its first line.
+- **Saved logs no longer lose or repeat lines after a burst.** While a
+  container prints a burst of output, `container logs -f` sometimes splits a
+  long line in two, and it leaves blank lines out. Background log saving
+  counted saved lines, so after cgui was reopened it could skip one real
+  line per split, or save a line twice after a blank line. It now picks up
+  from how much text is saved, which splits and missing blank lines don't
+  change. A line that was split is still saved as two rows next to each
+  other.
 
 ### Internal
 

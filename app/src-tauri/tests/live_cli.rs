@@ -714,6 +714,206 @@ async fn app_restart_resumes_without_gap_or_duplicate() {
     let _ = wait_logs_follower(&cname, false, 10).await;
 }
 
+// A burst: lines printed in one go, far faster than any timestamp can tell
+// apart. BURSTS bursts of BURST lines plus TAIL slow lines stay under the
+// 5,000 rows `rows()` reads back, even with a few dozen lines split in two.
+const BURST: usize = 1500;
+const BURSTS: usize = 3;
+const TAIL: usize = 10;
+
+/// Burst lines carry ~2 KB of padding, so one burst (~3 MB) is far more
+/// than a pipe buffer and than a follower reads in one wake-up (tokio's
+/// budget is 128 reads of 8 KB). That is what lets the test stop the
+/// supervisor with a burst only partly saved. It is also what makes
+/// `logs -f` split lines (see `logpersist`).
+fn burst_pad() -> String {
+    "abcdefghijklmnopqrstuvwxyz0123456789".repeat(56)
+}
+
+/// The container's whole log. Before burst k it prints `n<i>` and waits for
+/// `/tmp/go<k>`; burst k is BURST lines `n<i> <pad>` from one `seq | sed`;
+/// after the last burst come TAIL lines 100 ms apart, then silence.
+fn burst_cmd() -> String {
+    let ks: Vec<String> = (1..=BURSTS).map(|k| k.to_string()).collect();
+    format!(
+        "sh -c \"i=0; for k in {ks}; do \
+           i=$((i+1)); echo n$i; \
+           while [ ! -e /tmp/go$k ]; do sleep 0.05; done; \
+           seq $((i+1)) $((i+{BURST})) | sed 's/.*/n& {pad}/'; i=$((i+{BURST})); \
+         done; \
+         t=0; while [ $t -lt {TAIL} ]; do i=$((i+1)); t=$((t+1)); echo n$i; sleep 0.1; done; \
+         exec sleep 3600\"",
+        ks = ks.join(" "),
+        pad = burst_pad(),
+    )
+}
+
+/// What `burst_cmd` prints, line by line.
+fn burst_log() -> Vec<String> {
+    let pad = burst_pad();
+    let mut log = Vec::new();
+    for _ in 0..BURSTS {
+        log.push(format!("n{}", log.len() + 1));
+        for _ in 0..BURST {
+            log.push(format!("n{} {pad}", log.len() + 1));
+        }
+    }
+    for _ in 0..TAIL {
+        log.push(format!("n{}", log.len() + 1));
+    }
+    log
+}
+
+/// Text bytes of `lines` (each without its `\n`): the position a run has
+/// once exactly these lines are stored.
+fn text_bytes(lines: &[String]) -> usize {
+    lines.iter().map(String::len).sum()
+}
+
+/// Text bytes of `run` the history has stored, after flushing the writer.
+fn stored_bytes(cid: &str, run: i64) -> usize {
+    app_lib::history::flush_logs();
+    app_lib::history::run_progress(cid, run)
+        .and_then(|p| p.digest)
+        .map_or(0, |d| d.bytes as usize)
+}
+
+/// Check that `rows` are the first lines of `log` in order, each whole or
+/// in consecutive pieces (a line `logs -f` split is stored as two rows),
+/// covering exactly `bytes` text bytes. Reports the first difference only
+/// (lines are ~2 KB).
+fn assert_rows_are_log(rows: &[String], log: &[String], bytes: usize, ctx: &str) {
+    let short = |l: &str| l.chars().take(24).collect::<String>();
+    let (mut line, mut at, mut total, mut pieces) = (0usize, 0usize, 0usize, 0usize);
+    for (i, r) in rows.iter().enumerate() {
+        let want = log.get(line).map_or("", |l| &l[at..]);
+        assert!(
+            !r.is_empty() && want.starts_with(r.as_str()),
+            "{ctx}: row {} is {:?} ({} bytes), expected (part of) line {} {:?} ({} bytes)",
+            i + 1,
+            short(r),
+            r.len(),
+            line + 1,
+            short(want),
+            want.len()
+        );
+        if at > 0 || r.len() < want.len() {
+            pieces += 1;
+        }
+        at += r.len();
+        total += r.len();
+        if at == log[line].len() {
+            line += 1;
+            at = 0;
+        }
+    }
+    assert_eq!(total, bytes, "{ctx}: text bytes stored");
+    if pieces > 0 {
+        eprintln!("{ctx}: {pieces} rows are pieces of lines `logs -f` split");
+    }
+}
+
+/// Poll every millisecond until part of the burst after line `before` is
+/// saved, then stop the supervisor at once; returns the text bytes saved.
+/// The test runtime has one thread, so the follower cannot run, let alone
+/// save more, between that read and the stop.
+async fn stop_inside_burst(sup: &Supervisor, cid: &str, run: i64, before: usize) -> usize {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let n = stored_bytes(cid, run);
+        if n > before {
+            sup.stop_all();
+            return n;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "burst after text byte {before} never arrived"
+        );
+    }
+}
+
+/// (b2) Resuming inside a burst. Each round, a fresh supervisor (= app
+/// restart) catches up to where the container waits, the container prints
+/// a burst, and the supervisor is stopped with only part of it saved. The
+/// next one must resume at exactly that point, although the lines around
+/// it were printed in the same instant and `logs -f` may have split some of
+/// them. Three rounds; then the saved log must be `container logs`.
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn app_restart_inside_a_burst_resumes_exactly() {
+    live_only!();
+    init_history();
+    let mut g = Guard::default();
+    let cname = g.container(&name("burst"));
+    let args = RunArgs {
+        command: Some(burst_cmd()),
+        ..run_args(&cname)
+    };
+    runtime::run_image(args).await.expect("run");
+    let run = find(&cname).await.started_unix.expect("started");
+    let log = burst_log();
+    // Text bytes up to and including the line printed before burst `k`.
+    let before = |k: usize| text_bytes(&log[..k * (BURST + 1) + 1]);
+
+    for k in 0..BURSTS {
+        let sup = Arc::new(Supervisor::new());
+        // Replays the run, skips what is saved (from round 1 on, part of
+        // the previous burst) and saves the rest, up to the wait.
+        assert!(
+            tick_until(&sup, "burst", 30, || stored_bytes(&cname, run) >= before(k)).await,
+            "round {k}: caught up to {} of {} text bytes",
+            stored_bytes(&cname, run),
+            before(k)
+        );
+        assert_eq!(stored_bytes(&cname, run), before(k), "round {k}: position");
+        assert_rows_are_log(
+            &rows(&cname),
+            &log,
+            before(k),
+            &format!("round {k} resumed"),
+        );
+
+        cli_ok(&["exec", &cname, "touch", &format!("/tmp/go{}", k + 1)]);
+        let saved = stop_inside_burst(&sup, &cname, run, before(k)).await;
+        eprintln!(
+            "round {k}: stopped with {} of {} burst bytes saved",
+            saved - before(k),
+            before(k + 1) - before(k)
+        );
+        assert!(
+            saved < before(k + 1),
+            "round {k}: the whole burst was saved before the stop"
+        );
+        assert!(wait_logs_follower(&cname, false, 10).await, "killed");
+        assert_eq!(
+            stored_bytes(&cname, run),
+            saved,
+            "round {k}: nothing saved after the stop"
+        );
+        assert_rows_are_log(&rows(&cname), &log, saved, &format!("round {k} stopped"));
+    }
+
+    // The last restart saves the rest of the last burst and the slow tail.
+    let sup = Arc::new(Supervisor::new());
+    let all = text_bytes(&log);
+    assert!(
+        tick_until(&sup, "burst", 30, || stored_bytes(&cname, run) >= all).await,
+        "caught up to {} of {all} text bytes",
+        stored_bytes(&cname, run),
+    );
+    sup.stop_all();
+    assert!(wait_logs_follower(&cname, false, 10).await, "killed");
+    assert_eq!(stored_bytes(&cname, run), all, "final position");
+    let saved = rows(&cname);
+    assert_rows_are_log(&saved, &log, all, "final");
+    let cli: Vec<String> = cli_ok(&["logs", &cname])
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(cli, log, "`container logs` prints what the test expects");
+}
+
 /// (c) Restarting a container starts a new run: the new run's lines are
 /// captured, the old run's stay.
 #[tokio::test]
@@ -742,7 +942,8 @@ async fn container_restart_captures_new_run_and_keeps_old() {
     assert!(wait_logs_follower(&cname, false, 10).await);
     let run1_lines = rows(&cname).len();
 
-    tokio::time::sleep(Duration::from_millis(1200)).await; // distinct start second
+    // A later start second (same-second restarts: tests (f) and (g)).
+    tokio::time::sleep(Duration::from_millis(1200)).await;
     runtime::start(&cname).await.expect("start");
     let run2 = find(&cname).await.started_unix.expect("run 2 start");
     assert!(run2 > run1, "a restart is a new run");
@@ -872,6 +1073,222 @@ async fn stopping_container_or_supervisor_kills_follower_process() {
     assert!(tick_until(&sup, "kill", 20, || pgrep_logs(&c)).await);
     sup.stop_all();
     assert!(wait_logs_follower(&c, false, 10).await);
+}
+
+// Same-second restarts. The CLI's only run identity is the start date, in
+// whole seconds, and a container that exits at once can be started again
+// within the same second. Each test restarts its container as soon as the
+// last run is stored until two runs share a start date (a start takes
+// about half a second, so that takes a few tries).
+//
+// These tests poll with `inspect` of their one container instead of the
+// app's `ls` + `stats` (`tick`): `stats --no-stream` takes 2 s while any
+// container on the machine runs, and they need several polls per second.
+
+/// (running, start date) of `id`, from `inspect`.
+async fn run_state(id: &str) -> (bool, Option<i64>) {
+    runtime::run_info(id).await.expect("inspect")
+}
+
+/// Poll until the container is (not) running.
+async fn wait_running(id: &str, running: bool, secs: u64) -> bool {
+    for _ in 0..secs * 40 {
+        if run_state(id).await.0 == running {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    false
+}
+
+/// `tick_until` for one container, every 25 ms. The supervisor sees what
+/// the app's poll would show it: the id, the state and the start date.
+async fn tick_one_until(
+    sup: &Arc<Supervisor>,
+    cname: &str,
+    secs: u64,
+    f: impl Fn() -> bool,
+) -> bool {
+    let end = std::time::Instant::now() + Duration::from_secs(secs);
+    while std::time::Instant::now() < end {
+        let (running, started) = run_state(cname).await;
+        sup.reconcile(&[app_lib::model::Container {
+            id: cname.to_string(),
+            status: if running { "running" } else { "stopped" }.into(),
+            started_unix: started,
+            ..Default::default()
+        }]);
+        if f() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    f()
+}
+
+/// Wait for the current run to stop, then tick until all of its log, as
+/// the CLI prints it, is stored and the run is complete. Returns the run's
+/// start date and lines.
+async fn store_stopped_run(sup: &Arc<Supervisor>, cname: &str) -> (i64, Vec<String>) {
+    // While a start is under way, the previous run still shows as stopped
+    // but `logs` already returns the new run's log, empty. Every run of
+    // these tests prints something.
+    let mut seen = None;
+    for _ in 0..100 {
+        assert!(wait_running(cname, false, 15).await, "the run stops");
+        let printed: Vec<String> = cli_ok(&["logs", cname]).lines().map(String::from).collect();
+        let (running, started) = run_state(cname).await;
+        if !printed.is_empty() && !running {
+            seen = Some((started.expect("start date"), printed));
+            break;
+        }
+    }
+    let (started, printed) = seen.expect("a stopped run with its log");
+    let stored = tick_one_until(sup, cname, 20, || {
+        rows(cname).ends_with(&printed)
+            && app_lib::history::run_progress(cname, started).is_some_and(|p| p.complete)
+    })
+    .await;
+    assert!(
+        stored,
+        "run of {started}: {printed:?}, stored {:?}",
+        rows(cname)
+    );
+    (started, printed)
+}
+
+/// Every run's lines are stored once, in order, and runs that share a start
+/// date are stored apart, as seq 0, 1, … in the order they ran.
+fn assert_runs_stored(cname: &str, runs: &[(i64, Vec<String>)]) {
+    let all: Vec<String> = runs.iter().flat_map(|(_, l)| l.iter().cloned()).collect();
+    assert_eq!(rows(cname), all, "every line once, in order");
+    let mut keys: Vec<i64> = runs.iter().map(|(s, _)| *s).collect();
+    keys.dedup();
+    for k in keys {
+        let want: Vec<(i64, i64)> = runs
+            .iter()
+            .filter(|(s, _)| *s == k)
+            .enumerate()
+            .map(|(seq, (_, l))| (seq as i64, l.len() as i64))
+            .collect();
+        let got: Vec<(i64, i64)> = app_lib::history::runs_at(cname, k)
+            .iter()
+            .map(|p| (p.seq, p.persisted_lines))
+            .collect();
+        assert_eq!(got, want, "(seq, lines) of the runs started at {k}");
+    }
+}
+
+/// A shell snippet printing `<tag> n1` … `<tag> n<count>`, the tag being
+/// unique to the run.
+fn tagged_lines(count: u32) -> String {
+    format!("t=$(cat /proc/sys/kernel/random/uuid); for i in $(seq {count}); do echo $t n$i; done")
+}
+
+/// (f) A container that exits at once, started again within the same second:
+/// the second run has the first one's start date, but is stored in full and
+/// on its own, not skipped as "already stored".
+#[tokio::test]
+#[ignore]
+async fn same_second_restart_of_an_exited_container_is_a_run_of_its_own() {
+    live_only!();
+    init_history();
+    let mut g = Guard::default();
+    let cname = g.container(&name("twin-exit"));
+    let args = RunArgs {
+        command: Some(format!("sh -c \"{}\"", tagged_lines(5))),
+        ..run_args(&cname)
+    };
+    runtime::run_image(args).await.expect("run");
+    let sup = Arc::new(Supervisor::new());
+
+    let mut runs: Vec<(i64, Vec<String>)> = Vec::new();
+    for attempt in 0..60 {
+        if attempt > 0 {
+            runtime::start(&cname).await.expect("start");
+        }
+        let run = store_stopped_run(&sup, &cname).await;
+        let twin = runs.last().is_some_and(|(s, _)| *s == run.0);
+        runs.push(run);
+        if twin {
+            break;
+        }
+    }
+    sup.stop_all();
+    let n = runs.len();
+    assert!(
+        n >= 2 && runs[n - 1].0 == runs[n - 2].0,
+        "no two of {n} runs started within one second"
+    );
+    eprintln!("same start date after {n} runs");
+    assert_runs_stored(&cname, &runs);
+}
+
+/// (g) Like (f), but the second run keeps running. Its follower must store
+/// it from its first line, apart from the first run (not skip as many lines
+/// as the first run had), and resume it exactly after it stops.
+#[tokio::test]
+#[ignore]
+async fn same_second_restart_that_keeps_running_is_followed_from_its_first_line() {
+    live_only!();
+    init_history();
+    let mut g = Guard::default();
+    let cname = g.container(&name("twin-run"));
+    // Odd runs print 3 lines and exit; even runs count until killed. The
+    // run number lives in the container's own file system, which a restart
+    // keeps.
+    let cmd = format!(
+        "sh -c \"c=$(cat /runs 2>/dev/null || echo 0); c=$((c+1)); echo $c > /runs; \
+         if [ $((c % 2)) = 1 ]; then {}; \
+         else t=$(cat /proc/sys/kernel/random/uuid); i=0; \
+         while true; do i=$((i+1)); echo $t n$i; sleep 0.2; done; fi\"",
+        tagged_lines(3)
+    );
+    let args = RunArgs {
+        command: Some(cmd),
+        ..run_args(&cname)
+    };
+    runtime::run_image(args).await.expect("run");
+    let sup = Arc::new(Supervisor::new());
+
+    let mut runs: Vec<(i64, Vec<String>)> = Vec::new();
+    let mut twin = false;
+    for _ in 0..60 {
+        let (exited, printed) = store_stopped_run(&sup, &cname).await;
+        assert_eq!(printed.len(), 3, "an odd run: {printed:?}");
+        runs.push((exited, printed));
+        runtime::start(&cname).await.expect("start");
+        assert!(
+            wait_running(&cname, true, 15).await,
+            "an even run keeps running"
+        );
+        if run_state(&cname).await.1 == Some(exited) {
+            twin = true;
+            break;
+        }
+        // Not within the same second: stop it, store it, try again.
+        runtime::kill(&cname, None).await.expect("kill");
+        runs.push(store_stopped_run(&sup, &cname).await);
+        runtime::start(&cname).await.expect("start");
+    }
+    assert!(twin, "no even run started within its odd run's second");
+    eprintln!("same start date after {} runs", runs.len() + 1);
+
+    // Followed while it runs, from its first line on.
+    let before = rows(&cname).len();
+    assert!(
+        tick_one_until(&sup, &cname, 25, || rows(&cname).len() >= before + 6).await,
+        "the new run is followed: {:?}",
+        rows(&cname)
+    );
+    assert_eq!(sup.status().followers, 1);
+    let live = rows(&cname)[before..].to_vec();
+    assert!(live[0].ends_with(" n1"), "from its first line: {live:?}");
+    // Then stopped: the catch-up resumes it where the follower left off.
+    runtime::kill(&cname, None).await.expect("kill");
+    runs.push(store_stopped_run(&sup, &cname).await);
+    sup.stop_all();
+    assert_runs_stored(&cname, &runs);
 }
 
 /// Commit (1.6+): works on a running and on a stopped container, and the
