@@ -14,12 +14,31 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/01-containers.png" alt="cgui-visual containers tab — workbench variation, dark mode" width="820"/>
+  <img src="docs/screenshots/containers.png" alt="The Containers view: live CPU, memory, network and disk tiles above a list of running and exited containers" width="820"/>
 </p>
 
 <p align="center">
   The visual companion to the <a href="https://github.com/elementalcollision/cgui"><code>cgui</code></a> ratatui TUI — same workflows, different surface.
 </p>
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/logs.png" alt="The Logs view, with WARN and ERROR lines colour-coded and a level filter"/></td>
+    <td width="50%"><img src="docs/screenshots/container-detail.png" alt="A container's details, with CPU, memory and network trends over the last 24 hours"/></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>Logs</b>: live, colour-coded by level, with history kept across restarts</sub></td>
+    <td align="center"><sub><b>Container details</b>: trends, network and DNS aliases, terminal, commit to image</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/settings.png" alt="Settings, showing dark mode, menu-bar mode, notifications and background log saving"/></td>
+    <td width="50%"><img src="docs/screenshots/command-palette.png" alt="The command palette, matching two containers and an image for the search python"/></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>Settings</b>: background log saving, menu-bar mode, notifications</sub></td>
+    <td align="center"><sub><b>Command palette</b>: <code>⌘K</code> jumps to any view, container, image or stack</sub></td>
+  </tr>
+</table>
 
 > **Looking for the TUI?** It lives in [elementalcollision/cgui](https://github.com/elementalcollision/cgui).
 
@@ -56,16 +75,17 @@ cgui-visual drives Apple's `container` CLI and nothing else (Docker and Podman a
 - **Terminal and trends** — interactive shell into a container; CPU / memory / network / disk history
 - **Machines** — list, create (including user options on container 1.6+), stop, delete, set default, plus per-machine logs (stdio or boot log) and inspect
 - **Registry, prune, disk usage** — registry logins, prune for containers / images / volumes / networks, and `system df`
-- **Logs** — streaming `container logs -f` with a 5 000-line ring buffer, level filter and free-text search; history is kept locally for 7 days
+- **Logs** — streaming `container logs -f` with a 5 000-line ring buffer and free-text search. Lines are colour-coded by level, and the ERROR / WARN filter understands bracketed tags, plain `ERROR` / `WARN` words, `level=error` fields, JSON `"level"` / `"severity"` keys, Python `ERROR:` prefixes and klog-style lines. The header says when a stream has ended, and why (container stopped or removed)
+- **Log history that outlives the container** — `container` keeps only a container's current run: a restart wipes earlier output and deleting the container removes its log. cgui saves the log of every running container in the background (up to 32 at once), whether or not a Logs view is open, and fills in lines written while cgui was closed. History stays on your Mac for 7 days; turn it off in Settings → Logs
 - **Pull** — streaming `container image pull` with progress
-- **Doctor** — local-environment health check, including minimum-version and CLI/server version-mismatch checks with one-click service start / restart
+- **Doctor** — local-environment health check, including minimum-version and CLI/server version-mismatch checks with one-click service start / restart, and how many containers' logs are being saved
 - **Command palette and menu-bar mode** — `⌘K` jumps to any tab, container, image or stack; an optional menu-bar mode keeps the app running with the window closed
 - **Accessibility** — dialogs are labelled, trap focus and close on Esc; icon buttons carry accessible names; toggles are real switches; toasts are announced to screen readers; container rows are reachable and operable from the keyboard
 - **Self-update** — Tauri-updater plugin against a GitHub-Pages-hosted manifest
 
 ### Privacy and network use
 
-Fonts (Inter, JetBrains Mono) ship inside the app and the Content Security Policy only allows the app's own origin. cgui-visual itself makes no network calls except the update checks (GitHub releases and the update manifest) and any HTTP healthchecks you configure on a stack. Pulling images and Trivy's vulnerability-database refresh are done by `container` and `trivy`, not by this app.
+Fonts (Inter, JetBrains Mono) ship inside the app and the Content Security Policy only allows the app's own origin. cgui-visual itself makes no network calls except the update checks (GitHub releases and the update manifest) and any HTTP healthchecks you configure on a stack. Pulling images and Trivy's vulnerability-database refresh are done by `container` and `trivy`, not by this app. Saved log history and resource trends stay in a local database (`~/.config/cgui-gui/history.db`) and are never uploaded.
 
 ## Compatibility
 
