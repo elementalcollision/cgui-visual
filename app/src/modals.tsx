@@ -6,6 +6,7 @@ import type { Container, Image, ScanResponse, Severity, Stack, Tab, TrivyFinding
 import { Icon, Bar, Sparkline, iconBtn, pillBtn, fmtCreated } from './components';
 import { api } from './api';
 import { toast, withToast } from './toast';
+import { askConfirm, askText } from './dialogs';
 import { errMessage, looksLikeServicesDown } from './loadState';
 
 function Backdrop({ onClose, children }: { onClose: () => void; children: ReactNode }) {
@@ -445,7 +446,7 @@ export function DetailModal({ item, t, onClose, onExec }: {
           {/* File operations (phase 2): copy in/out + filesystem export. */}
           <button style={pillBtn(t)} title="Copy a file from this container to a local folder"
                   onClick={async () => {
-                    const src = prompt(`Path inside ${c.name} to copy out:`, '/');
+                    const src = await askText(`Path inside ${c.name} to copy out:`, '/');
                     if (!src) return;
                     const { open } = await import('@tauri-apps/plugin-dialog');
                     const dir = await open({ directory: true, multiple: false, title: 'Destination folder' });
@@ -457,7 +458,7 @@ export function DetailModal({ item, t, onClose, onExec }: {
                     const { open } = await import('@tauri-apps/plugin-dialog');
                     const file = await open({ multiple: false, title: 'File to copy into the container' });
                     if (typeof file !== 'string') return;
-                    const dst = prompt(`Destination path inside ${c.name}:`, '/tmp/');
+                    const dst = await askText(`Destination path inside ${c.name}:`, '/tmp/');
                     if (!dst) return;
                     withToast('copy in', api.copyPath(file, `${c.id}:${dst}`)).catch(() => {});
                   }}>Copy in…</button>
@@ -484,8 +485,8 @@ export function DetailModal({ item, t, onClose, onExec }: {
           {c.status === 'running' && (
             <button style={pillBtn(t, t.danger)}
                     title="Send a signal to the container's init process"
-                    onClick={() => {
-                      const sig = prompt(
+                    onClick={async () => {
+                      const sig = await askText(
                         `Signal to send to ${c.name}:\n(SIGKILL force-kills; SIGTERM asks it to exit cleanly; SIGHUP reloads many daemons)`,
                         'SIGKILL'
                       );
@@ -1953,8 +1954,8 @@ function ServicesPanel({ t }: { t: ThemeTokens }) {
               onClick={() => act('start services', api.systemStart())}>Start</button>
       <button style={{ ...pillBtn(t, t.danger), opacity: busy ? 0.5 : 1 }} disabled={busy}
               title="Stops the runtime services; running containers are affected"
-              onClick={() => {
-                if (!confirm('Stop container services?\nRunning containers will be affected.')) return;
+              onClick={async () => {
+                if (!(await askConfirm('Stop container services?\nRunning containers will be affected.', { title: 'Stop services', okLabel: 'Stop' }))) return;
                 act('stop services', api.systemStop());
               }}>Stop</button>
     </div>
@@ -2010,8 +2011,8 @@ function MachinesPanel({ t }: { t: ThemeTokens }) {
                     onClick={() => act(`stop ${m.id}`, api.machineStop(m.id))}>Stop</button>
           )}
           <button style={{ ...pillBtn(t, t.danger), opacity: busy ? 0.5 : 1 }} disabled={busy}
-                  onClick={() => {
-                    if (!confirm(`Delete machine ${m.id}?\nIts disk image is removed.`)) return;
+                  onClick={async () => {
+                    if (!(await askConfirm(`Delete machine ${m.id}?\nIts disk image is removed.`, { title: 'Delete machine', okLabel: 'Delete' }))) return;
                     act(`delete ${m.id}`, api.machineDelete(m.id));
                   }}>Delete</button>
         </div>
@@ -2099,8 +2100,8 @@ function BuilderPanel({ t }: { t: ThemeTokens }) {
       {builder && (
         <button style={{ ...pillBtn(t, t.danger), opacity: busy ? 0.5 : 1 }} disabled={busy}
                 title="Delete the builder VM and its cache; the next build recreates it"
-                onClick={() => {
-                  if (!confirm('Delete the builder VM?\nIts build cache is lost; the next build recreates it.')) return;
+                onClick={async () => {
+                  if (!(await askConfirm('Delete the builder VM?\nIts build cache is lost; the next build recreates it.', { title: 'Delete builder', okLabel: 'Delete' }))) return;
                   act('delete builder', api.builderDelete());
                 }}>Delete</button>
       )}

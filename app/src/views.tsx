@@ -7,6 +7,7 @@ import type { Container, Image, Volume, Network, Stack } from './types';
 import { Icon, Sparkline, Bar, StatusDot, BulkActionBar, SelectCheckbox, iconBtn, pillBtn, tableHeader, tableRow, fmtCreated } from './components';
 import { api, newStreamId } from './api';
 import { toast, withToast } from './toast';
+import { askConfirm, askText } from './dialogs';
 import { useLoad, LoadErrorState, EmptyState, errMessage } from './loadState';
 
 // Aggregate CPU / Memory / Network I/O / Disk I/O across the live container
@@ -89,7 +90,7 @@ export function ContainersView({ t, search, selected, setSelected, onInspect, on
   // settles in parallel, and toasts pass/fail counts.
   const bulkRun = async (verb: string, ids: string[], op: (id: string) => Promise<unknown>, skipConfirm = false) => {
     if (!ids.length) return;
-    if (!skipConfirm && !confirm(`${verb} ${ids.length} container${ids.length === 1 ? '' : 's'}?`)) return;
+    if (!skipConfirm && !(await askConfirm(`${verb} ${ids.length} container${ids.length === 1 ? '' : 's'}?`, { title: `${verb} containers`, okLabel: verb }))) return;
     const results = await Promise.allSettled(ids.map(op));
     const ok = results.filter(r => r.status === 'fulfilled').length;
     const fail = results.length - ok;
@@ -292,19 +293,19 @@ export function ImagesView({ t, search, onScan, onRun, onInspect, reloadKey = 0 
   const items = useMemo(() => data?.images ?? [], [data]);
   const warning = data?.warning;
   const rows = items.filter(i => !search || i.ref.toLowerCase().includes(search.toLowerCase()));
-  const onDelete = (img: Image) => {
-    if (!confirm(`Delete image ${img.ref}?\nThis cannot be undone.`)) return;
+  const onDelete = async (img: Image) => {
+    if (!(await askConfirm(`Delete image ${img.ref}?\nThis cannot be undone.`, { title: 'Delete image', okLabel: 'Delete' }))) return;
     withToast(`delete ${img.ref}`, api.deleteImage(img.ref)).then(reload).catch(() => {});
   };
-  const onTag = (img: Image) => {
-    const target = prompt(`New reference for ${img.ref}:`, img.ref);
+  const onTag = async (img: Image) => {
+    const target = await askText(`New reference for ${img.ref}:`, img.ref);
     if (!target || target === img.ref) return;
     withToast(`tag ${target}`, api.tagImage(img.ref, target)).then(reload).catch(() => {});
   };
   // Push resolves on the push:done event, not the invoke — the invoke
   // returns as soon as the child is spawned.
-  const onPush = (img: Image) => {
-    if (!confirm(`Push ${img.ref} to its registry?\nRequires a registry login (Settings → Registry logins).`)) return;
+  const onPush = async (img: Image) => {
+    if (!(await askConfirm(`Push ${img.ref} to its registry?\nRequires a registry login (Settings → Registry logins).`, { title: 'Push image', okLabel: 'Push', kind: 'info' }))) return;
     let unlisten: (() => void) | null = null;
     const done = new Promise<void>((resolve, reject) => {
       api.onPushDone(ok => {
@@ -355,7 +356,7 @@ export function ImagesView({ t, search, onScan, onRun, onInspect, reloadKey = 0 
   const bulkDelete = async () => {
     const refs = [...picked];
     if (!refs.length) return;
-    if (!confirm(`Delete ${refs.length} image${refs.length === 1 ? '' : 's'}?\nThis cannot be undone.`)) return;
+    if (!(await askConfirm(`Delete ${refs.length} image${refs.length === 1 ? '' : 's'}?\nThis cannot be undone.`, { title: 'Delete images', okLabel: 'Delete' }))) return;
     const results = await Promise.allSettled(refs.map(r => api.deleteImage(r)));
     const ok = results.filter(r => r.status === 'fulfilled').length;
     const fail = results.length - ok;
@@ -445,8 +446,8 @@ export function VolumesView({ t, search, onInspect, reloadKey = 0 }: {
 }) {
   const { data, error, loading, reload } = useLoad(api.listVolumes, reloadKey);
   const items = useMemo(() => data ?? [], [data]);
-  const onDelete = (v: Volume) => {
-    if (!confirm(`Delete volume ${v.name}?\nAll data in this volume will be lost.`)) return;
+  const onDelete = async (v: Volume) => {
+    if (!(await askConfirm(`Delete volume ${v.name}?\nAll data in this volume will be lost.`, { title: 'Delete volume', okLabel: 'Delete' }))) return;
     withToast(`delete ${v.name}`, api.deleteVolume(v.name)).then(reload).catch(() => {});
   };
   const q = search.trim().toLowerCase();
@@ -514,13 +515,13 @@ export function NetworksView({ t, search, onInspect, reloadKey = 0 }: {
         n.mode.toLowerCase().includes(q) ||
         n.subnet.toLowerCase().includes(q))
     : items;
-  const onDelete = (n: Network) => {
+  const onDelete = async (n: Network) => {
     // System networks (default/host/bridge) generally can't be deleted.
     if (['default', 'host', 'bridge'].includes(n.name)) {
       withToast(`delete ${n.name}`, Promise.reject(new Error('system networks cannot be deleted'))).catch(() => {});
       return;
     }
-    if (!confirm(`Delete network ${n.name}?`)) return;
+    if (!(await askConfirm(`Delete network ${n.name}?`, { title: 'Delete network', okLabel: 'Delete' }))) return;
     withToast(`delete ${n.name}`, api.deleteNetwork(n.id)).then(reload).catch(() => {});
   };
   if (error) return <div style={{ flex: 1, overflow: 'auto', background: t.bg }}><LoadErrorState t={t} message={error} onRetry={reload} /></div>;
@@ -660,7 +661,7 @@ export function StacksView({ t, search, onGraph }: {
       });
       path = typeof picked === 'string' ? picked : null;
     } catch {
-      path = window.prompt('Path to .cgui-snapshot.json');
+      path = await askText('Path to .cgui-snapshot.json');
     }
     if (!path) return;
     try {
@@ -670,7 +671,7 @@ export function StacksView({ t, search, onGraph }: {
     } catch (err: any) {
       const msg = String(err?.message ?? err);
       if (msg.includes('already exists')) {
-        if (confirm(`${msg}\n\nOverwrite?`)) {
+        if (await askConfirm(`${msg}\n\nOverwrite?`, { title: 'Overwrite?', okLabel: 'Overwrite' })) {
           try {
             const dest = await api.restoreStackFromPath(path, true);
             withToast(`Restored to ${dest}`, Promise.resolve()).catch(() => {});
@@ -722,7 +723,7 @@ export function StacksView({ t, search, onGraph }: {
       path = typeof picked === 'string' ? picked : null;
     } catch (e) {
       // Dialog plugin isn't available outside Tauri — fall back to prompt.
-      path = window.prompt('Path to docker-compose.yml');
+      path = await askText('Path to docker-compose.yml');
     }
     if (!path) return;
     try {
@@ -733,7 +734,7 @@ export function StacksView({ t, search, onGraph }: {
       const msg = String(err?.message ?? err);
       // Conflict: backend refuses overwrite by default. Prompt + retry.
       if (msg.includes('already exists')) {
-        if (confirm(`${msg}\n\nOverwrite?`)) {
+        if (await askConfirm(`${msg}\n\nOverwrite?`, { title: 'Overwrite?', okLabel: 'Overwrite' })) {
           try {
             const dest = await api.importCompose(path, true);
             withToast(`Imported to ${dest}`, Promise.resolve()).catch(() => {});
@@ -815,8 +816,8 @@ export function StacksView({ t, search, onGraph }: {
                   </button>
                   <button style={{ ...pillBtn(t, t.fg2), opacity: busy[s.name] ? 0.5 : 1 }}
                           disabled={busy[s.name]}
-                          onClick={() => {
-                            if (!confirm(`Bring stack '${s.name}' down?\nAll its services will be stopped and deleted.`)) return;
+                          onClick={async () => {
+                            if (!(await askConfirm(`Bring stack '${s.name}' down?\nAll its services will be stopped and deleted.`, { title: 'Stack down', okLabel: 'Bring down' }))) return;
                             runAction(s.name, 'down');
                           }}>
                     <Icon name="stop" size={12} color={t.fg2} />Down

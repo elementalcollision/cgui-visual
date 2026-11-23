@@ -10,6 +10,7 @@
     "process:default",
     "process:allow-restart",
     "dialog:default",
+    "dialog:allow-message",
     "dialog:allow-open",
     "notification:default",
     "notification:allow-notify",
