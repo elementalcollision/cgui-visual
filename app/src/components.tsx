@@ -2,7 +2,7 @@
 // Sidebar, TopBar, StatusBar — Workbench variation only.
 
 import { memo, useEffect, useRef } from 'react';
-import type { CSSProperties, MouseEvent, ReactNode } from 'react';
+import type { ButtonHTMLAttributes, CSSProperties, MouseEvent, ReactNode } from 'react';
 import type { ThemeTokens } from './theme';
 import type { ContainerStatus, Tab } from './types';
 
@@ -26,36 +26,36 @@ export function Icon({ name, size = 14, color = 'currentColor', strokeWidth = 1.
   const s: CSSProperties = { width: size, height: size, stroke: color, fill: 'none', strokeWidth, strokeLinecap: 'round', strokeLinejoin: 'round', display: 'block' };
   const filled: CSSProperties = { ...s, fill: color, stroke: 'none' };
   switch (name) {
-    case 'box': return <svg viewBox="0 0 24 24" style={s}><path d="M3 7l9-4 9 4v10l-9 4-9-4z"/><path d="M3 7l9 4 9-4M12 11v10"/></svg>;
-    case 'image': return <svg viewBox="0 0 24 24" style={s}><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg>;
-    case 'database': return <svg viewBox="0 0 24 24" style={s}><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>;
-    case 'network': return <svg viewBox="0 0 24 24" style={s}><circle cx="12" cy="6" r="2.5"/><circle cx="5" cy="18" r="2.5"/><circle cx="19" cy="18" r="2.5"/><path d="M12 8.5v3M10 13l-4 3M14 13l4 3"/></svg>;
-    case 'layers': return <svg viewBox="0 0 24 24" style={s}><path d="M12 2l10 5-10 5L2 7l10-5z"/><path d="M2 12l10 5 10-5M2 17l10 5 10-5"/></svg>;
-    case 'terminal': return <svg viewBox="0 0 24 24" style={s}><path d="M4 17l5-5-5-5M11 19h8"/></svg>;
-    case 'play': return <svg viewBox="0 0 24 24" style={filled}><path d="M6 4l14 8-14 8z"/></svg>;
-    case 'stop': return <svg viewBox="0 0 24 24" style={filled}><rect x="6" y="6" width="12" height="12" rx="1"/></svg>;
-    case 'restart': return <svg viewBox="0 0 24 24" style={s}><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/></svg>;
-    case 'trash': return <svg viewBox="0 0 24 24" style={s}><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M5 6l1 14a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-14"/></svg>;
-    case 'info': return <svg viewBox="0 0 24 24" style={s}><circle cx="12" cy="12" r="9"/><path d="M12 16v-5M12 8h.01"/></svg>;
-    case 'logs': return <svg viewBox="0 0 24 24" style={s}><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>;
-    case 'search': return <svg viewBox="0 0 24 24" style={s}><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.5-4.5"/></svg>;
-    case 'pause': return <svg viewBox="0 0 24 24" style={filled}><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>;
-    case 'plus': return <svg viewBox="0 0 24 24" style={s}><path d="M12 5v14M5 12h14"/></svg>;
-    case 'download': return <svg viewBox="0 0 24 24" style={s}><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>;
-    case 'upload': return <svg viewBox="0 0 24 24" style={s}><path d="M12 15V3M7 8l5-5 5 5M5 21h14"/></svg>;
-    case 'shield': return <svg viewBox="0 0 24 24" style={s}><path d="M12 2l8 3v7c0 5-4 8-8 10-4-2-8-5-8-10V5z"/></svg>;
-    case 'sun': return <svg viewBox="0 0 24 24" style={s}><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>;
-    case 'moon': return <svg viewBox="0 0 24 24" style={s}><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>;
-    case 'menu': return <svg viewBox="0 0 24 24" style={s}><path d="M4 7h16M4 12h16M4 17h16"/></svg>;
-    case 'check': return <svg viewBox="0 0 24 24" style={s}><path d="M5 12l5 5L20 7"/></svg>;
-    case 'x': return <svg viewBox="0 0 24 24" style={s}><path d="M6 6l12 12M18 6L6 18"/></svg>;
-    case 'cog': return <svg viewBox="0 0 24 24" style={s}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3 1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8 1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>;
-    case 'heart': return <svg viewBox="0 0 24 24" style={s}><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8z"/></svg>;
-    case 'chevron': return <svg viewBox="0 0 24 24" style={s}><path d="M9 18l6-6-6-6"/></svg>;
-    case 'tag': return <svg viewBox="0 0 24 24" style={s}><path d="M20.6 13.4L11 3.8A2 2 0 0 0 9.6 3.2H4a1 1 0 0 0-1 1v5.6a2 2 0 0 0 .6 1.4l9.6 9.6a2 2 0 0 0 2.8 0l4.6-4.6a2 2 0 0 0 0-2.8z"/><circle cx="7.5" cy="7.5" r="1"/></svg>;
+    case 'box': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><path d="M3 7l9-4 9 4v10l-9 4-9-4z"/><path d="M3 7l9 4 9-4M12 11v10"/></svg>;
+    case 'image': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg>;
+    case 'database': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>;
+    case 'network': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><circle cx="12" cy="6" r="2.5"/><circle cx="5" cy="18" r="2.5"/><circle cx="19" cy="18" r="2.5"/><path d="M12 8.5v3M10 13l-4 3M14 13l4 3"/></svg>;
+    case 'layers': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><path d="M12 2l10 5-10 5L2 7l10-5z"/><path d="M2 12l10 5 10-5M2 17l10 5 10-5"/></svg>;
+    case 'terminal': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><path d="M4 17l5-5-5-5M11 19h8"/></svg>;
+    case 'play': return <svg aria-hidden="true" viewBox="0 0 24 24" style={filled}><path d="M6 4l14 8-14 8z"/></svg>;
+    case 'stop': return <svg aria-hidden="true" viewBox="0 0 24 24" style={filled}><rect x="6" y="6" width="12" height="12" rx="1"/></svg>;
+    case 'restart': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/></svg>;
+    case 'trash': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M5 6l1 14a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-14"/></svg>;
+    case 'info': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><circle cx="12" cy="12" r="9"/><path d="M12 16v-5M12 8h.01"/></svg>;
+    case 'logs': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>;
+    case 'search': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.5-4.5"/></svg>;
+    case 'pause': return <svg aria-hidden="true" viewBox="0 0 24 24" style={filled}><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>;
+    case 'plus': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><path d="M12 5v14M5 12h14"/></svg>;
+    case 'download': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>;
+    case 'upload': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><path d="M12 15V3M7 8l5-5 5 5M5 21h14"/></svg>;
+    case 'shield': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><path d="M12 2l8 3v7c0 5-4 8-8 10-4-2-8-5-8-10V5z"/></svg>;
+    case 'sun': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>;
+    case 'moon': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>;
+    case 'menu': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><path d="M4 7h16M4 12h16M4 17h16"/></svg>;
+    case 'check': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><path d="M5 12l5 5L20 7"/></svg>;
+    case 'x': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><path d="M6 6l12 12M18 6L6 18"/></svg>;
+    case 'cog': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3 1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8 1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>;
+    case 'heart': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8z"/></svg>;
+    case 'chevron': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><path d="M9 18l6-6-6-6"/></svg>;
+    case 'tag': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><path d="M20.6 13.4L11 3.8A2 2 0 0 0 9.6 3.2H4a1 1 0 0 0-1 1v5.6a2 2 0 0 0 .6 1.4l9.6 9.6a2 2 0 0 0 2.8 0l4.6-4.6a2 2 0 0 0 0-2.8z"/><circle cx="7.5" cy="7.5" r="1"/></svg>;
     // "Reclaim space" (container clean) — a small four-point sparkle,
     // the conventional glyph for a cleanup/trim action.
-    case 'sparkle': return <svg viewBox="0 0 24 24" style={s}><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 3.5l.6 1.7L21.3 6l-1.7.6-.6 1.7-.6-1.7L16.7 6l1.7-.6z"/></svg>;
+    case 'sparkle': return <svg aria-hidden="true" viewBox="0 0 24 24" style={s}><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 3.5l.6 1.7L21.3 6l-1.7.6-.6 1.7-.6-1.7L16.7 6l1.7-.6z"/></svg>;
     default: return null;
   }
 }
@@ -63,7 +63,8 @@ export function Icon({ name, size = 14, color = 'currentColor', strokeWidth = 1.
 // ─── small primitives ─────────────────────────────────────────────────
 export function StatusDot({ status, t }: { status: ContainerStatus | string; t: ThemeTokens }) {
   const c = status === 'running' ? t.success : status === 'paused' ? t.warning : t.fg3;
-  return <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: c, marginRight: 8, verticalAlign: 'middle', flexShrink: 0 }} />;
+  // Decorative: callers render the status as adjacent text, so colour is never the only signal.
+  return <span aria-hidden="true" style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: c, marginRight: 8, verticalAlign: 'middle', flexShrink: 0 }} />;
 }
 
 // Memoized — re-renders only when data, color, or sizing actually change. The
@@ -74,7 +75,7 @@ export const Sparkline = memo(function Sparkline({ data, w = 64, h = 18, color, 
 }) {
   const pts = data.map((v, i) => `${(i / (data.length - 1)) * w},${h - (v / max) * h}`).join(' ');
   return (
-    <svg width={w} height={h} style={{ display: 'block' }}>
+    <svg aria-hidden="true" width={w} height={h} style={{ display: 'block' }}>
       <polyline points={pts} fill="none" stroke={color} strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
@@ -91,6 +92,14 @@ export function Bar({ pct, color, bg, h = 6, w = '100%' }: {
       <div style={{ width: `${Math.min(100, pct)}%`, height: '100%', background: color, transition: 'width .3s' }} />
     </div>
   );
+}
+
+// Icon-only button: `label` is required and becomes both the tooltip and the
+// accessible name, so an unlabelled icon button can't be written by accident.
+export function IconButton({ label, children, style, ...rest }: {
+  label: string; children: ReactNode;
+} & Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'aria-label' | 'title' | 'children'>) {
+  return <button type="button" {...rest} title={label} aria-label={label} style={{ ...iconBtn(), ...style }}>{children}</button>;
 }
 
 // ─── shared style helpers ─────────────────────────────────────────────
@@ -180,6 +189,7 @@ export function Sidebar({ tab, setTab, collapsed, t, onSettings, onDoctor, runni
         const count = item.key === 'containers' ? runningCount : item.key === 'stacks' ? stacksCount : null;
         return (
           <button key={item.key} onClick={() => setTab(item.key)} title={collapsed ? item.label : ''}
+            aria-label={collapsed ? item.label : undefined} aria-current={active ? 'page' : undefined}
             style={{
               display: 'flex', alignItems: 'center', gap: 10, padding: collapsed ? 10 : '8px 10px',
               borderRadius: 6, border: 'none',
@@ -199,11 +209,11 @@ export function Sidebar({ tab, setTab, collapsed, t, onSettings, onDoctor, runni
       })}
       <div style={{ flex: 1 }} />
       {!collapsed && <Eyebrow t={t}>System</Eyebrow>}
-      <button onClick={onDoctor} style={sidebarBtn(t, collapsed)}>
+      <button onClick={onDoctor} aria-label="Doctor" style={sidebarBtn(t, collapsed)}>
         <Icon name="heart" size={16} color={t.fg2} />
         {!collapsed && <span>Doctor</span>}
       </button>
-      <button onClick={onSettings} style={sidebarBtn(t, collapsed)}>
+      <button onClick={onSettings} aria-label="Settings" style={sidebarBtn(t, collapsed)}>
         <Icon name="cog" size={16} color={t.fg2} />
         {!collapsed && <span>Settings</span>}
       </button>
@@ -236,7 +246,7 @@ export function TopBar({ tab, t, search, setSearch, onPull, onPrune, onImport, o
   const h = headings[tab];
   return (
     <div style={{ height: 64, padding: '0 20px', display: 'flex', alignItems: 'center', gap: 14, borderBottom: `1px solid ${t.border}`, background: t.surface, flexShrink: 0 }}>
-      <button onClick={onCollapse} style={{ background: 'none', border: 'none', cursor: 'pointer', color: t.fg2, padding: 6, display: 'flex' }}><Icon name="menu" size={18} /></button>
+      <button onClick={onCollapse} aria-label="Toggle sidebar" title="Toggle sidebar" style={{ background: 'none', border: 'none', cursor: 'pointer', color: t.fg2, padding: 6, display: 'flex' }}><Icon name="menu" size={18} /></button>
       <div style={{ minWidth: 0, flex: '0 1 auto' }}>
         <div style={{ fontSize: 18, fontWeight: 600, color: t.fg1, lineHeight: 1.1 }}>{h.title}</div>
         <div style={{ fontSize: 12, color: t.fg3, fontFamily: t.mono, marginTop: 2 }}>{h.sub}</div>
@@ -244,7 +254,7 @@ export function TopBar({ tab, t, search, setSearch, onPull, onPrune, onImport, o
       <div style={{ flex: 1 }} />
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0 12px', height: 32, background: t.surfaceAlt, border: `1px solid ${t.border}`, borderRadius: 8, width: 280 }}>
         <Icon name="search" size={14} color={t.fg3} />
-        <input value={search} onChange={e => setSearch(e.target.value)} placeholder={`Filter ${tab}…`} style={{ background: 'transparent', border: 'none', outline: 'none', color: t.fg1, fontSize: 13, fontFamily: 'inherit', flex: 1, minWidth: 0 }} />
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder={`Filter ${tab}…`} aria-label={`Filter ${tab}`} style={{ background: 'transparent', border: 'none', outline: 'none', color: t.fg1, fontSize: 13, fontFamily: 'inherit', flex: 1, minWidth: 0 }} />
         <kbd style={{ fontSize: 10, color: t.fg3, fontFamily: t.mono, padding: '2px 5px', background: t.surface, border: `1px solid ${t.border}`, borderRadius: 3 }}>/</kbd>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 10px', height: 32, background: t.accentSoft, color: t.accent, border: `1px solid ${t.border}`, borderRadius: 999, fontSize: 11, fontFamily: t.mono }}>
@@ -272,7 +282,7 @@ export function TopBar({ tab, t, search, setSearch, onPull, onPrune, onImport, o
           {updateCount} update{updateCount === 1 ? '' : 's'}
         </button>
       )}
-      <button onClick={() => setDark(!dark)} style={{ background: 'transparent', border: `1px solid ${t.border}`, borderRadius: 6, color: t.fg2, width: 32, height: 32, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <button onClick={() => setDark(!dark)} aria-label={dark ? 'Switch to light mode' : 'Switch to dark mode'} title={dark ? 'Switch to light mode' : 'Switch to dark mode'} style={{ background: 'transparent', border: `1px solid ${t.border}`, borderRadius: 6, color: t.fg2, width: 32, height: 32, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <Icon name={dark ? 'sun' : 'moon'} size={14} />
       </button>
       {onBuild && (
@@ -417,7 +427,7 @@ export function SelectCheckbox({ t, checked, indeterminate, onChange, onClick, t
       checked={checked}
       onChange={onChange}
       onClick={onClick}
-      title={title}
+      title={title} aria-label={title}
       style={{
         cursor: 'pointer',
         accentColor: t.accent,

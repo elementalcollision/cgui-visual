@@ -290,8 +290,7 @@ describe('SettingsModal menu-bar toggle', () => {
         notifyOnExit setNotifyOnExit={() => {}}
       />,
     );
-    const label = screen.getByText('Menu-bar mode');
-    return label.parentElement!.parentElement!.querySelector('button')!;
+    return screen.getByRole('switch', { name: /menu-bar mode/i });
   }
 
   it('describes hide-on-close and quit-when-off behaviour', () => {
@@ -305,7 +304,7 @@ describe('SettingsModal menu-bar toggle', () => {
     const user = userEvent.setup();
     const setMenubarMode = vi.fn();
     const toggle = renderSettings(false, setMenubarMode);
-    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
     await user.click(toggle);
     expect(setMenubarMode).toHaveBeenCalledWith(true);
   });

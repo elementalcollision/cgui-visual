@@ -288,7 +288,8 @@ export default function App() {
     })();
 
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setModal(null);
+      // Esc is handled by the open dialog itself (a11y.tsx useDialog), which
+      // knows which dialog is topmost; don't also close the modal here.
       const inInput = (document.activeElement as HTMLElement | null)?.tagName === 'INPUT' ||
         (document.activeElement as HTMLElement | null)?.tagName === 'TEXTAREA';
 

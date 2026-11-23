@@ -40,11 +40,13 @@ export function ToastTray({ t }: { t: ThemeTokens }) {
     listeners.push(fn);
     return () => { listeners = listeners.filter(x => x !== fn); };
   }, []);
-  if (!items.length) return null;
+  // The polite live region stays mounted even when empty: screen readers only
+  // announce additions to a region that already existed. Errors use role=alert
+  // (assertive), info toasts role=status.
   return (
-    <div style={{ position: 'absolute', bottom: 18, right: 18, display: 'flex', flexDirection: 'column', gap: 8, zIndex: 200, maxWidth: 420 }}>
+    <div aria-live="polite" aria-relevant="additions" style={{ position: 'absolute', bottom: 18, right: 18, display: 'flex', flexDirection: 'column', gap: 8, zIndex: 200, maxWidth: 420 }}>
       {items.map(item => (
-        <div key={item.id} style={{
+        <div key={item.id} role={item.kind === 'error' ? 'alert' : 'status'} style={{
           padding: '10px 14px',
           background: t.surface,
           border: `1px solid ${item.kind === 'error' ? t.danger : t.border}`,

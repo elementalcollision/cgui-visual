@@ -3,11 +3,12 @@
 import { useEffect, useState } from 'react';
 import type { ThemeTokens } from './theme';
 import { pillBtn } from './components';
+import { DialogBackdrop } from './a11y';
 import { subscribeTextPrompt, settleTextPrompt, type TextRequest } from './dialogs';
 
 // In-app replacement for window.prompt (see dialogs.ts for why). Mounted once
 // in App; renders the request queued by askText(). Enter submits, Esc / the
-// backdrop / Cancel resolve null.
+// backdrop / Cancel resolve null (dialog shell: a11y.tsx).
 export function TextPromptHost({ t }: { t: ThemeTokens }) {
   const [req, setReq] = useState<TextRequest | null>(null);
   useEffect(() => subscribeTextPrompt(setReq), []);
@@ -26,12 +27,9 @@ function PromptDialog({ t, req }: { t: ThemeTokens; req: TextRequest }) {
   const [value, setValue] = useState(req.defaultValue);
   const cancel = () => settleTextPrompt(null);
   return (
-    <div onClick={cancel} style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 300, backdropFilter: 'blur(2px)' }}>
-      <div onClick={e => e.stopPropagation()}>
+    <DialogBackdrop onClose={cancel} labelId="text-prompt-msg" zIndex={300}>
       <form
-        role="dialog" aria-modal="true" aria-labelledby="text-prompt-msg"
         onSubmit={e => { e.preventDefault(); settleTextPrompt(value); }}
-        onKeyDown={e => { if (e.key === 'Escape') { e.preventDefault(); cancel(); } }}
         style={{ width: 460, background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, padding: 20, boxShadow: '0 24px 80px rgba(0,0,0,0.4)' }}>
         <div id="text-prompt-msg" style={{ fontSize: 13, color: t.fg1, whiteSpace: 'pre-wrap', marginBottom: 12 }}>{req.message}</div>
         <input
@@ -44,7 +42,6 @@ function PromptDialog({ t, req }: { t: ThemeTokens; req: TextRequest }) {
           <button type="submit" style={pillBtn(t, t.accent)}>OK</button>
         </div>
       </form>
-      </div>
-    </div>
+    </DialogBackdrop>
   );
 }
