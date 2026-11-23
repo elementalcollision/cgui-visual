@@ -40,6 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from how much text is saved, which splits and missing blank lines don't
   change. A line that was split is still saved as two rows next to each
   other.
+- **Restarting a container no longer saves the new run's first lines
+  twice.** After a quick restart (the Restart button stops and starts the
+  container within a moment), background log saving could store the new
+  run's first lines under the old run as well as under the new one. cgui now
+  saves a line only once it has seen the container still in the same run,
+  and keeps the old run's last lines, such as its shutdown messages. Saved
+  logs can trail the live output by up to one refresh (2 s with the window
+  open, 10 s when hidden).
 
 ### Internal
 

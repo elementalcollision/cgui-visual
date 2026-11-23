@@ -109,13 +109,48 @@
 //! rest completes it (`log_runs.complete` records that, so it is done once
 //! per run, even across restarts of cgui).
 //!
+//! # Restarts between polls
+//!
+//! A follower's `logs -f` streams on into the next run after a restart (see
+//! above), and nothing tells the follower: if the container is stopped and
+//! started again between two polls (the Restart button does exactly that),
+//! the new run's first lines reach the old run's follower before the next
+//! poll stops it. Stored as they came, they would be stored twice: under
+//! the old run, and again by the new run's follower, which replays its run
+//! from line 1.
+//!
+//! So a follower holds what it reads (`Unconfirmed`) and stores a row only
+//! once a check that BEGAN AFTER the row was read has found the container
+//! still running in the follower's run. The checks are the polls themselves
+//! (the supervisor passes each poll's start to the followers it keeps, so
+//! no extra process runs), and an `inspect` of the follower's own when it
+//! holds a lot (`CONFIRM_SIZE`). The key is settled by the time a follower
+//! starts, so "still in this run" can only mean the same run, and every row
+//! read before the check came from it. Stored rows therefore lag the log by
+//! up to one poll interval.
+//!
+//! When a poll finds the container out of the run, the supervisor tells the
+//! follower to stop instead of killing it, and the follower wraps up
+//! (`wrap_up`) before the container's next task starts:
+//!   * if `inspect` still shows its run (stopped), the rows it holds are all
+//!     the run's (a starting run prints nothing before `inspect` shows it,
+//!     see above): it stores them;
+//!   * if the container has moved on to a later run, the rows it holds are
+//!     the old run's last lines (say, its shutdown messages) followed by the
+//!     beginning of the new run. It reads the current log once, drops the
+//!     held rows that are its beginning (`old_run_rows`, by text bytes: the
+//!     stream it read the new run from may have split lines), and stores the
+//!     rest.
+//!
 //! Limits (inherent to the CLI):
 //!   * a restart that happens between two polls destroys the previous
 //!     run's unread tail;
-//!   * when that restart moves the container to a new start second, the
-//!     follower of the old run (whose `logs -f` streams on into the new
-//!     run) can store the new run's first lines, read before the next poll
-//!     stops it, under the old run as well;
+//!   * if the old run's last lines and the new run's first lines are the
+//!     same text, the wrap-up may count some of the old run's as the new
+//!     run's: that text is then stored once, under the new run;
+//!   * rows a follower holds when cgui quits or capture is switched off are
+//!     dropped; the next follower replays them from the log, unless the
+//!     container is restarted before then;
 //!   * a line `logs -f` split while following stays two rows (together,
 //!     the line), and a blank line it left out stays missing;
 //!   * a follower leaves an unterminated last line for the next read (it
@@ -126,20 +161,24 @@
 //! `reconcile` is driven by the existing poll tick with the container list
 //! it already fetched (no extra `ls`). Each tick it diffs "desired" (running
 //! containers, newest first, up to `MAX_FOLLOWERS`) against the active
-//! tasks (`plan`, a pure function) and starts/stops tasks accordingly.
-//! Tasks are tokio futures that own their child with `kill_on_drop`, so
-//! aborting a task kills its `logs` process. A task that ends by itself is
-//! retried after an exponential backoff.
+//! tasks (`plan`, a pure function) and starts/stops tasks accordingly, and
+//! confirms the followers it keeps (see above). Tasks are tokio futures that
+//! own their child with `kill_on_drop`: a catch-up is stopped by aborting
+//! it, which kills its `logs` process; a follower is told to stop and wraps
+//! up first. A container's next task waits for the previous one to end. A
+//! task that ends by itself is retried after an exponential backoff.
 
 use crate::history;
 use crate::model::Container;
 use crate::runtime;
 use anyhow::{Context, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
-use tokio::sync::Semaphore;
+use tokio::sync::{watch, Semaphore};
 use tokio::task::JoinHandle;
 
 /// Upper bound on concurrent `container logs -f` processes.
@@ -160,6 +199,12 @@ const KEY_SETTLE_SECS: i64 = 2;
 /// Reads per task: one, plus one per later run found with the same key,
 /// plus one recheck. More means the history DB is not taking writes.
 const MAX_PASSES: usize = 4;
+/// A follower holding this much unconfirmed (text bytes plus one per row)
+/// checks its run with `inspect` itself instead of waiting for the next
+/// poll (see "Restarts between polls").
+const CONFIRM_SIZE: usize = 1 << 20;
+/// Bound on a follower's wrap-up (one `inspect`, maybe one `logs`).
+const WRAP_UP_TIMEOUT: Duration = Duration::from_secs(15);
 
 // ─── Planning (pure) ──────────────────────────────────────────────────
 
@@ -426,6 +471,63 @@ fn text_of(raw: &[u8]) -> &[u8] {
     raw.strip_suffix(b"\n").unwrap_or(raw)
 }
 
+/// How many of `rows` (a follower's unconfirmed rows, oldest first) belong
+/// to its run, given `now`, the text of the container's current log (line
+/// breaks left out) after it moved on to a later run: the rows after that
+/// point are the beginning of `now`, which `logs -f` streamed on into (see
+/// "Restarts between polls"). Text bytes are compared, line breaks left
+/// out, since `logs -f` may split lines. The longest such ending that
+/// starts at a row wins; blank rows right at that point count as the old
+/// run's. If no ending matches, all rows are the old run's.
+fn old_run_rows(rows: &[&[u8]], now: &[u8]) -> usize {
+    let held: Vec<u8> = rows.concat();
+    let now = &now[..now.len().min(held.len())];
+    if now.is_empty() {
+        return rows.len();
+    }
+    // KMP: `border[i]` is the longest proper prefix of now[..=i] that is
+    // also its suffix.
+    let mut border = vec![0usize; now.len()];
+    for i in 1..now.len() {
+        let mut k = border[i - 1];
+        while k > 0 && now[i] != now[k] {
+            k = border[k - 1];
+        }
+        if now[i] == now[k] {
+            k += 1;
+        }
+        border[i] = k;
+    }
+    // The longest prefix of `now` that `held` ends with.
+    let mut k = 0;
+    for &b in &held {
+        while k > 0 && (k == now.len() || b != now[k]) {
+            k = border[k - 1];
+        }
+        if k < now.len() && b == now[k] {
+            k += 1;
+        }
+    }
+    // Shorter matches are its borders; take the longest starting at a row.
+    let mut starts = Vec::with_capacity(rows.len() + 1);
+    let mut at = 0;
+    starts.push(0);
+    for r in rows {
+        at += r.len();
+        starts.push(at);
+    }
+    while k > 0 {
+        let cut = held.len() - k;
+        // The most rows whose text ends at `cut`.
+        let n = starts.partition_point(|&s| s <= cut) - 1;
+        if starts[n] == cut {
+            return n;
+        }
+        k = border[k - 1];
+    }
+    rows.len()
+}
+
 /// Whether, at unix time `at`, no later run can take the key `started_at`.
 fn key_settled(started_at: i64, at: i64) -> bool {
     at >= started_at.saturating_add(KEY_SETTLE_SECS)
@@ -479,6 +581,9 @@ enum PumpEnd {
     /// The replay is a later run with the same key than the stored one
     /// (the container is confirmed in the planned run). Nothing was stored.
     Diverged,
+    /// A follower was told to stop, or found the container out of its run;
+    /// it has wrapped up.
+    Ended,
 }
 
 /// Confirm that the container is in the run we planned for and in the
@@ -505,25 +610,19 @@ async fn progress_after_flush(run: &Run) -> Option<history::RunProgress> {
     .flatten()
 }
 
-/// Run `argv` (a `logs` replay), match it against stored run `seq` with
-/// `resume`, and persist what it keeps as rows of (`run`, `seq`).
-/// Output is held back until `verify_run` confirms the run, so a container
-/// that restarted since the poll can never put another run's lines under
-/// this run's key. Only stdout is the container's log; stderr is the CLI's
-/// own diagnostics. `follow`: `argv` is `logs -f` of a running container.
-async fn pump(
-    run: &Run,
-    seq: i64,
-    argv: &[&str],
-    mut resume: Resume,
-    follow: bool,
-) -> Result<PumpEnd> {
-    let mut child = runtime::spawn(argv)?;
+/// One-shot `logs` of a stopped container, for a catch-up: match it against
+/// stored run `seq` with `resume`, and persist what it keeps as rows of
+/// (`run`, `seq`). Output is held back until `verify_run` confirms the run,
+/// so a container that restarted since the poll can never put another run's
+/// lines under this run's key. Only stdout is the container's log; stderr is
+/// the CLI's own diagnostics.
+async fn pump(run: &Run, seq: i64, mut resume: Resume) -> Result<PumpEnd> {
+    let mut child = runtime::spawn(&["logs", run.id.as_str()])?;
     let stdout = child.stdout.take().context("no stdout")?;
     let mut stderr = child.stderr.take().context("no stderr")?;
     let mut out = BufReader::new(stdout);
 
-    let verify = verify_run(run, follow);
+    let verify = verify_run(run, false);
     tokio::pin!(verify);
     let mut verified = false;
     let mut diverged = false;
@@ -545,10 +644,9 @@ async fn pump(
         tokio::select! {
             r = out.read_until(b'\n', &mut raw) => {
                 let n = r?;
-                // `logs -f` output only ends when its process does; an
-                // unterminated last line may still grow, so a follower
-                // leaves it to the next read.
-                if !raw.is_empty() && (raw.ends_with(b"\n") || !follow) {
+                // The log of a stopped container is final: an unterminated
+                // last line is complete too.
+                if !raw.is_empty() {
                     let text = text_of(&raw);
                     match resume.next(text) {
                         Step::Skip => {}
@@ -608,23 +706,267 @@ async fn pump(
     })
 }
 
-async fn follow_task(run: Run, prev: Option<JoinHandle<()>>) -> Outcome {
+/// What the supervisor tells a follower (see "Restarts between polls").
+#[derive(Debug, Clone, Copy, Default)]
+struct FollowCtl {
+    /// A poll that began at this instant found the container still running
+    /// in the follower's run: every line read before then is the run's.
+    confirmed: Option<Instant>,
+    /// Stop following and wrap up.
+    stop: bool,
+}
+
+/// Rows a follower has read but not stored yet, oldest first, each with
+/// when it was read. A row is stored once a check that began after it was
+/// read has found the container still in the run (see "Restarts between
+/// polls"). Rows still held when the task is aborted (cgui quits, capture
+/// is switched off) are dropped; the run's log still has them, and the next
+/// follower replays them from the stored position.
+struct Unconfirmed {
+    run: Run,
+    seq: i64,
+    rows: VecDeque<(Instant, Vec<u8>)>,
+    /// Text bytes plus one per row.
+    size: usize,
+}
+
+impl Unconfirmed {
+    fn new(run: &Run, seq: i64) -> Self {
+        Unconfirmed {
+            run: run.clone(),
+            seq,
+            rows: VecDeque::new(),
+            size: 0,
+        }
+    }
+
+    fn push(&mut self, text: Vec<u8>) {
+        self.size += text.len() + 1;
+        self.rows.push_back((Instant::now(), text));
+    }
+
+    fn store_front(&mut self) {
+        if let Some((_, text)) = self.rows.pop_front() {
+            self.size -= text.len() + 1;
+            history::record_run_log(&self.run.id, self.run.started_at, self.seq, text);
+        }
+    }
+
+    /// Store every row read before `at`.
+    fn confirm(&mut self, at: Instant) {
+        while self.rows.front().is_some_and(|(t, _)| *t < at) {
+            self.store_front();
+        }
+    }
+
+    /// Store the first `n` rows and drop the rest.
+    fn keep_first(&mut self, n: usize) {
+        for _ in 0..n {
+            self.store_front();
+        }
+        self.rows.clear();
+        self.size = 0;
+    }
+}
+
+/// After a follower stops reading (told to, or its own check found the
+/// container out of its run), store the rows it holds that are its run's.
+/// If `inspect` still shows the run (stopped), that is all of them. If the
+/// container has moved on to a later run, the held rows are the run's last
+/// lines followed by what `logs -f` streamed on into: the beginning of the
+/// current log. Those are dropped (the new run's task stores them) and the
+/// rest stored. If neither can be told (no answer, container deleted), all
+/// are stored, as before this check.
+async fn wrap_up(run: &Run, un: &mut Unconfirmed) {
+    if un.rows.is_empty() {
+        return;
+    }
+    let rows: Vec<&[u8]> = un.rows.iter().map(|(_, t)| t.as_slice()).collect();
+    let keep = tokio::time::timeout(WRAP_UP_TIMEOUT, async {
+        let (_, started) = runtime::run_info(&run.id).await?;
+        if started == Some(run.started_at) {
+            return anyhow::Ok(rows.len());
+        }
+        let log = runtime::run_with_timeout(&["logs", run.id.as_str()], WRAP_UP_TIMEOUT).await?;
+        let now: Vec<u8> = log.into_iter().filter(|&b| b != b'\n').collect();
+        Ok(old_run_rows(&rows, &now))
+    })
+    .await;
+    let n = match keep {
+        Ok(Ok(n)) => n,
+        _ => un.rows.len(),
+    };
+    un.keep_first(n);
+}
+
+/// Resolves once the supervisor tells the follower to stop.
+async fn told_to_stop(ctl: &mut watch::Receiver<FollowCtl>) {
+    loop {
+        if ctl.borrow_and_update().stop {
+            return;
+        }
+        if ctl.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// `logs -f` of a running container, for a follower: like `pump`, but a
+/// row is stored only once confirmed (`Unconfirmed`), and the follower stops
+/// when the supervisor says so, then wraps up (`wrap_up`). `Ended`: it was
+/// told to stop, or found the container out of its run.
+async fn follow_pump(
+    run: &Run,
+    seq: i64,
+    mut resume: Resume,
+    ctl: &mut watch::Receiver<FollowCtl>,
+) -> Result<PumpEnd> {
+    if ctl.borrow().stop {
+        return Ok(PumpEnd::Ended);
+    }
+    let mut child = runtime::spawn(&["logs", "-f", run.id.as_str()])?;
+    let stdout = child.stdout.take().context("no stdout")?;
+    let mut stderr = child.stderr.take().context("no stderr")?;
+    let mut out = BufReader::new(stdout);
+
+    // Confirms the log just opened is this run's (a mismatch drops all).
+    let verify = verify_run(run, true);
+    tokio::pin!(verify);
+    let mut verified = false;
+    let mut un = Unconfirmed::new(run, seq);
+    // An `inspect` of our own, begun at the instant it holds.
+    type Check<'a> = (
+        Instant,
+        Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>>,
+    );
+    let mut check: Option<Check> = None;
+    let mut raw: Vec<u8> = Vec::new();
+    let mut err_tail: Vec<u8> = Vec::new();
+    let mut err_done = false;
+    let mut err_buf = [0u8; 1024];
+
+    enum Why {
+        Eof,
+        Ended,
+        Diverged,
+    }
+    let why = loop {
+        tokio::select! {
+            r = out.read_until(b'\n', &mut raw) => {
+                let n = r?;
+                // `logs -f` output only ends when its process does; an
+                // unterminated last line may still grow, so it is left to
+                // the next read.
+                if raw.ends_with(b"\n") {
+                    let text = text_of(&raw);
+                    match resume.next(text) {
+                        Step::Skip => {}
+                        Step::Keep(from) => {
+                            un.push(text[from..].to_vec());
+                            if un.size >= CONFIRM_SIZE && check.is_none() {
+                                check = Some((Instant::now(), Box::pin(verify_run(run, true))));
+                            }
+                        }
+                        Step::Diverged => break Why::Diverged,
+                    }
+                }
+                raw.clear();
+                if n == 0 {
+                    break Why::Eof;
+                }
+            }
+            r = stderr.read(&mut err_buf), if !err_done => match r {
+                Ok(0) | Err(_) => err_done = true,
+                Ok(k) => {
+                    err_tail.extend_from_slice(&err_buf[..k]);
+                    if err_tail.len() > 2048 {
+                        let cut = err_tail.len() - 2048;
+                        err_tail.drain(..cut);
+                    }
+                }
+            },
+            v = &mut verify, if !verified => {
+                if !v? {
+                    return Ok(PumpEnd::Mismatch);
+                }
+                verified = true;
+            }
+            c = ctl.changed() => {
+                let Ok(()) = c else { break Why::Ended };
+                let c = *ctl.borrow_and_update();
+                if let Some(at) = c.confirmed {
+                    un.confirm(at);
+                }
+                if c.stop {
+                    break Why::Ended;
+                }
+            }
+            v = async {
+                match check.as_mut() {
+                    Some((_, f)) => f.await,
+                    None => std::future::pending().await,
+                }
+            }, if check.is_some() => {
+                let at = check.take().map(|(t, _)| t).expect("check in flight");
+                if !v? {
+                    break Why::Ended; // the container left the run
+                }
+                un.confirm(at);
+            }
+        }
+    };
+    match why {
+        Why::Diverged => {
+            // Only while matching the stored text: nothing is held.
+            if !verified && !verify.await? {
+                return Ok(PumpEnd::Mismatch);
+            }
+            Ok(PumpEnd::Diverged) // the child is killed on drop
+        }
+        Why::Ended => {
+            drop(out);
+            drop(child); // stop reading: kills `logs -f`
+            wrap_up(run, &mut un).await;
+            Ok(PumpEnd::Ended)
+        }
+        Why::Eof => {
+            wrap_up(run, &mut un).await;
+            let mut rest = Vec::new();
+            let _ = stderr.read_to_end(&mut rest).await;
+            err_tail.extend_from_slice(&rest);
+            let status = child.wait().await?;
+            Ok(PumpEnd::Eof {
+                success: status.success(),
+                stderr: String::from_utf8_lossy(&err_tail).trim().to_string(),
+                short: false,
+            })
+        }
+    }
+}
+
+async fn follow_task(
+    run: Run,
+    prev: Option<JoinHandle<()>>,
+    mut ctl: watch::Receiver<FollowCtl>,
+) -> Outcome {
     if let Some(p) = prev {
-        let _ = p.await; // the previous task of this container is dead
+        let _ = p.await; // the previous task of this container is done
     }
     // Only open `logs -f` once no later run can take this key, or it could
     // stream on into such a run (see "Run identity").
-    tokio::time::sleep(settle_delay(run.started_at)).await;
+    tokio::select! {
+        _ = tokio::time::sleep(settle_delay(run.started_at)) => {}
+        _ = told_to_stop(&mut ctl) => return Outcome::Moved,
+    }
     for _ in 0..MAX_PASSES {
         let Some(progress) = progress_after_flush(&run).await else {
             return Outcome::Unavailable;
         };
-        let argv = ["logs", "-f", run.id.as_str()];
-        match pump(&run, progress.seq, &argv, Resume::new(&progress), true).await {
+        match follow_pump(&run, progress.seq, Resume::new(&progress), &mut ctl).await {
             // A later run with this key (the container was confirmed
             // running in it): store it as the next seq, from its first line.
             Ok(PumpEnd::Diverged) => history::start_run(&run.id, run.started_at, progress.seq + 1),
-            Ok(PumpEnd::Mismatch) => return Outcome::Moved,
+            Ok(PumpEnd::Mismatch) | Ok(PumpEnd::Ended) => return Outcome::Moved,
             Ok(PumpEnd::Eof {
                 success, stderr, ..
             }) => {
@@ -659,14 +1001,13 @@ async fn catchup_task(run: Run, prev: Option<JoinHandle<()>>, sem: Arc<Semaphore
             return Outcome::Unavailable;
         };
         let read_at = crate::timeutil::now_unix();
-        let argv = ["logs", run.id.as_str()];
-        let end = pump(&run, progress.seq, &argv, Resume::new(&progress), false).await;
+        let end = pump(&run, progress.seq, Resume::new(&progress)).await;
         // Act on what was read only if the container is still in the same,
         // stopped run after the read: a read that overlapped a start may
         // have seen the next run's log before `inspect` did.
         let later_run = match end {
             // Restarted/removed in the meantime.
-            Ok(PumpEnd::Mismatch) => return Outcome::Moved,
+            Ok(PumpEnd::Mismatch) | Ok(PumpEnd::Ended) => return Outcome::Moved,
             Ok(PumpEnd::Diverged) => true,
             Ok(PumpEnd::Eof {
                 success: true,
@@ -717,6 +1058,8 @@ struct Entry {
     run: Run,
     kind: Kind,
     handle: JoinHandle<()>,
+    /// Followers only: confirmations and the stop signal.
+    ctl: Option<watch::Sender<FollowCtl>>,
 }
 
 #[derive(Clone, Copy)]
@@ -730,7 +1073,8 @@ struct State {
     gen: u64,
     /// One task per container id.
     tasks: HashMap<String, Entry>,
-    /// Aborted tasks whose successor must wait for them to be gone.
+    /// Stopped tasks whose successor must wait for them to be gone:
+    /// aborted catch-ups, followers wrapping up.
     dying: HashMap<String, JoinHandle<()>>,
     caught_up: HashSet<Run>,
     fails: HashMap<(Run, Kind), Fail>,
@@ -774,11 +1118,14 @@ impl Supervisor {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Abort every task (kills their `logs` processes) and remember
-    /// nothing about them. The next `reconcile` starts fresh tasks that
-    /// resume from the DB.
+    /// Abort every task, followers wrapping up included (kills their
+    /// `logs` processes), and remember nothing about them. The next
+    /// `reconcile` starts fresh tasks that resume from the DB.
     pub fn stop_all(&self) {
         let mut st = self.lock();
+        for h in st.dying.values() {
+            h.abort();
+        }
         for (id, e) in st.tasks.drain().collect::<Vec<_>>() {
             e.handle.abort();
             st.dying.insert(id, e.handle);
@@ -806,9 +1153,10 @@ impl Supervisor {
         }
     }
 
-    /// Bring the tasks in line with the container list from this poll.
-    /// Cheap and synchronous; must run inside a tokio runtime.
-    pub fn reconcile(self: &Arc<Self>, containers: &[Container]) {
+    /// Bring the tasks in line with the container list from this poll,
+    /// whose listing began at `polled_at`. Cheap and synchronous; must run
+    /// inside a tokio runtime.
+    pub fn reconcile(self: &Arc<Self>, containers: &[Container], polled_at: Instant) {
         if !history::ready() {
             return;
         }
@@ -841,16 +1189,12 @@ impl Supervisor {
         let actions = plan(&obs, &active, &st.caught_up, &cooling, MAX_FOLLOWERS);
         for a in actions {
             match a {
-                Action::Stop(id) => {
-                    if let Some(e) = st.tasks.remove(&id) {
-                        e.handle.abort();
-                        st.dying.insert(id, e.handle);
-                    }
-                }
+                Action::Stop(id) => stop_task(&mut st, &id),
                 Action::Follow(run) => self.launch(&mut st, run, Kind::Follow),
                 Action::CatchUp(run) => self.launch(&mut st, run, Kind::CatchUp),
             }
         }
+        confirm_followers(&st.tasks, &obs, polled_at);
     }
 
     fn launch(self: &Arc<Self>, st: &mut State, run: Run, kind: Kind) {
@@ -859,11 +1203,12 @@ impl Supervisor {
         let prev = st.dying.remove(&run.id);
         let me = Arc::clone(self);
         let sem = Arc::clone(&self.catchups);
+        let (ctl, ctl_rx) = watch::channel(FollowCtl::default());
         let r2 = run.clone();
         let handle = tokio::spawn(async move {
             let started = Instant::now();
             let outcome = match kind {
-                Kind::Follow => follow_task(r2.clone(), prev).await,
+                Kind::Follow => follow_task(r2.clone(), prev, ctl_rx).await,
                 Kind::CatchUp => catchup_task(r2.clone(), prev, sem).await,
             };
             me.finish(gen, &r2, kind, outcome, started.elapsed());
@@ -875,6 +1220,7 @@ impl Supervisor {
                 run,
                 kind,
                 handle,
+                ctl: (kind == Kind::Follow).then_some(ctl),
             },
         );
     }
@@ -939,13 +1285,42 @@ impl Supervisor {
     }
 }
 
+/// Stop the task of container `id`. A follower is told to stop and wraps up
+/// first (see "Restarts between polls"); a catch-up is aborted. Either way
+/// its successor waits for it.
+fn stop_task(st: &mut State, id: &str) {
+    if let Some(e) = st.tasks.remove(id) {
+        match &e.ctl {
+            Some(ctl) => ctl.send_modify(|c| c.stop = true),
+            None => e.handle.abort(),
+        }
+        st.dying.insert(id.to_string(), e.handle);
+    }
+}
+
+/// Tell each follower whose container this poll found still running in its
+/// run that what it read before the poll began (`polled_at`) is the run's.
+fn confirm_followers(tasks: &HashMap<String, Entry>, obs: &[Obs], polled_at: Instant) {
+    let by_id: HashMap<&str, &Obs> = obs.iter().map(|o| (o.id.as_str(), o)).collect();
+    for e in tasks.values() {
+        let Some(ctl) = &e.ctl else { continue };
+        let same = by_id
+            .get(e.run.id.as_str())
+            .is_some_and(|o| o.running && o.started_at == Some(e.run.started_at));
+        if same {
+            ctl.send_modify(|c| c.confirmed = Some(polled_at));
+        }
+    }
+}
+
 // ─── App-wide instance ────────────────────────────────────────────────
 
 static SUPERVISOR: LazyLock<Arc<Supervisor>> = LazyLock::new(|| Arc::new(Supervisor::new()));
 
-/// Called from the poll tick with the list it just fetched.
-pub fn reconcile(containers: &[Container]) {
-    SUPERVISOR.reconcile(containers);
+/// Called from the poll tick with the list it just fetched; `polled_at`:
+/// when that listing began.
+pub fn reconcile(containers: &[Container], polled_at: Instant) {
+    SUPERVISOR.reconcile(containers, polled_at);
 }
 
 /// Apply the "Save container logs in the background" setting live.
@@ -1694,6 +2069,7 @@ mod tests {
                 run: Run::new("a", 1),
                 kind: Kind::Follow,
                 handle: h,
+                ctl: None,
             },
         );
         assert_eq!(sup.status().followers, 1);
@@ -1750,6 +2126,141 @@ mod tests {
         let r2 = Run::new("b", 2);
         sup.finish(11, &r2, Kind::CatchUp, Outcome::Done, Duration::ZERO);
         assert!(sup.lock().caught_up.contains(&r2));
+    }
+
+    // ── Restarts between polls ──
+
+    fn split(rows: &[&str], now: &str) -> usize {
+        let rows: Vec<&[u8]> = rows.iter().map(|r| r.as_bytes()).collect();
+        old_run_rows(&rows, now.as_bytes())
+    }
+
+    #[test]
+    fn the_new_runs_first_lines_are_found_at_the_end_of_the_held_rows() {
+        // The old run's last lines (a shutdown message), then what
+        // `logs -f` streamed on into: the new run's first lines.
+        assert_eq!(split(&["n57", "n58", "bye", "n1", "n2"], "n1n2n3"), 3);
+        // Nothing of the new run was read yet.
+        assert_eq!(split(&["n57", "bye"], "n1n2"), 2);
+        // Only the new run's lines.
+        assert_eq!(split(&["n1", "n2"], "n1n2n3"), 0);
+        // The new run's log is empty so far.
+        assert_eq!(split(&["a", "b"], ""), 2);
+    }
+
+    #[test]
+    fn split_lines_on_either_side_are_matched_by_text() {
+        // Old "abc" streamed as "ab" + "c", new "xyz" as "xy" + "z".
+        assert_eq!(split(&["ab", "c", "xy", "z"], "xyzw"), 2);
+    }
+
+    #[test]
+    fn the_new_run_starts_at_a_held_row_never_inside_one() {
+        // "xy" ends the held text and begins the new log, but it would
+        // start inside "qx": not the new run's.
+        assert_eq!(split(&["qx", "y"], "xyz"), 2);
+        // The longest match starts inside "xa"; a shorter one ("ab") starts
+        // at a row, so that is where the new run begins.
+        assert_eq!(split(&["xa", "b", "ab"], "ababab"), 2);
+    }
+
+    #[test]
+    fn blank_rows_at_the_cut_stay_with_the_old_run() {
+        assert_eq!(split(&["a", "", "n1"], "n1n2"), 2);
+    }
+
+    #[test]
+    fn identical_text_on_both_sides_is_taken_as_the_new_runs() {
+        // The documented limit: 3 old "tick" lines, then 1 new; the new
+        // run's log has 2 by the time it is read. The longest match is
+        // taken, so one old "tick" counts as the new run's: it is stored
+        // once (under the new run) rather than twice.
+        assert_eq!(split(&["tick", "tick", "tick", "tick"], "ticktick"), 2);
+    }
+
+    #[test]
+    fn held_rows_are_stored_once_a_check_begun_after_them_confirms_them() {
+        let mut un = Unconfirmed::new(&Run::new("a", 1), 0);
+        un.push(b"x".to_vec());
+        std::thread::sleep(Duration::from_millis(2));
+        let check_began = Instant::now();
+        std::thread::sleep(Duration::from_millis(2));
+        un.push(b"yz".to_vec());
+        un.confirm(check_began);
+        let left: Vec<&[u8]> = un.rows.iter().map(|(_, t)| t.as_slice()).collect();
+        assert_eq!(left, [b"yz".as_slice()], "read after the check began");
+        assert_eq!(un.size, 3);
+        un.keep_first(0);
+        assert!(un.rows.is_empty());
+        assert_eq!(un.size, 0);
+    }
+
+    fn sleeper() -> JoinHandle<()> {
+        tokio::spawn(async { tokio::time::sleep(Duration::from_secs(3600)).await })
+    }
+
+    fn entry(run: Run, kind: Kind, ctl: Option<watch::Sender<FollowCtl>>) -> Entry {
+        Entry {
+            gen: 1,
+            run,
+            kind,
+            handle: sleeper(),
+            ctl,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stopped_follower_is_told_to_wrap_up_not_killed() {
+        let sup = Supervisor::new();
+        let (tx, rx) = watch::channel(FollowCtl::default());
+        let (f, c);
+        {
+            let mut st = sup.lock();
+            st.tasks
+                .insert("a".into(), entry(Run::new("a", 1), Kind::Follow, Some(tx)));
+            st.tasks
+                .insert("b".into(), entry(Run::new("b", 1), Kind::CatchUp, None));
+            f = st.tasks["a"].handle.abort_handle();
+            c = st.tasks["b"].handle.abort_handle();
+            stop_task(&mut st, "a");
+            stop_task(&mut st, "b");
+            assert!(st.tasks.is_empty());
+            assert_eq!(st.dying.len(), 2, "successors wait for both");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(rx.borrow().stop, "the follower was told to stop");
+        assert!(!f.is_finished(), "and left to wrap up");
+        assert!(c.is_finished(), "a catch-up is aborted");
+        // Quitting does not wait for a wrap-up.
+        sup.stop_all();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(f.is_finished());
+    }
+
+    #[tokio::test]
+    async fn a_poll_confirms_only_followers_still_in_their_run() {
+        let mut tasks = HashMap::new();
+        let mut rxs = Vec::new();
+        for id in ["same", "restarted", "stopped", "gone"] {
+            let (tx, rx) = watch::channel(FollowCtl::default());
+            tasks.insert(
+                id.to_string(),
+                entry(Run::new(id, 10), Kind::Follow, Some(tx)),
+            );
+            rxs.push(rx);
+        }
+        let obs = [
+            o("same", true, Some(10)),
+            o("restarted", true, Some(12)),
+            o("stopped", false, Some(10)),
+        ];
+        let at = Instant::now();
+        confirm_followers(&tasks, &obs, at);
+        let got: Vec<Option<Instant>> = rxs.iter().map(|r| r.borrow().confirmed).collect();
+        assert_eq!(got, [Some(at), None, None, None]);
+        for e in tasks.values() {
+            e.handle.abort();
+        }
     }
 
     #[test]
