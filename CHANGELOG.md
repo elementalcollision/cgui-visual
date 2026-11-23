@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Logs header shows when a stream has ended.** It kept showing the
+  pulsing green "follow" after the stream ended; it now shows a grey dot and
+  why — "ended", "container stopped", "container removed", or "not live"
+  when the stream couldn't start — even if the view was paused.
+
 ## [0.7.2] — 2026-11-23
 
 ### Fixed

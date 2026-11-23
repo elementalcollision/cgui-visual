@@ -890,6 +890,15 @@ type LogLevel = 'all' | 'info' | 'warn' | 'error';
 
 export { stripAnsi };
 
+// End-of-stream markers sent by the backend (MARKER_* in
+// app/src-tauri/src/logstreams.rs); one is always a display stream's last
+// line. Maps each to the short state shown in the Logs header.
+export const LOG_STREAM_END_MARKERS: Record<string, string> = {
+  '[follow ended]': 'ended',
+  '[container removed — log stream ended]': 'container removed',
+  '[container stopped — log stream ended]': 'container stopped',
+};
+
 export function LogsView({ t, target }: { t: ThemeTokens; target?: string }) {
   const [lines, setLines] = useState<string[]>([]);
   const [paused, setPaused] = useState(false);
@@ -902,6 +911,9 @@ export function LogsView({ t, target }: { t: ThemeTokens; target?: string }) {
   // replays on attach (0 = everything).
   const [bootLog, setBootLog] = useState(false);
   const [tail, setTail] = useState(0);
+  // Why the current stream is no longer live (null while it is). Set from
+  // the backend's end marker, or when the stream couldn't start at all.
+  const [ended, setEnded] = useState<string | null>(null);
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
 
@@ -909,14 +921,26 @@ export function LogsView({ t, target }: { t: ThemeTokens; target?: string }) {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
     setLines([]);
+    setEnded(null);
     // Each effect run owns one stream id: events arrive on a per-stream
     // channel and the cleanup kills the backend child, so switching
     // container / toggling boot or tail never leaves an old follower
     // feeding this view.
     const streamId = newStreamId();
-    const listening = api.onLogLine(streamId, line => {
-      if (cancelled || pausedRef.current) return;
+    const append = (line: string) =>
       setLines(prev => prev.length >= LOG_BUFFER_MAX ? [...prev.slice(-LOG_BUFFER_MAX + 1), line] : [...prev, line]);
+    const listening = api.onLogLine(streamId, line => {
+      if (cancelled) return;
+      // The end marker is always the stream's last line: record it (and show
+      // it) even while paused, so the header stops claiming "follow".
+      const reason = LOG_STREAM_END_MARKERS[line];
+      if (reason) {
+        setEnded(reason);
+        append(line);
+        return;
+      }
+      if (pausedRef.current) return;
+      append(line);
     }).then(fn => { if (cancelled) fn(); else unlisten = fn; });
     let started: Promise<unknown> | null = null;
     if (target) {
@@ -930,6 +954,7 @@ export function LogsView({ t, target }: { t: ThemeTokens; target?: string }) {
         .then(() => api.startLogStream(streamId, target, { boot: bootLog, tail: tail || undefined }))
         .catch(e => {
           console.warn('start_log_stream failed', e);
+          if (!cancelled) setEnded('not live');
           if (bootLog) return;
           return api.loadLogs(target, 500).then(rows => {
             if (!cancelled && rows.length) setLines(rows.map(r => r.line));
@@ -992,8 +1017,8 @@ export function LogsView({ t, target }: { t: ThemeTokens; target?: string }) {
   return (
     <div style={{ flex: 1, overflow: 'auto', background: t.surface, padding: 0 }}>
       <div style={{ padding: '10px 20px', display: 'flex', alignItems: 'center', gap: 10, borderBottom: `1px solid ${t.border}`, background: t.surface, position: 'sticky', top: 0, flexWrap: 'wrap' }}>
-        <span style={{ width: 8, height: 8, borderRadius: '50%', background: paused ? t.fg3 : t.success, animation: paused ? 'none' : 'pulse 1.5s ease-in-out infinite' }} />
-        <span style={{ fontSize: 12, fontFamily: t.mono, color: t.fg1 }}>{paused ? 'paused' : 'follow'}</span>
+        <span style={{ width: 8, height: 8, borderRadius: '50%', background: ended || paused ? t.fg3 : t.success, animation: ended || paused ? 'none' : 'pulse 1.5s ease-in-out infinite' }} />
+        <span data-testid="log-stream-state" style={{ fontSize: 12, fontFamily: t.mono, color: ended ? t.fg3 : t.fg1 }}>{ended ?? (paused ? 'paused' : 'follow')}</span>
         <span style={{ color: t.fg3, fontSize: 12, fontFamily: t.mono }}>· {target ?? 'all sources'} · {visible.length}/{lines.length} lines</span>
         <span style={{ width: 1, height: 18, background: t.border, margin: '0 4px' }} />
         {levelPill('error', 'ERROR', t.danger)}

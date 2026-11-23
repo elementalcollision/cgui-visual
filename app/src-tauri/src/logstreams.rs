@@ -24,6 +24,8 @@ use tokio::task::AbortHandle;
 /// in tests).
 pub type Emit = Arc<dyn Fn(String) + Send + Sync>;
 
+// Keep in sync with LOG_STREAM_END_MARKERS in app/src/views.tsx, which
+// turns these into the Logs header state.
 pub const MARKER_FOLLOW_ENDED: &str = "[follow ended]";
 pub const MARKER_REMOVED: &str = "[container removed — log stream ended]";
 pub const MARKER_STOPPED: &str = "[container stopped — log stream ended]";
