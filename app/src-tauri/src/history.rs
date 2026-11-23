@@ -195,6 +195,27 @@ fn open_with_schema(path: &std::path::Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Current shape of `log_runs` (see `migrate`).
+const LOG_RUNS_SCHEMA: &str = r#"
+    CREATE TABLE IF NOT EXISTS log_runs (
+        container_id    TEXT    NOT NULL,
+        started_at      INTEGER NOT NULL,
+        seq             INTEGER NOT NULL DEFAULT 0,
+        persisted_lines INTEGER NOT NULL DEFAULT 0,
+        complete        INTEGER NOT NULL DEFAULT 0,
+        recheck         INTEGER NOT NULL DEFAULT 0,
+        updated_at      INTEGER NOT NULL DEFAULT 0,
+        digest          INTEGER,
+        checkpoints     BLOB,
+        PRIMARY KEY (container_id, started_at, seq)
+    );
+"#;
+
+fn has_column(conn: &Connection, table: &str, col: &str) -> rusqlite::Result<bool> {
+    conn.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?
+        .exists(params![table, col])
+}
+
 /// Idempotent upgrades of databases written by older builds.
 ///
 /// v0.7.1 adds per-run bookkeeping for background log capture:
@@ -202,25 +223,41 @@ fn open_with_schema(path: &std::path::Path) -> Result<Connection> {
 ///     Rows written by v0.7.0 and earlier keep NULL.
 ///   * `log_runs`: one row per (container, run) holding how many lines of
 ///     that run's stdio log have been persisted (see `write_log_batch`).
+///
+/// Later, runs that share a start second are told apart:
+///   * `seq` (in both tables): which of the runs with the same
+///     (container, start second) the row belongs to, 0 for the first.
+///     Existing rows become seq 0. `log_runs` is rebuilt for its new
+///     primary key, keeping every row.
+///   * `log_runs.digest` / `checkpoints`: a fingerprint of the persisted
+///     lines (see `RunDigest`). NULL for rows saved before fingerprints:
+///     those runs are resumed by count alone, as before.
+///   * `log_runs.recheck`: see `RunProgress::recheck`.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
-    let has_col: bool = conn
-        .prepare("SELECT 1 FROM pragma_table_info('container_logs') WHERE name = 'started_at'")?
-        .exists([])?;
-    if !has_col {
+    if !has_column(conn, "container_logs", "started_at")? {
         conn.execute_batch("ALTER TABLE container_logs ADD COLUMN started_at INTEGER;")?;
     }
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS log_runs (
-            container_id    TEXT    NOT NULL,
-            started_at      INTEGER NOT NULL,
-            persisted_lines INTEGER NOT NULL DEFAULT 0,
-            complete        INTEGER NOT NULL DEFAULT 0,
-            updated_at      INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (container_id, started_at)
-        );
-        "#,
-    )
+    if !has_column(conn, "container_logs", "seq")? {
+        conn.execute_batch(
+            "ALTER TABLE container_logs ADD COLUMN seq INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    conn.execute_batch(LOG_RUNS_SCHEMA)?;
+    if !has_column(conn, "log_runs", "seq")? {
+        // A v0.7.1 table: SQLite cannot change a primary key in place.
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(&format!(
+            "ALTER TABLE log_runs RENAME TO log_runs_v071;
+             {LOG_RUNS_SCHEMA}
+             INSERT INTO log_runs
+                 (container_id, started_at, seq, persisted_lines, complete, updated_at)
+             SELECT container_id, started_at, 0, persisted_lines, complete, updated_at
+             FROM log_runs_v071;
+             DROP TABLE log_runs_v071;"
+        ))?;
+        tx.commit()?;
+    }
+    Ok(())
 }
 
 /// Cap on persisted log lines per container. Avoids the DB ballooning
@@ -506,6 +543,8 @@ pub struct LogRow {
     /// Start time (unix seconds) of the run the line belongs to; `None`
     /// for lines not tied to a run (they are stored but never counted).
     pub started_at: Option<i64>,
+    /// Which run of those sharing `started_at` (see `RunProgress::seq`).
+    pub seq: i64,
     pub ts: i64,
     pub line: String,
 }
@@ -515,11 +554,88 @@ pub struct LogRow {
 enum LogOp {
     Row(LogRow),
     /// The run's log was read to its end (the container is stopped), so a
-    /// catch-up is not needed again.
+    /// catch-up is not needed again (unless `recheck`).
     Complete {
         container_id: String,
         started_at: i64,
+        seq: i64,
+        recheck: bool,
     },
+    /// Open run `seq` of this start second, with no lines yet: the CLI's
+    /// log turned out to be a later run than the one stored as `seq - 1`.
+    NewRun {
+        container_id: String,
+        started_at: i64,
+        seq: i64,
+    },
+}
+
+/// FNV-1a 64 offset basis: the digest of a run with no lines.
+const DIGEST_SEED: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// Fingerprint of the first `lines` lines of a run, used to check that a
+/// replay of the CLI's log really is the run we stored (and not a later run
+/// that started in the same second, see `logpersist`).
+///
+/// `hash` is FNV-1a 64 over the lines, each followed by `\n` (a line never
+/// contains `\n`, so different line sequences hash different bytes). It is
+/// stored in the DB, so it must never change. `checkpoints[i]` is `hash`
+/// as it was after the first 2^i lines: a replay that differs from the
+/// stored run at line d is caught by line 2d, not only at line `lines`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunDigest {
+    pub lines: i64,
+    pub hash: u64,
+    pub checkpoints: Vec<u64>,
+}
+
+impl Default for RunDigest {
+    fn default() -> Self {
+        RunDigest {
+            lines: 0,
+            hash: DIGEST_SEED,
+            checkpoints: Vec::new(),
+        }
+    }
+}
+
+impl RunDigest {
+    pub fn push(&mut self, line: &str) {
+        for &b in line.as_bytes().iter().chain(b"\n") {
+            self.hash ^= u64::from(b);
+            self.hash = self.hash.wrapping_mul(FNV_PRIME);
+        }
+        self.lines += 1;
+        if (self.lines as u64).is_power_of_two() {
+            self.checkpoints.push(self.hash);
+        }
+    }
+
+    fn checkpoints_blob(&self) -> Vec<u8> {
+        self.checkpoints
+            .iter()
+            .flat_map(|c| c.to_le_bytes())
+            .collect()
+    }
+
+    /// Rebuild from DB columns; `None` when there is nothing to rebuild
+    /// from (a run saved before fingerprints existed).
+    fn from_db(lines: i64, digest: Option<i64>, blob: Option<Vec<u8>>) -> Option<Self> {
+        match digest {
+            Some(d) => Some(RunDigest {
+                lines,
+                hash: d as u64,
+                checkpoints: blob
+                    .unwrap_or_default()
+                    .chunks_exact(8)
+                    .map(|c| u64::from_le_bytes(c.try_into().expect("8-byte chunk")))
+                    .collect(),
+            }),
+            None if lines == 0 => Some(RunDigest::default()),
+            None => None,
+        }
+    }
 }
 
 enum LogMsg {
@@ -548,25 +664,39 @@ fn log_sender() -> Option<&'static mpsc::Sender<LogMsg>> {
     LOG_TX.get()
 }
 
-/// Queue a log line of run (`container_id`, `started_at`) for persistence.
-/// Best-effort and non-blocking — silently no-ops when the DB isn't
-/// initialised. A single writer thread batches lines (≤ LOG_BATCH_MAX or
-/// LOG_BATCH_WINDOW) into one transaction, so a chatty container can't
+/// Queue a log line of run (`container_id`, `started_at`, `seq`) for
+/// persistence. Best-effort and non-blocking — silently no-ops when the DB
+/// isn't initialised. A single writer thread batches lines (≤ LOG_BATCH_MAX
+/// or LOG_BATCH_WINDOW) into one transaction, so a chatty container can't
 /// starve the 2 s metrics `record`.
-pub fn record_run_log(container_id: &str, started_at: i64, line: &str) {
+pub fn record_run_log(container_id: &str, started_at: i64, seq: i64, line: &str) {
     queue(LogOp::Row(LogRow {
         container_id: container_id.to_string(),
         started_at: Some(started_at),
+        seq,
         ts: crate::timeutil::now_unix(),
         line: line.to_string(),
     }));
 }
 
-/// Record that the run's log has been read to the end.
-pub fn mark_run_complete(container_id: &str, started_at: i64) {
+/// Record that the run's log has been read to the end. `recheck`: the read
+/// began before the run's start second was over (see `RunProgress`).
+pub fn mark_run_complete(container_id: &str, started_at: i64, seq: i64, recheck: bool) {
     queue(LogOp::Complete {
         container_id: container_id.to_string(),
         started_at,
+        seq,
+        recheck,
+    });
+}
+
+/// Open run `seq` of (`container_id`, `started_at`) with no lines yet, so
+/// that `run_progress` reports it from now on.
+pub fn start_run(container_id: &str, started_at: i64, seq: i64) {
+    queue(LogOp::NewRun {
+        container_id: container_id.to_string(),
+        started_at,
+        seq,
     });
 }
 
@@ -590,21 +720,66 @@ pub fn flush_logs() {
 }
 
 /// How much of one run's log is already stored.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunProgress {
+    /// Runs of one container that share a start second are stored as
+    /// seq 0, 1, … in the order they ran.
+    pub seq: i64,
     /// Lines of the run's stdio log that have been persisted (see
     /// `write_log_batch` for exactly what that counts).
     pub persisted_lines: i64,
     /// The log was read to its end after the container stopped.
     pub complete: bool,
+    /// `complete`, but the read that completed it began while a later run
+    /// could still start in the same second (and so share this key). Such
+    /// a run is read once more after that second (see `logpersist`).
+    pub recheck: bool,
+    /// Fingerprint of the persisted lines; `None` for a run saved before
+    /// fingerprints existed.
+    pub digest: Option<RunDigest>,
 }
 
-/// Progress for one run; a run never seen before is `RunProgress::default()`.
-/// `None` when the DB isn't initialised. Callers that just stopped a writer
-/// should `flush_logs()` first so queued lines are reflected.
+impl Default for RunProgress {
+    fn default() -> Self {
+        RunProgress {
+            seq: 0,
+            persisted_lines: 0,
+            complete: false,
+            recheck: false,
+            digest: Some(RunDigest::default()),
+        }
+    }
+}
+
+/// Progress for the latest run (highest seq) of this container and start
+/// second; a run never seen before is `RunProgress::default()`. `None` when
+/// the DB isn't initialised. Callers that just stopped a writer should
+/// `flush_logs()` first so queued lines are reflected.
 pub fn run_progress(container_id: &str, started_at: i64) -> Option<RunProgress> {
     let conn = DB.get()?.lock().ok()?;
     run_progress_conn(&conn, container_id, started_at).ok()
+}
+
+/// Every stored run of this container and start second, oldest first.
+pub fn runs_at(container_id: &str, started_at: i64) -> Vec<RunProgress> {
+    let Some(conn) = DB.get().and_then(|db| db.lock().ok()) else {
+        return vec![];
+    };
+    runs_at_conn(&conn, container_id, started_at).unwrap_or_default()
+}
+
+const RUN_COLUMNS: &str =
+    "seq, persisted_lines, complete, recheck, digest, checkpoints FROM log_runs";
+
+fn run_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunProgress> {
+    let persisted_lines: i64 = r.get(1)?;
+    Ok(RunProgress {
+        seq: r.get(0)?,
+        persisted_lines,
+        complete: r.get::<_, i64>(2)? != 0,
+        recheck: r.get::<_, i64>(3)? != 0,
+        digest: RunDigest::from_db(persisted_lines, r.get(4)?, r.get(5)?),
+    })
 }
 
 fn run_progress_conn(
@@ -613,17 +788,46 @@ fn run_progress_conn(
     started_at: i64,
 ) -> rusqlite::Result<RunProgress> {
     let row = conn.query_row(
-        "SELECT persisted_lines, complete FROM log_runs
-         WHERE container_id = ? AND started_at = ?",
+        &format!(
+            "SELECT {RUN_COLUMNS} WHERE container_id = ? AND started_at = ?
+             ORDER BY seq DESC LIMIT 1"
+        ),
         params![container_id, started_at],
-        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? != 0)),
+        run_from_row,
     );
     match row {
-        Ok((persisted_lines, complete)) => Ok(RunProgress {
-            persisted_lines,
-            complete,
-        }),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(RunProgress::default()),
+        other => other,
+    }
+}
+
+fn runs_at_conn(
+    conn: &Connection,
+    container_id: &str,
+    started_at: i64,
+) -> rusqlite::Result<Vec<RunProgress>> {
+    let mut st = conn.prepare(&format!(
+        "SELECT {RUN_COLUMNS} WHERE container_id = ? AND started_at = ? ORDER BY seq"
+    ))?;
+    let rows = st.query_map(params![container_id, started_at], run_from_row)?;
+    rows.collect()
+}
+
+/// State of run `(cid, started_at, seq)` inside a writer transaction.
+fn load_run(
+    tx: &Connection,
+    cid: &str,
+    started_at: i64,
+    seq: i64,
+) -> rusqlite::Result<(i64, Option<RunDigest>)> {
+    let row = tx.query_row(
+        &format!("SELECT {RUN_COLUMNS} WHERE container_id = ? AND started_at = ? AND seq = ?"),
+        params![cid, started_at, seq],
+        run_from_row,
+    );
+    match row {
+        Ok(p) => Ok((p.persisted_lines, p.digest)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok((0, Some(RunDigest::default()))),
         Err(e) => Err(e),
     }
 }
@@ -680,24 +884,27 @@ fn log_writer_loop(rx: mpsc::Receiver<LogMsg>) {
     }
 }
 
-/// Apply `batch` in ONE transaction: insert the rows, bump the per-run
-/// `log_runs.persisted_lines` by the number of rows inserted for each run,
-/// set `complete` flags, then trim any container whose (approximate,
-/// in-memory) row count exceeds cap + slack.
+/// Apply `batch` in ONE transaction: insert the rows, advance each run's
+/// `log_runs.persisted_lines` and fingerprint (`digest`, `checkpoints`) by
+/// the rows inserted for it, open new runs, set `complete` flags, then trim
+/// any container whose (approximate, in-memory) row count exceeds cap +
+/// slack.
 ///
-/// Rows and counters commit or roll back together, so after a crash
-/// `persisted_lines` is exactly the number of lines of that run the
-/// follower had delivered to the DB; a follower resuming from it (see
-/// `logpersist`) neither loses nor repeats a line.
+/// Rows, counters and fingerprints commit or roll back together, so after
+/// a crash `persisted_lines` is exactly the number of lines of that run the
+/// follower had delivered to the DB, and the fingerprint is that of exactly
+/// those lines; a follower resuming from it (see `logpersist`) neither
+/// loses nor repeats a line.
 ///
 /// `persisted_lines` counts lines SEEN for the run, not rows currently
 /// stored: trimming (per-container row cap) and age-based GC delete rows
-/// but never touch the counter, because the counter is an offset into the
-/// CLI's append-only log, which does not shrink when we drop old rows.
+/// but never touch the counter or the fingerprint, because both describe a
+/// prefix of the CLI's append-only log, which does not shrink when we drop
+/// old rows.
 ///
 /// Row counts are seeded with one COUNT(*) the first time a container is
-/// seen, so the steady state is a plain batched INSERT with no per-line
-/// query.
+/// seen, so the steady state is a batched INSERT plus one lookup and one
+/// upsert per run per batch.
 fn write_log_batch(
     conn: &mut Connection,
     batch: &[LogOp],
@@ -706,11 +913,12 @@ fn write_log_batch(
     let tx = conn.transaction()?;
     let now = crate::timeutil::now_unix();
     let mut touched: Vec<&str> = Vec::new();
-    let mut per_run: HashMap<(&str, i64), i64> = HashMap::new();
+    // (container, start, seq) -> (persisted_lines, fingerprint)
+    let mut runs: HashMap<(&str, i64, i64), (i64, Option<RunDigest>)> = HashMap::new();
     {
         let mut ins = tx.prepare_cached(
-            "INSERT INTO container_logs (container_id, ts, line, started_at)
-             VALUES (?, ?, ?, ?)",
+            "INSERT INTO container_logs (container_id, ts, line, started_at, seq)
+             VALUES (?, ?, ?, ?, ?)",
         )?;
         for op in batch {
             let LogOp::Row(r) = op else { continue };
@@ -723,7 +931,7 @@ fn write_log_batch(
                 )?;
                 counts.insert(cid.clone(), n);
             }
-            ins.execute(params![cid, r.ts, r.line, r.started_at])?;
+            ins.execute(params![cid, r.ts, r.line, r.started_at, r.seq])?;
             if let Some(c) = counts.get_mut(cid) {
                 *c += 1;
             }
@@ -731,35 +939,79 @@ fn write_log_batch(
                 touched.push(cid);
             }
             if let Some(s) = r.started_at {
-                *per_run.entry((cid.as_str(), s)).or_insert(0) += 1;
+                let (n, digest) = match runs.entry((cid.as_str(), s, r.seq)) {
+                    std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(load_run(&tx, cid, s, r.seq)?)
+                    }
+                };
+                *n += 1;
+                // A run saved before fingerprints stays without one.
+                if let Some(d) = digest {
+                    d.push(&r.line);
+                }
             }
         }
     }
-    for ((cid, s), n) in &per_run {
+    for ((cid, s, seq), (n, digest)) in &runs {
+        let (hash, blob) = match digest {
+            Some(d) => (Some(d.hash as i64), Some(d.checkpoints_blob())),
+            None => (None, None),
+        };
         tx.execute(
-            "INSERT INTO log_runs (container_id, started_at, persisted_lines, updated_at)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (container_id, started_at) DO UPDATE SET
-                 persisted_lines = persisted_lines + excluded.persisted_lines,
-                 updated_at = excluded.updated_at",
-            params![cid, s, n, now],
+            "INSERT INTO log_runs
+                 (container_id, started_at, seq, persisted_lines, updated_at, digest, checkpoints)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT (container_id, started_at, seq) DO UPDATE SET
+                 persisted_lines = excluded.persisted_lines,
+                 updated_at = excluded.updated_at,
+                 digest = excluded.digest,
+                 checkpoints = excluded.checkpoints",
+            params![cid, s, seq, n, now, hash, blob],
         )?;
     }
-    // Completes come after the rows of their run in queue order, so
-    // applying them after the inserts above is equivalent.
+    // A run's NewRun comes before its rows and its Complete after them in
+    // queue order; applying both after the inserts above is equivalent (an
+    // existing row is left alone by NewRun).
+    let empty = RunDigest::default().hash as i64;
     for op in batch {
-        if let LogOp::Complete {
-            container_id,
-            started_at,
-        } = op
-        {
-            tx.execute(
-                "INSERT INTO log_runs (container_id, started_at, complete, updated_at)
-                 VALUES (?1, ?2, 1, ?3)
-                 ON CONFLICT (container_id, started_at) DO UPDATE SET
-                     complete = 1, updated_at = excluded.updated_at",
-                params![container_id, started_at, now],
-            )?;
+        match op {
+            LogOp::Row(_) => {}
+            LogOp::NewRun {
+                container_id,
+                started_at,
+                seq,
+            } => {
+                tx.execute(
+                    "INSERT OR IGNORE INTO log_runs
+                         (container_id, started_at, seq, updated_at, digest)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![container_id, started_at, seq, now, empty],
+                )?;
+                // The later run was found: nothing earlier needs a recheck.
+                tx.execute(
+                    "UPDATE log_runs SET recheck = 0
+                     WHERE container_id = ?1 AND started_at = ?2 AND seq < ?3",
+                    params![container_id, started_at, seq],
+                )?;
+            }
+            LogOp::Complete {
+                container_id,
+                started_at,
+                seq,
+                recheck,
+            } => {
+                tx.execute(
+                    "INSERT INTO log_runs
+                         (container_id, started_at, seq, complete, recheck, updated_at, digest)
+                     VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6)
+                     ON CONFLICT (container_id, started_at, seq) DO UPDATE SET
+                         complete = 1,
+                         recheck = excluded.recheck,
+                         updated_at = excluded.updated_at",
+                    params![container_id, started_at, seq, recheck, now, empty],
+                )?;
+            }
         }
     }
     for cid in touched {
@@ -958,16 +1210,38 @@ mod tests {
     }
 
     fn run_batch(cid: &str, run: Option<i64>, from: usize, n: usize) -> Vec<LogOp> {
+        seq_batch(cid, run, 0, from, n)
+    }
+
+    fn seq_batch(cid: &str, run: Option<i64>, seq: i64, from: usize, n: usize) -> Vec<LogOp> {
         (from..from + n)
             .map(|i| {
                 LogOp::Row(LogRow {
                     container_id: cid.to_string(),
                     started_at: run,
+                    seq,
                     ts: 1,
                     line: format!("l{i}"),
                 })
             })
             .collect()
+    }
+
+    fn digest_of(lines: impl IntoIterator<Item = String>) -> RunDigest {
+        let mut d = RunDigest::default();
+        for l in lines {
+            d.push(&l);
+        }
+        d
+    }
+
+    fn complete(cid: &str, started_at: i64, seq: i64, recheck: bool) -> LogOp {
+        LogOp::Complete {
+            container_id: cid.into(),
+            started_at,
+            seq,
+            recheck,
+        }
     }
 
     fn progress(conn: &Connection, cid: &str, run: i64) -> RunProgress {
@@ -1077,29 +1351,180 @@ mod tests {
         let mut conn = logs_conn();
         let mut counts = HashMap::new();
         let mut b = run_batch("a", Some(5), 0, 2);
-        b.push(LogOp::Complete {
-            container_id: "a".into(),
-            started_at: 5,
-        });
-        b.push(LogOp::Complete {
-            container_id: "quiet".into(),
-            started_at: 9,
-        });
+        b.push(complete("a", 5, 0, false));
+        b.push(complete("quiet", 9, 0, false));
         write_log_batch(&mut conn, &b, &mut counts).unwrap();
-        assert_eq!(
-            progress(&conn, "a", 5),
-            RunProgress {
-                persisted_lines: 2,
-                complete: true
-            }
-        );
+        let a = progress(&conn, "a", 5);
+        assert_eq!((a.persisted_lines, a.complete, a.recheck), (2, true, false));
+        assert_eq!(a.digest, Some(digest_of(["l0".into(), "l1".into()])));
         assert_eq!(
             progress(&conn, "quiet", 9),
             RunProgress {
-                persisted_lines: 0,
-                complete: true
-            }
+                complete: true,
+                ..RunProgress::default()
+            },
+            "an empty run has the empty fingerprint"
         );
+    }
+
+    #[test]
+    fn recheck_is_stored_with_complete_and_cleared_by_a_later_complete() {
+        let mut conn = logs_conn();
+        let mut counts = HashMap::new();
+        let mut b = run_batch("a", Some(5), 0, 3);
+        b.push(complete("a", 5, 0, true));
+        write_log_batch(&mut conn, &b, &mut counts).unwrap();
+        let p = progress(&conn, "a", 5);
+        assert!(p.complete && p.recheck);
+        write_log_batch(&mut conn, &[complete("a", 5, 0, false)], &mut counts).unwrap();
+        let p = progress(&conn, "a", 5);
+        assert!(p.complete && !p.recheck);
+        assert_eq!(p.persisted_lines, 3, "flags leave the count alone");
+    }
+
+    #[test]
+    fn fingerprint_covers_exactly_the_persisted_lines_across_batches() {
+        let mut conn = logs_conn();
+        let mut counts = HashMap::new();
+        // Uneven batches, interleaved with another run's rows.
+        let mut from = 0;
+        for n in [1usize, 2, 5, 9, 1, 30] {
+            let mut b = run_batch("a", Some(1), from, n);
+            b.extend(run_batch("b", Some(1), from, 1));
+            write_log_batch(&mut conn, &b, &mut counts).unwrap();
+            from += n;
+        }
+        let want = digest_of((0..from).map(|i| format!("l{i}")));
+        let p = progress(&conn, "a", 1);
+        assert_eq!(p.persisted_lines, from as i64);
+        assert_eq!(p.digest.as_ref(), Some(&want));
+        // 48 lines: checkpoints after 1, 2, 4, 8, 16, 32 lines.
+        assert_eq!(want.checkpoints.len(), 6);
+        // Another order of the same lines is another fingerprint.
+        let mut rev: Vec<String> = (0..from).map(|i| format!("l{i}")).collect();
+        rev.swap(0, 1);
+        assert_ne!(digest_of(rev).hash, want.hash);
+        // Splitting a line differently is, too (`\n` is part of the input).
+        assert_ne!(
+            digest_of(["ab".into(), "c".into()]).hash,
+            digest_of(["a".into(), "bc".into()]).hash
+        );
+    }
+
+    #[test]
+    fn trimming_and_gc_keep_the_fingerprint() {
+        let mut conn = logs_conn();
+        let mut counts = HashMap::new();
+        let n = (LOGS_PER_CONTAINER + LOGS_TRIM_SLACK + 1) as usize;
+        write_log_batch(&mut conn, &run_batch("a", Some(7), 0, n), &mut counts).unwrap();
+        gc_conn(&conn, crate::timeutil::now_unix());
+        assert!(lines_for(&conn, "a").is_empty());
+        let want = digest_of((0..n).map(|i| format!("l{i}")));
+        assert_eq!(progress(&conn, "a", 7).digest, Some(want));
+    }
+
+    #[test]
+    fn runs_sharing_a_start_second_are_kept_apart_by_seq() {
+        let mut conn = logs_conn();
+        let mut counts = HashMap::new();
+        let mut b = run_batch("a", Some(5), 0, 4);
+        b.push(complete("a", 5, 0, true));
+        write_log_batch(&mut conn, &b, &mut counts).unwrap();
+        // The replay turned out to be a later run: open seq 1, then its rows.
+        let new_run = LogOp::NewRun {
+            container_id: "a".into(),
+            started_at: 5,
+            seq: 1,
+        };
+        write_log_batch(&mut conn, std::slice::from_ref(&new_run), &mut counts).unwrap();
+        assert_eq!(
+            progress(&conn, "a", 5),
+            RunProgress {
+                seq: 1,
+                ..RunProgress::default()
+            },
+            "the new run is the latest, with nothing stored yet"
+        );
+        write_log_batch(&mut conn, &seq_batch("a", Some(5), 1, 0, 2), &mut counts).unwrap();
+
+        let runs = runs_at_conn(&conn, "a", 5).unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(
+            (runs[0].seq, runs[0].persisted_lines, runs[0].complete),
+            (0, 4, true),
+            "the earlier run keeps its lines"
+        );
+        assert!(
+            !runs[0].recheck,
+            "and needs no recheck once a later run is found"
+        );
+        assert_eq!((runs[1].seq, runs[1].persisted_lines), (1, 2));
+        assert_eq!(runs[1].digest, Some(digest_of(["l0".into(), "l1".into()])));
+        assert_eq!(progress(&conn, "a", 5), runs[1]);
+        // Rows carry their run.
+        let seqs: Vec<i64> = conn
+            .prepare("SELECT seq FROM container_logs WHERE container_id = 'a' ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(seqs, [0, 0, 0, 0, 1, 1]);
+        // NewRun never resets a run that already has rows.
+        write_log_batch(&mut conn, &[new_run], &mut counts).unwrap();
+        assert_eq!(progress(&conn, "a", 5).persisted_lines, 2);
+    }
+
+    #[test]
+    fn migrates_a_v071_database_keeping_runs_and_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE container_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                container_id TEXT NOT NULL, ts INTEGER NOT NULL, line TEXT NOT NULL,
+                started_at INTEGER
+            );
+            CREATE TABLE log_runs (
+                container_id    TEXT    NOT NULL,
+                started_at      INTEGER NOT NULL,
+                persisted_lines INTEGER NOT NULL DEFAULT 0,
+                complete        INTEGER NOT NULL DEFAULT 0,
+                updated_at      INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (container_id, started_at)
+            );
+            INSERT INTO container_logs (container_id, ts, line, started_at)
+                VALUES ('a', 5, 'x', 100), ('a', 6, 'y', 100);
+            INSERT INTO log_runs VALUES ('a', 100, 2, 1, 50), ('b', 200, 0, 0, 60);",
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap(); // idempotent
+        assert_eq!(lines_for(&conn, "a"), vec!["x", "y"]);
+        let a = progress(&conn, "a", 100);
+        assert_eq!(
+            (a.seq, a.persisted_lines, a.complete, a.recheck),
+            (0, 2, true, false)
+        );
+        assert_eq!(a.digest, None, "lines saved before fingerprints: unknown");
+        assert_eq!(
+            progress(&conn, "b", 200),
+            RunProgress::default(),
+            "no lines: the empty fingerprint is known"
+        );
+        let updated: i64 = conn
+            .query_row(
+                "SELECT updated_at FROM log_runs WHERE container_id = 'b'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(updated, 60);
+        // New lines of the legacy run are counted but stay unfingerprinted.
+        let mut conn = conn;
+        let mut counts = HashMap::new();
+        write_log_batch(&mut conn, &run_batch("a", Some(100), 2, 3), &mut counts).unwrap();
+        let a = progress(&conn, "a", 100);
+        assert_eq!((a.persisted_lines, a.digest), (5, None));
     }
 
     #[test]
