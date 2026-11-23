@@ -67,8 +67,13 @@ export const api = {
   cleanContainers: (ids: string[]) => inTauri ? invokeStrict<void>('clean_containers', { ids }) : Promise.resolve(),
 
   // Streams: backend spawns a child process, frontend subscribes to events.
-  startLogStream: (id: string, opts?: { boot?: boolean; tail?: number }) =>
-    inTauri ? invokeStrict<void>('start_log_stream', { id, boot: opts?.boot, tail: opts?.tail }) : Promise.resolve(),
+  // `streamId` is chosen by the caller (see newStreamId) so it can subscribe
+  // to `logs:tick:<streamId>` before the child starts; the backend keeps a
+  // registry keyed by it and `stopLogStream` kills the child.
+  startLogStream: (streamId: string, id: string, opts?: { boot?: boolean; tail?: number }) =>
+    inTauri ? invokeStrict<void>('start_log_stream', { streamId, id, boot: opts?.boot, tail: opts?.tail }) : Promise.resolve(),
+  stopLogStream: (streamId: string) =>
+    inTauri ? invokeStrict<void>('stop_log_stream', { streamId }) : Promise.resolve(),
   startPull:      (reference: string) => inTauri ? invokeStrict<void>('start_pull', { reference }) : Promise.resolve(),
 
   // Deletes (strict — caller should confirm first and surface errors via toast).
@@ -221,7 +226,7 @@ export const api = {
     if (!inTauri) return () => {};
     return listen<Container[]>('containers:tick', e => cb(e.payload));
   },
-  onLogLine: async (cb: (line: string) => void): Promise<UnlistenFn> => {
+  onLogLine: async (streamId: string, cb: (line: string) => void): Promise<UnlistenFn> => {
     if (!inTauri) {
       // Replay fixture lines on a timer so the LogsView still has movement.
       let i = 0;
@@ -231,7 +236,7 @@ export const api = {
       }, 80);
       return () => window.clearInterval(id);
     }
-    return listen<string>('logs:tick', e => cb(e.payload));
+    return listen<string>(`logs:tick:${streamId}`, e => cb(e.payload));
   },
   onPullLine: async (cb: (line: string) => void): Promise<UnlistenFn> => {
     if (!inTauri) {
@@ -342,3 +347,10 @@ export const api = {
     return listen<number>('containers:tickAt', e => cb(e.payload));
   },
 };
+
+/** Fresh id for one log stream (alphanumerics/dashes only: it ends up in an event name). */
+export function newStreamId(): string {
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `s${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+}

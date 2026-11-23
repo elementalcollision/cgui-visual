@@ -400,6 +400,7 @@ pub fn run() {
             commands::restart_container,
             commands::clean_containers,
             commands::start_log_stream,
+            commands::stop_log_stream,
             commands::start_pull,
             commands::load_prefs,
             commands::save_prefs,

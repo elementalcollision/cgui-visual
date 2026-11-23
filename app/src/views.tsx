@@ -5,7 +5,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import type { ThemeTokens } from './theme';
 import type { Container, Image, Volume, Network, Stack } from './types';
 import { Icon, Sparkline, Bar, StatusDot, BulkActionBar, SelectCheckbox, iconBtn, pillBtn, tableHeader, tableRow, fmtCreated } from './components';
-import { api } from './api';
+import { api, newStreamId } from './api';
 import { toast, withToast } from './toast';
 
 // Aggregate CPU / Memory / Network I/O / Disk I/O across the live container
@@ -864,15 +864,28 @@ export function LogsView({ t, target }: { t: ThemeTokens; target?: string }) {
         if (rows.length) setLines(rows.map(r => r.line));
       }).catch(() => { /* sidecar empty / not yet init'd */ });
     }
-    api.onLogLine(line => {
+    // Each effect run owns one stream id: events arrive on a per-stream
+    // channel and the cleanup kills the backend child, so switching
+    // container / toggling boot or tail never leaves an old follower
+    // feeding this view.
+    const streamId = newStreamId();
+    const listening = api.onLogLine(streamId, line => {
       if (cancelled || pausedRef.current) return;
       setLines(prev => prev.length >= LOG_BUFFER_MAX ? [...prev.slice(-LOG_BUFFER_MAX + 1), line] : [...prev, line]);
     }).then(fn => { if (cancelled) fn(); else unlisten = fn; });
+    let started: Promise<unknown> | null = null;
     if (target) {
-      api.startLogStream(target, { boot: bootLog, tail: tail || undefined })
+      // Subscribe first so no early line is missed.
+      started = listening
+        .then(() => api.startLogStream(streamId, target, { boot: bootLog, tail: tail || undefined }))
         .catch(e => console.warn('start_log_stream failed', e));
     }
-    return () => { cancelled = true; unlisten?.(); };
+    return () => {
+      cancelled = true;
+      unlisten?.();
+      // Chain the stop after start has resolved so it can't overtake it.
+      if (started) started.then(() => api.stopLogStream(streamId)).catch(() => { /* already gone */ });
+    };
   }, [target, bootLog, tail]);
 
   // Filtering happens at render time, not on the buffer, so toggling level

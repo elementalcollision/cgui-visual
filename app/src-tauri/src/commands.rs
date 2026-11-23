@@ -545,29 +545,106 @@ fn err_str(e: anyhow::Error) -> String {
 
 // ─── Streaming logs ───────────────────────────────────────────────────
 //
-// Frontend invokes `start_log_stream(id)`; backend spawns `container logs -f`
-// and emits one `logs:tick` event per line. `stop_log_stream` aborts the
-// child via kill_on_drop.
+// The frontend generates a stream id, subscribes to `logs:tick:<id>`, then
+// invokes `start_log_stream(streamId, id, ...)`. The backend spawns
+// `container logs -f` and emits one `logs:tick:<id>` event per line, plus a
+// final "[follow ended]" when the child exits on its own. Every live stream
+// is tracked in a registry so `stop_log_stream(streamId)` (or app exit via
+// `stop_all_log_streams`) can abort the task, which drops the child
+// (kill_on_drop). Per-stream channels keep two views from cross-talking.
+
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex, MutexGuard};
+use tokio::task::AbortHandle;
+
+#[derive(Default)]
+struct LogStreams {
+    map: Mutex<HashMap<String, AbortHandle>>,
+}
+
+impl LogStreams {
+    fn lock(&self) -> MutexGuard<'_, HashMap<String, AbortHandle>> {
+        self.map.lock().unwrap_or_else(|p| p.into_inner())
+    }
+    /// Register `id`; any stream already registered under it is aborted.
+    fn register(map: &mut HashMap<String, AbortHandle>, id: String, handle: AbortHandle) {
+        if let Some(old) = map.insert(id, handle) {
+            old.abort();
+        }
+    }
+    /// Abort + forget. Returns whether the id was registered.
+    fn stop(&self, id: &str) -> bool {
+        match self.lock().remove(id) {
+            Some(h) => {
+                h.abort();
+                true
+            }
+            None => false,
+        }
+    }
+    /// Forget without aborting (the stream ended by itself).
+    fn finish(&self, id: &str) {
+        self.lock().remove(id);
+    }
+    fn stop_all(&self) {
+        for (_, h) in self.lock().drain() {
+            h.abort();
+        }
+    }
+}
+
+static LOG_STREAMS: LazyLock<LogStreams> = LazyLock::new(LogStreams::default);
+
+/// Kill every running log stream. Meant for the app-exit hook (which
+/// should also call `history::flush_logs`).
+#[allow(dead_code)] // wired up by the exit hook in lib.rs
+pub fn stop_all_log_streams() {
+    LOG_STREAMS.stop_all();
+}
+
+/// Stream ids become part of an event name, which Tauri restricts to
+/// alphanumerics plus `-`, `/`, `:`, `_`.
+fn valid_stream_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+#[tauri::command]
+pub fn stop_log_stream(stream_id: String) {
+    LOG_STREAMS.stop(&stream_id);
+}
 
 #[tauri::command]
 pub async fn start_log_stream(
     app: AppHandle,
+    stream_id: String,
     id: String,
     boot: Option<bool>,
     tail: Option<u32>,
 ) -> Result<(), String> {
+    if !valid_stream_id(&stream_id) {
+        return Err("invalid log stream id".into());
+    }
+    let event = format!("logs:tick:{stream_id}");
     if !runtime::available().await {
         // Dev: replay fixtures with a small delay so the LogsView still
         // gets data for design work. Release: no-op — emitting fake
         // log lines into a user's view would be confusing.
         if cfg!(debug_assertions) {
             let app2 = app.clone();
-            tauri::async_runtime::spawn(async move {
+            let sid = stream_id.clone();
+            let mut streams = LOG_STREAMS.lock();
+            let task = tokio::spawn(async move {
                 for line in fixtures::logs() {
-                    let _ = app2.emit("logs:tick", line);
+                    let _ = app2.emit(&event, line);
                     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
                 }
+                LOG_STREAMS.finish(&sid);
             });
+            LogStreams::register(&mut streams, stream_id, task.abort_handle());
         }
         return Ok(());
     }
@@ -588,21 +665,29 @@ pub async fn start_log_stream(
     let child = runtime::spawn(&argv_ref).map_err(err_str)?;
     let app2 = app.clone();
     let id_for_persist = id.clone();
+    let sid = stream_id.clone();
     // Boot logs are VM console output, not container stdio — don't mix
     // them into the per-container log history sidecar.
     let persist = !boot.unwrap_or(false);
-    tauri::async_runtime::spawn(async move {
+    // Hold the registry lock across spawn+insert so a stream that ends
+    // instantly can't call finish() before it is registered (which would
+    // leave a stale entry behind).
+    let mut streams = LOG_STREAMS.lock();
+    let task = tokio::spawn(async move {
+        let ev2 = event.clone();
         let _ = runtime::drain_lines(child, move |line| {
-            // Persist before emitting so a crash mid-tick still gets the
-            // line on disk. record_log no-ops when the DB isn't init'd.
+            // record_log queues for the batching writer (non-blocking);
+            // it no-ops when the DB isn't init'd.
             if persist {
                 crate::history::record_log(&id_for_persist, &line);
             }
-            let _ = app2.emit("logs:tick", line);
+            let _ = app2.emit(&ev2, line);
         })
         .await;
-        let _ = app.emit("logs:tick", "[follow ended]".to_string());
+        let _ = app.emit(&event, "[follow ended]".to_string());
+        LOG_STREAMS.finish(&sid);
     });
+    LogStreams::register(&mut streams, stream_id, task.abort_handle());
     Ok(())
 }
 
@@ -733,4 +818,70 @@ pub fn load_prefs() -> Prefs {
 pub fn save_prefs(prefs: Prefs) -> Result<(), String> {
     runtime::set_bin(&prefs.runtime);
     prefs.save().map_err(err_str)
+}
+
+#[cfg(test)]
+mod log_stream_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn pending() -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async { tokio::time::sleep(Duration::from_secs(3600)).await })
+    }
+
+    #[tokio::test]
+    async fn register_then_stop_aborts_task() {
+        let reg = LogStreams::default();
+        let t = pending();
+        LogStreams::register(&mut reg.lock(), "a".into(), t.abort_handle());
+        assert!(reg.stop("a"));
+        assert!(t.await.unwrap_err().is_cancelled());
+        assert!(!reg.stop("a"), "second stop is a no-op");
+    }
+
+    #[tokio::test]
+    async fn stop_only_touches_the_named_stream() {
+        let reg = LogStreams::default();
+        let (a, b) = (pending(), pending());
+        LogStreams::register(&mut reg.lock(), "a".into(), a.abort_handle());
+        LogStreams::register(&mut reg.lock(), "b".into(), b.abort_handle());
+        reg.stop("a");
+        assert!(a.await.unwrap_err().is_cancelled());
+        assert!(!b.is_finished());
+        assert_eq!(reg.lock().len(), 1);
+        reg.stop_all();
+        assert!(b.await.unwrap_err().is_cancelled());
+        assert!(reg.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn finish_removes_without_aborting() {
+        let reg = LogStreams::default();
+        let t = pending();
+        LogStreams::register(&mut reg.lock(), "a".into(), t.abort_handle());
+        reg.finish("a");
+        assert!(reg.lock().is_empty());
+        assert!(!t.is_finished());
+        t.abort();
+    }
+
+    #[tokio::test]
+    async fn reregistering_an_id_aborts_the_old_task() {
+        let reg = LogStreams::default();
+        let (old, new) = (pending(), pending());
+        LogStreams::register(&mut reg.lock(), "a".into(), old.abort_handle());
+        LogStreams::register(&mut reg.lock(), "a".into(), new.abort_handle());
+        assert!(old.await.unwrap_err().is_cancelled());
+        assert!(!new.is_finished());
+        new.abort();
+    }
+
+    #[test]
+    fn stream_id_validation() {
+        assert!(valid_stream_id("3f2a-9b_X"));
+        assert!(!valid_stream_id(""));
+        assert!(!valid_stream_id("a:b"));
+        assert!(!valid_stream_id("a b"));
+        assert!(!valid_stream_id(&"x".repeat(65)));
+    }
 }
