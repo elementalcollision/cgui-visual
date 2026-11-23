@@ -844,19 +844,6 @@ pub async fn list_updates() -> Result<Vec<Update>, String> {
     crate::updates::check().await
 }
 
-// Kept for backward-compat with the frontend api.ts; new code should
-// use start_pull + pull:tick / start_log_stream + logs:tick. Dev-only
-// fixture stream so designers can preview the panel; release returns
-// empty so users don't see invented log spam against their containers.
-#[tauri::command]
-pub fn pull_stream() -> Vec<String> {
-    dev_fixture_or(fixtures::pull_stream, Vec::new)
-}
-#[tauri::command]
-pub fn tail_logs(_target: Option<String>) -> Vec<String> {
-    dev_fixture_or(fixtures::logs, Vec::new)
-}
-
 // ─── Prefs ────────────────────────────────────────────────────────────
 
 #[tauri::command]
