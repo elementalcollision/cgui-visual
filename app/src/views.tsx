@@ -210,7 +210,7 @@ export function ContainersView({ t, search, selected, setSelected, onInspect, on
                 />
                 <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   <div style={{ fontWeight: 500, color: t.fg1 }}>{c.name}</div>
-                  <div style={{ fontSize: 11, color: t.fg3, fontFamily: t.mono, marginTop: 1 }}>{c.id}</div>
+                  <div style={{ fontSize: 11, color: t.fg3, fontFamily: t.mono, marginTop: 1 }}>{c.shortId}</div>
                 </div>
                 <div style={{ fontFamily: t.mono, fontSize: 12, color: t.fg2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.image}</div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>

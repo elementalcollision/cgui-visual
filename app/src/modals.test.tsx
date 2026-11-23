@@ -178,6 +178,36 @@ describe('DetailModal — Reclaim space action', () => {
   });
 });
 
+describe('DetailModal — long container ids', () => {
+  const longId = 'd5d88c0b-3037-4d11-bac4-4ed8d55c4461';
+  const mk = (status: 'running' | 'exited') => ({
+    ...containers[0], id: longId, shortId: 'd5d88c0b', name: 'unnamed', status,
+  });
+
+  it('displays the short id but calls the API with the full id', async () => {
+    const user = userEvent.setup();
+    const restart = vi.spyOn(api, 'restartContainer').mockResolvedValue(undefined);
+    const stop = vi.spyOn(api, 'stopContainer').mockResolvedValue(undefined);
+    const inspect = vi.spyOn(api, 'inspectContainer').mockResolvedValue('{}');
+    render(<DetailModal item={mk('running')} t={t} onClose={() => {}} onExec={() => {}} />);
+    expect(screen.getByText(/d5d88c0b ·/)).toBeInTheDocument();
+    expect(screen.queryByText(new RegExp(longId))).not.toBeInTheDocument();
+    expect(inspect).toHaveBeenCalledWith(longId);
+    await user.click(screen.getByRole('button', { name: 'Restart' }));
+    expect(restart).toHaveBeenCalledWith(longId);
+    await user.click(screen.getByRole('button', { name: 'Stop' }));
+    expect(stop).toHaveBeenCalledWith(longId);
+  });
+
+  it('starts a stopped container by full id', async () => {
+    const user = userEvent.setup();
+    const start = vi.spyOn(api, 'startContainer').mockResolvedValue(undefined);
+    render(<DetailModal item={mk('exited')} t={t} onClose={() => {}} onExec={() => {}} />);
+    await user.click(screen.getByRole('button', { name: 'Start' }));
+    expect(start).toHaveBeenCalledWith(longId);
+  });
+});
+
 describe('DoctorModal', () => {
   it('renders the fixture summary line', async () => {
     render(<DoctorModal t={t} onClose={() => {}} />);

@@ -10,7 +10,8 @@ use serde_json::json;
 pub fn containers() -> Vec<Container> {
     vec![
         Container {
-            id: "a3f8e2c1".into(),
+            id: "a3f8e2c1-5d0b-4e7a-9c3f-1b2d4e6f8a90".into(),
+            short_id: "a3f8e2c1".into(),
             name: "mlperf-inference-llama2".into(),
             image: "mlcommons/inference:llama2-70b".into(),
             status: "running".into(),
@@ -41,7 +42,8 @@ pub fn containers() -> Vec<Container> {
             started_unix: None,
         },
         Container {
-            id: "b7d4a9e2".into(),
+            id: "mlperf-inference_pgvector".into(),
+            short_id: "mlperf-i".into(),
             name: "pgvector-embeddings".into(),
             image: "pgvector/pgvector:pg16".into(),
             status: "running".into(),
@@ -68,6 +70,7 @@ pub fn containers() -> Vec<Container> {
         },
         Container {
             id: "c2e9b3f4".into(),
+            short_id: "c2e9b3f4".into(),
             name: "criteo-trainer".into(),
             image: "mlcommons/training:dlrm-criteo".into(),
             status: "running".into(),
@@ -99,6 +102,7 @@ pub fn containers() -> Vec<Container> {
         },
         Container {
             id: "d8a1c5b9".into(),
+            short_id: "d8a1c5b9".into(),
             name: "ailuminate-grader".into(),
             image: "mlcommons/safety:ailuminate-1.2".into(),
             status: "running".into(),
@@ -125,6 +129,7 @@ pub fn containers() -> Vec<Container> {
         },
         Container {
             id: "e4f7d2a8".into(),
+            short_id: "e4f7d2a8".into(),
             name: "redis-eval-cache".into(),
             image: "redis:7.2-alpine".into(),
             status: "running".into(),
@@ -151,6 +156,7 @@ pub fn containers() -> Vec<Container> {
         },
         Container {
             id: "f1c8e6b3".into(),
+            short_id: "f1c8e6b3".into(),
             name: "storage-bench-fio".into(),
             image: "mlcommons/storage:fio-3.36".into(),
             status: "exited".into(),
@@ -174,6 +180,7 @@ pub fn containers() -> Vec<Container> {
         },
         Container {
             id: "0a4b9d7e".into(),
+            short_id: "0a4b9d7e".into(),
             name: "jupyter-research".into(),
             image: "jupyter/scipy-notebook:python-3.11".into(),
             status: "running".into(),
@@ -200,6 +207,7 @@ pub fn containers() -> Vec<Container> {
         },
         Container {
             id: "6b3c8f2a".into(),
+            short_id: "6b3c8f2a".into(),
             name: "imagenet-loader".into(),
             image: "mlcommons/training:resnet50-1.5".into(),
             status: "paused".into(),

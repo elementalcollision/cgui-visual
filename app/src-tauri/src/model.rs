@@ -16,7 +16,12 @@ pub struct MemUsage {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Container {
+    /// Full CLI identifier. The CLI matches ids exactly (no prefix
+    /// matching), so this is what every action/log/exec/inspect call must
+    /// send. Never truncate it.
     pub id: String,
+    /// First 8 chars of `id`, for display only (serde `shortId`).
+    pub short_id: String,
     pub name: String,
     pub image: String,
     pub status: String,

@@ -8,7 +8,7 @@ import type {
 
 export const containers: Container[] = [
   {
-    id: 'a3f8e2c1', name: 'mlperf-inference-llama2', image: 'mlcommons/inference:llama2-70b',
+    id: 'a3f8e2c1-5d0b-4e7a-9c3f-1b2d4e6f8a90', shortId: 'a3f8e2c1', name: 'mlperf-inference-llama2', image: 'mlcommons/inference:llama2-70b',
     status: 'running', uptime: '2d 14h', cpu: 78.2,
     mem: { used: 38.4, limit: 64.0, unit: 'GiB', pct: 60.0 },
     ports: ['8080:8080', '9090:9090'], stack: 'mlperf-inference', created: '2026-04-30 09:14:22',
@@ -16,7 +16,7 @@ export const containers: Container[] = [
     cmd: ['python', 'inference_server.py', '--model', 'llama2-70b'],
   },
   {
-    id: 'b7d4a9e2', name: 'pgvector-embeddings', image: 'pgvector/pgvector:pg16',
+    id: 'mlperf-inference_pgvector', shortId: 'mlperf-i', name: 'pgvector-embeddings', image: 'pgvector/pgvector:pg16',
     status: 'running', uptime: '5d 02h', cpu: 12.4,
     mem: { used: 2.1, limit: 8.0, unit: 'GiB', pct: 26.3 },
     ports: ['15432:5432'], stack: 'mlperf-inference', created: '2026-04-27 21:08:11',
@@ -24,7 +24,7 @@ export const containers: Container[] = [
     cmd: ['postgres'],
   },
   {
-    id: 'c2e9b3f4', name: 'criteo-trainer', image: 'mlcommons/training:dlrm-criteo',
+    id: 'c2e9b3f4', shortId: 'c2e9b3f4', name: 'criteo-trainer', image: 'mlcommons/training:dlrm-criteo',
     status: 'running', uptime: '14h 22m', cpu: 94.8,
     mem: { used: 56.2, limit: 64.0, unit: 'GiB', pct: 87.8 },
     ports: [], stack: 'dlrm-training', created: '2026-05-01 23:42:09',
@@ -32,7 +32,7 @@ export const containers: Container[] = [
     cmd: ['python', 'train.py', '--config', 'dlrm.yaml'],
   },
   {
-    id: 'd8a1c5b9', name: 'ailuminate-grader', image: 'mlcommons/safety:ailuminate-1.2',
+    id: 'd8a1c5b9', shortId: 'd8a1c5b9', name: 'ailuminate-grader', image: 'mlcommons/safety:ailuminate-1.2',
     status: 'running', uptime: '1h 03m', cpu: 24.1,
     mem: { used: 4.8, limit: 16.0, unit: 'GiB', pct: 30.0 },
     ports: ['7860:7860'], stack: null, created: '2026-05-02 13:08:55',
@@ -40,7 +40,7 @@ export const containers: Container[] = [
     cmd: ['python', '-m', 'ailuminate.grader'],
   },
   {
-    id: 'e4f7d2a8', name: 'redis-eval-cache', image: 'redis:7.2-alpine',
+    id: 'e4f7d2a8', shortId: 'e4f7d2a8', name: 'redis-eval-cache', image: 'redis:7.2-alpine',
     status: 'running', uptime: '5d 02h', cpu: 1.8,
     mem: { used: 0.18, limit: 1.0, unit: 'GiB', pct: 18.0 },
     ports: ['16379:6379'], stack: 'mlperf-inference', created: '2026-04-27 21:08:11',
@@ -48,7 +48,7 @@ export const containers: Container[] = [
     cmd: ['redis-server'],
   },
   {
-    id: 'f1c8e6b3', name: 'storage-bench-fio', image: 'mlcommons/storage:fio-3.36',
+    id: 'f1c8e6b3', shortId: 'f1c8e6b3', name: 'storage-bench-fio', image: 'mlcommons/storage:fio-3.36',
     status: 'exited', uptime: '—', exitCode: 0, cpu: 0,
     mem: { used: 0, limit: 4.0, unit: 'GiB', pct: 0 },
     ports: [], stack: null, created: '2026-05-02 08:11:33',
@@ -56,7 +56,7 @@ export const containers: Container[] = [
     cmd: ['fio', '/etc/jobs/seq-read.fio'],
   },
   {
-    id: '0a4b9d7e', name: 'jupyter-research', image: 'jupyter/scipy-notebook:python-3.11',
+    id: '0a4b9d7e', shortId: '0a4b9d7e', name: 'jupyter-research', image: 'jupyter/scipy-notebook:python-3.11',
     status: 'running', uptime: '8d 17h', cpu: 6.2,
     mem: { used: 1.4, limit: 8.0, unit: 'GiB', pct: 17.5 },
     ports: ['8888:8888'], stack: null, created: '2026-04-24 06:51:42',
@@ -64,7 +64,7 @@ export const containers: Container[] = [
     cmd: ['start-notebook.sh'],
   },
   {
-    id: '6b3c8f2a', name: 'imagenet-loader', image: 'mlcommons/training:resnet50-1.5',
+    id: '6b3c8f2a', shortId: '6b3c8f2a', name: 'imagenet-loader', image: 'mlcommons/training:resnet50-1.5',
     status: 'paused', uptime: '3h 18m', cpu: 0,
     mem: { used: 8.2, limit: 16.0, unit: 'GiB', pct: 51.3 },
     ports: [], stack: 'resnet-training', created: '2026-05-02 11:24:18',

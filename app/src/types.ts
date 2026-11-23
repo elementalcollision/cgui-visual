@@ -10,7 +10,10 @@ export interface MemUsage {
 }
 
 export interface Container {
+  /** Full CLI id: send this to every backend call. The CLI matches ids exactly. */
   id: string;
+  /** First 8 chars of `id`; display only, never pass to the backend. */
+  shortId: string;
   name: string;
   image: string;
   status: ContainerStatus;
