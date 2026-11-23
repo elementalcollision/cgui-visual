@@ -701,12 +701,12 @@ pub fn doctor() -> Vec<DoctorCheck> {
     };
     vec![
         ok("active profile: container → container"),
-        ok("`container` resolves to /usr/local/bin/container"),
-        ok("`container --version` → container CLI version 1.4.1"),
+        ok("container resolves to /usr/local/bin/container"),
+        ok("container --version → container CLI version 1.4.1"),
         ok("container system status: running"),
         warn("no profiles.toml at ~/.config/cgui/profiles.toml (using built-in default)"),
         ok("state.json at ~/.config/cgui/state.json parses cleanly"),
-        warn("trivy not on PATH (image scan disabled — `brew install trivy`)"),
+        warn("trivy not on PATH (image scan disabled — brew install trivy)"),
         ok("runtime API reachable on /var/run/container.sock"),
     ]
 }

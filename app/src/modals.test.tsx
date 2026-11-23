@@ -330,7 +330,7 @@ describe('SettingsModal background log capture toggle', () => {
   it('is a labelled switch that reflects the pref and explains the cost', () => {
     const toggle = renderLogs(true, () => {});
     expect(toggle).toHaveAttribute('aria-checked', 'true');
-    expect(screen.getByText(/one `container logs` process per running container/i)).toBeInTheDocument();
+    expect(screen.getByText(/one container logs process per running container/i)).toBeInTheDocument();
     expect(screen.getByText(/stores it locally for 7 days/i)).toBeInTheDocument();
   });
 

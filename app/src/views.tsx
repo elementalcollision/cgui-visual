@@ -8,6 +8,7 @@ import { VisuallyHidden } from './a11y';
 import { Icon, Sparkline, Bar, StatusDot, BulkActionBar, SelectCheckbox, iconBtn, pillBtn, tableHeader, tableRow, fmtCreated } from './components';
 import { api, newStreamId } from './api';
 import { toast, withToast } from './toast';
+import { classifyLevel, stripAnsi } from './logLevel';
 import { askConfirm, askText } from './dialogs';
 import { useLoad, LoadErrorState, EmptyState, errMessage } from './loadState';
 
@@ -887,23 +888,7 @@ const LOG_BUFFER_MAX = 5000;
 
 type LogLevel = 'all' | 'info' | 'warn' | 'error';
 
-function classifyLevel(line: string): 'info' | 'warn' | 'error' {
-  if (line.includes('[ERROR]') || line.includes('[ERR]') || line.includes('FATAL')) return 'error';
-  if (line.includes('[WARN]') || line.includes('WARNING')) return 'warn';
-  return 'info';
-}
-
-// Strip CSI / OSC ANSI escape sequences. Covers \x1b[…m colour codes,
-// cursor movement, and the 8-bit CSI variant some shells emit. Used
-// when the user opts into "no colour" rendering and on download.
-// Regex anchored to the patterns docker / podman / bash actually emit;
-// not a full state machine but enough for log streams.
-// eslint-disable-next-line no-control-regex
-const ANSI_RE = /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\))/g;
-
-export function stripAnsi(s: string): string {
-  return s.replace(ANSI_RE, '');
-}
+export { stripAnsi };
 
 export function LogsView({ t, target }: { t: ThemeTokens; target?: string }) {
   const [lines, setLines] = useState<string[]>([]);

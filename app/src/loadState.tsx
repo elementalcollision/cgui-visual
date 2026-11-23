@@ -8,11 +8,12 @@ import type { ThemeTokens } from './theme';
 import { api } from './api';
 import { Icon, pillBtn } from './components';
 import { withToast } from './toast';
+import { plainText } from './plainText';
 
 export function errMessage(e: unknown): string {
-  if (typeof e === 'string') return e;
-  if (e && typeof (e as { message?: unknown }).message === 'string') return (e as { message: string }).message;
-  return String(e);
+  if (typeof e === 'string') return plainText(e);
+  if (e && typeof (e as { message?: unknown }).message === 'string') return plainText((e as { message: string }).message);
+  return plainText(String(e));
 }
 
 // Text Apple's CLI prints for every subcommand while the services are down:

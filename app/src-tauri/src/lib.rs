@@ -4,6 +4,7 @@ mod doctor;
 mod fixtures;
 pub mod history;
 pub mod logpersist;
+pub mod logstreams;
 mod menubar_hint;
 pub mod model;
 mod paths;
@@ -164,7 +165,7 @@ fn on_exit() {
     // Kill every `container logs -f` child (display streams and the
     // background capture followers), then let the batching writer put
     // already-queued lines on disk before the process goes away.
-    commands::stop_all_log_streams();
+    logstreams::stop_all();
     logpersist::stop_all();
     history::flush_logs();
 }
@@ -440,6 +441,9 @@ pub fn run() {
                             crate::history::record(&cs);
                             // Background log capture reuses this very list.
                             logpersist::reconcile(&cs);
+                            // Display streams (Logs view) of stopped or
+                            // deleted containers never end by themselves.
+                            logstreams::reconcile(&cs);
                             let running = cs
                                 .iter()
                                 .filter(|c| c.status.eq_ignore_ascii_case("running"))

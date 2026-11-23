@@ -4,6 +4,7 @@
 
 import { useEffect, useState } from 'react';
 import type { ThemeTokens } from './theme';
+import { plainText } from './plainText';
 
 type Toast = { id: number; message: string; kind: 'error' | 'info' };
 
@@ -16,7 +17,7 @@ function notify() {
 }
 
 export function toast(message: string, kind: 'error' | 'info' = 'error') {
-  const t: Toast = { id: nextId++, message, kind };
+  const t: Toast = { id: nextId++, message: plainText(message), kind };
   queue = [...queue, t];
   notify();
   setTimeout(() => {

@@ -2,6 +2,7 @@
 // (e.g., `vite dev` in a regular browser tab) so the UI is still usable for design work.
 
 import { invoke } from '@tauri-apps/api/core';
+import { plainError } from './plainText';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   Container, Image, ImageListing, Volume, Network, StackListing,
@@ -41,14 +42,22 @@ async function call<T>(cmd: string, fallback: T, args?: Record<string, unknown>)
 // Tauri propagate the rejection so views can render an error state.
 async function callOrDevFallback<T>(cmd: string, fallback: T, args?: Record<string, unknown>): Promise<T> {
   if (!inTauri) return fallback;
-  return invoke<T>(cmd, args);
+  try {
+    return await invoke<T>(cmd, args);
+  } catch (e) {
+    throw plainError(e);
+  }
 }
 
 // For commands where we want to surface errors to the user (actions like
 // stop/delete), don't swallow.
 async function invokeStrict<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (!inTauri) throw new Error('not running in Tauri');
-  return invoke<T>(cmd, args);
+  try {
+    return await invoke<T>(cmd, args);
+  } catch (e) {
+    throw plainError(e);
+  }
 }
 
 export const api = {

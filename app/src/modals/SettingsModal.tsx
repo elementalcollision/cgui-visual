@@ -80,7 +80,7 @@ export function SettingsModal({
           <SettingsToggle
             t={t}
             label="Save container logs in the background"
-            hint="Keeps one `container logs` process per running container (up to 32) so output is saved even while no Logs view is open, and stores it locally for 7 days. Containers that ran and exited while cgui was closed are caught up too. Boot logs are never saved. Takes effect immediately."
+            hint="Keeps one container logs process per running container (up to 32) so output is saved even while no Logs view is open, and stores it locally for 7 days. Containers that ran and exited while cgui was closed are caught up too. Boot logs are never saved. Takes effect immediately."
             value={backgroundLogs}
             onChange={setBackgroundLogs}
           />
