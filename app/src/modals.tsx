@@ -8,6 +8,8 @@ import { api } from './api';
 import { toast, withToast } from './toast';
 import { askConfirm, askText } from './dialogs';
 import { errMessage, looksLikeServicesDown } from './loadState';
+import { useCliAtLeast } from './cliVersion';
+import { commitContainerFlow } from './containerActions';
 
 function Backdrop({ onClose, children }: { onClose: () => void; children: ReactNode }) {
   return (
@@ -394,12 +396,15 @@ function Muted({ t, children }: { t: ThemeTokens; children: ReactNode }) {
   return <div style={{ fontSize: 12, color: t.fg3, fontStyle: 'italic' }}>{children}</div>;
 }
 
-export function DetailModal({ item, t, onClose, onExec }: {
+export function DetailModal({ item, t, onClose, onExec, onImagesChanged }: {
   item: Container; t: ThemeTokens; onClose: () => void;
   // Open the embedded terminal for this container. The host (ModalsHost)
   // swaps the modal type so the DetailModal closes as the Terminal mounts.
   onExec: (c: Container) => void;
+  // A commit created a new image: refresh the Images list.
+  onImagesChanged?: () => void;
 }) {
+  const commitGate = useCliAtLeast('1.6.0');
   const [json, setJson] = useState<string>('Loading…');
   const [tab, setTab] = useState<InspectTab>('trends');
   useEffect(() => {
@@ -469,6 +474,9 @@ export function DetailModal({ item, t, onClose, onExec }: {
                     if (!dest) return;
                     withToast(`export ${c.name}`, api.exportContainer(c.id, dest)).catch(() => {});
                   }}>Export tar…</button>
+          <button style={{ ...pillBtn(t), opacity: commitGate.ok ? 1 : 0.5 }} disabled={!commitGate.ok}
+                  title={commitGate.title ?? 'Save this container’s filesystem as a new image (container commit). Works on running and stopped containers.'}
+                  onClick={() => { void commitContainerFlow(c, onImagesChanged); }}>Commit to image…</button>
           <div style={{ flex: 1 }} />
           {c.status === 'running' && (
             <button style={pillBtn(t)}

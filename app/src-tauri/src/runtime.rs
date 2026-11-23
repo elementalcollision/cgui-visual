@@ -1185,6 +1185,84 @@ pub async fn tag_image(source: &str, target: &str) -> Result<()> {
     run(&["image", "tag", source, target]).await.map(|_| ())
 }
 
+/// Basic sanity check for a *new* image reference (a name the user types, as
+/// opposed to one already in the image list): `[host[:port]/]repo[:tag]
+/// [@digest]` with a lowercase repository, a plain tag, no whitespace, and
+/// nothing flag-like. The CLI is stricter still ("invalid format for image
+/// reference"); this just turns the common mistakes into a specific message.
+pub fn validate_image_ref(kind: &str, reference: &str) -> Result<()> {
+    reject_flag_like(kind, reference)?;
+    if reference.len() > 255 {
+        return Err(anyhow!(
+            "{kind} `{reference}` is longer than 255 characters"
+        ));
+    }
+    if reference
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+    {
+        return Err(anyhow!(
+            "{kind} `{reference}` must not contain spaces or control characters"
+        ));
+    }
+    let no_digest = reference.split('@').next().unwrap_or(reference);
+    let (name, tag) = match no_digest.rfind(':') {
+        // A `:` before the last `/` belongs to a registry host:port.
+        Some(i) if !no_digest[i..].contains('/') => (&no_digest[..i], Some(&no_digest[i + 1..])),
+        _ => (no_digest, None),
+    };
+    if name.is_empty() || name.ends_with('/') || name.starts_with('/') {
+        return Err(anyhow!("{kind} `{reference}` has no repository name"));
+    }
+    if name.chars().any(|c| {
+        !(c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-' | '/' | ':'))
+    }) {
+        return Err(anyhow!(
+            "{kind} `{reference}`: the repository name must be lowercase letters, digits, `.`, `_`, `-` and `/`"
+        ));
+    }
+    if let Some(tag) = tag {
+        if tag.is_empty()
+            || tag.len() > 128
+            || !tag
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        {
+            return Err(anyhow!(
+                "{kind} `{reference}` has an invalid tag (letters, digits, `.`, `_`, `-`; up to 128 characters)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `container commit <id> <reference>` (1.6+): snapshot a container's
+/// filesystem (running or stopped) into a new image. Copying the disk can
+/// take a while on large containers, so this uses the long timeout.
+/// Returns the CLI's stdout (the resolved reference).
+pub async fn commit_container(id: &str, reference: &str) -> Result<String> {
+    reject_flag_like("container id", id)?;
+    validate_image_ref("image reference", reference)?;
+    let bytes = run_with_timeout(&["commit", id, reference], RUN_LONG_TIMEOUT)
+        .await
+        .map_err(map_commit_unsupported)?;
+    Ok(String::from_utf8_lossy(&bytes).trim().to_string())
+}
+
+/// `container commit` is new in 1.6; older CLIs fail with an
+/// `unknown command`/plugin-not-found error. Say what is needed instead.
+fn map_commit_unsupported(e: anyhow::Error) -> anyhow::Error {
+    let msg = e.to_string();
+    if msg.contains("exit status: 64")
+        && (msg.contains("Plugin 'container-commit' not found")
+            || msg.contains("unknown command 'commit'"))
+    {
+        anyhow!("`container commit` requires Apple container 1.6 or later")
+    } else {
+        e
+    }
+}
+
 // ─── Builder VM lifecycle (`container builder …`, 1.0 parity) ─────────
 // `builder status --format json` returns the builder container in the
 // same shape as `ls`, so parse_container is reused. None = no builder
@@ -1709,6 +1787,12 @@ where
 #[cfg(test)]
 #[path = "runtime_fixtures_test.rs"]
 mod fixtures_test;
+
+// Tests for the container 1.6/1.7 features (commit, aliases, create
+// volume/network, machine options, native CPU).
+#[cfg(test)]
+#[path = "runtime_features_test.rs"]
+mod features_test;
 
 #[cfg(test)]
 mod tests {

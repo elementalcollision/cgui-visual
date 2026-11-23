@@ -118,6 +118,11 @@ export const api = {
   machineDelete: (name: string) => inTauri ? invokeStrict<void>('machine_delete', { name }) : Promise.resolve(),
   machineSetDefault: (name: string) => inTauri ? invokeStrict<void>('machine_set_default', { name }) : Promise.resolve(),
 
+  // Commit a container's filesystem to a new image (`container commit`,
+  // 1.6+). Resolves to the committed reference as the CLI reports it.
+  commitContainer: (id: string, reference: string) =>
+    inTauri ? invokeStrict<string>('commit_container', { id, reference }) : Promise.resolve(reference),
+
   // Tag an existing image with a new reference.
   tagImage: (source: string, target: string) =>
     inTauri ? invokeStrict<void>('tag_image', { source, target }) : Promise.resolve(),

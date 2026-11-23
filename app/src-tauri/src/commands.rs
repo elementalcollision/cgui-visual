@@ -148,6 +148,15 @@ pub async fn run_image(args: runtime::RunArgs) -> Result<String, String> {
     runtime::run_image(args).await.map_err(err_str)
 }
 
+/// `container commit <id> <reference>` (1.6+). Returns the committed image's
+/// reference as the CLI reports it.
+#[tauri::command]
+pub async fn commit_container(id: String, reference: String) -> Result<String, String> {
+    runtime::commit_container(&id, &reference)
+        .await
+        .map_err(err_str)
+}
+
 #[tauri::command]
 pub async fn tag_image(source: String, target: String) -> Result<(), String> {
     runtime::tag_image(&source, &target).await.map_err(err_str)

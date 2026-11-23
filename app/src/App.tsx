@@ -496,6 +496,7 @@ export default function App() {
               notifyOnExit={notifyOnExit} setNotifyOnExit={setNotifyOnExit}
               containers={containers} images={paletteImages} stacks={paletteStacks}
               setTab={setTab} setModal={setModal} setLogTarget={setLogTarget}
+              onResourcesChanged={() => setPruneTick(n => n + 1)}
             />
           </Suspense>
         )}

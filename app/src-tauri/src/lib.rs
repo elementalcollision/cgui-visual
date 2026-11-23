@@ -525,6 +525,7 @@ pub fn run() {
             commands::inspect_image,
             commands::run_image,
             commands::tag_image,
+            commands::commit_container,
             commands::prune_containers,
             commands::prune_images,
             commands::prune_volumes,

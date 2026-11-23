@@ -75,10 +75,23 @@ struct Guard {
     containers: Vec<String>,
     volumes: Vec<String>,
     networks: Vec<String>,
+    images: Vec<String>,
+    machines: Vec<String>,
     files: Vec<std::path::PathBuf>,
 }
 
 impl Guard {
+    /// Register a resource the test creates itself (via the app's own
+    /// functions) so it is still cleaned up if the test panics.
+    fn track_image(&mut self, r: &str) -> String {
+        self.images.push(r.to_string());
+        r.to_string()
+    }
+    #[allow(dead_code)]
+    fn track_machine(&mut self, n: &str) -> String {
+        self.machines.push(n.to_string());
+        n.to_string()
+    }
     fn container(&mut self, n: &str) -> String {
         self.containers.push(n.to_string());
         n.to_string()
@@ -103,6 +116,12 @@ impl Drop for Guard {
     fn drop(&mut self) {
         for c in &self.containers {
             let _ = cli(&["delete", "--force", c]);
+        }
+        for m in &self.machines {
+            let _ = cli(&["machine", "delete", m]);
+        }
+        for i in &self.images {
+            let _ = cli(&["image", "delete", i]);
         }
         for v in &self.volumes {
             let _ = cli(&["volume", "delete", v]);
@@ -429,6 +448,41 @@ async fn quoted_command_and_flag_like_id() {
 
     assert!(runtime::stop("--all").await.is_err());
     assert!(runtime::delete("-f").await.is_err());
+}
+
+/// Commit (1.6+): works on a running and on a stopped container, and the
+/// new image shows up in `image ls`.
+#[tokio::test]
+#[ignore]
+async fn commit_running_and_stopped_container() {
+    live_only!();
+    let mut g = Guard::default();
+    let cname = g.container(&name("commit"));
+    runtime::run_image(run_args(&cname)).await.expect("run");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let live_ref = g.track_image(&format!("{}:live", name("commit-img")));
+    runtime::commit_container(&cname, &live_ref)
+        .await
+        .expect("commit running");
+    runtime::stop(&cname).await.expect("stop");
+    let stopped_ref = g.track_image(&format!("{}:stopped", name("commit-img")));
+    runtime::commit_container(&cname, &stopped_ref)
+        .await
+        .expect("commit stopped");
+
+    let images = runtime::list_images().await.unwrap();
+    for r in [&live_ref, &stopped_ref] {
+        assert!(
+            images.iter().any(|i| i.reference.ends_with(r.as_str())),
+            "{r} missing from {:?}",
+            images.iter().map(|i| &i.reference).collect::<Vec<_>>()
+        );
+    }
+
+    // Bad references never reach the CLI.
+    assert!(runtime::commit_container(&cname, "Bad Ref").await.is_err());
+    assert!(runtime::commit_container(&cname, "-x").await.is_err());
 }
 
 /// Capability gate: the cached CLI version parses and matches `--version`.

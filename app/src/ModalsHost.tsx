@@ -55,7 +55,10 @@ export default function ModalsHost(props: {
   setTab: (t: Tab) => void;
   setModal: (m: Modal) => void;
   setLogTarget: (id: string | undefined) => void;
+  // A modal created/changed an image, volume or network: refresh those lists.
+  onResourcesChanged?: () => void;
 }) {
+  const { onResourcesChanged } = props;
   const {
     modal, t, runtime, setRuntime, onClose, onUpdateClosed, onOnboardingResolved,
     menubarMode, setMenubarMode, globalHotkey, setGlobalHotkey, notifyOnExit, setNotifyOnExit,
@@ -70,6 +73,7 @@ export default function ModalsHost(props: {
       return <DetailModal
         item={modal.payload} t={t} onClose={onClose}
         onExec={c => setModal({ type: 'terminal', container: c })}
+        onImagesChanged={onResourcesChanged}
       />;
     case 'pull':
       return <PullModal t={t} onClose={onClose} />;
