@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.3] — 2026-11-23
+
 ### Fixed
 
 - **The Logs header shows when a stream has ended.** It kept showing the
@@ -48,6 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and keeps the old run's last lines, such as its shutdown messages. Saved
   logs can trail the live output by up to one refresh (2 s with the window
   open, 10 s when hidden).
+
+### Known limits
+
+- A container that is already running when you upgrade keeps being saved
+  the old way, by line count, until it next starts, so a burst in that run
+  can still lose or repeat lines.
 
 ### Internal
 
@@ -614,7 +622,8 @@ Initial macOS-only release. Tauri + React + TypeScript GUI for Apple's
   binary. Apple's `container` CLI is similarly optional but required for
   any real data.
 
-[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/elementalcollision/cgui-visual/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/elementalcollision/cgui-visual/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/elementalcollision/cgui-visual/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/elementalcollision/cgui-visual/compare/v0.6.2...v0.7.0
