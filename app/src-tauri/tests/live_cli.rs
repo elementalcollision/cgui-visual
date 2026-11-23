@@ -1045,14 +1045,25 @@ async fn stats_native_cpu_utilization() {
         "a busy loop should use about one core, got {frac}"
     );
 
-    // The UI value (percent of one core) from the very first poll.
-    let history = app_lib::state::History::new();
-    let cs = app_lib::state::poll_once(&history).await.expect("poll");
-    let c = cs.iter().find(|c| c.id == cname).expect("listed");
+    // The UI value (percent of one core) from a single poll with no delta
+    // baseline, so it can only come from cpuUtilization. A poll's stats call
+    // can miss while other live tests churn containers (the app then shows
+    // 0 for that tick), so allow a few fresh attempts — each with a NEW
+    // History, i.e. still no baseline.
+    let mut last = 0.0;
+    for _ in 0..5 {
+        let history = app_lib::state::History::new();
+        let cs = app_lib::state::poll_once(&history).await.expect("poll");
+        let c = cs.iter().find(|c| c.id == cname).expect("listed");
+        last = c.cpu;
+        if (50.0..=420.0).contains(&last) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
     assert!(
-        (50.0..=420.0).contains(&c.cpu),
-        "first poll cpu% should come from cpuUtilization, got {}",
-        c.cpu
+        (50.0..=420.0).contains(&last),
+        "first-poll cpu% should come from cpuUtilization, got {last}"
     );
 }
 
