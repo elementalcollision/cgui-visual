@@ -152,7 +152,21 @@ pub async fn run() -> Vec<DoctorCheck> {
         out.push(warn(format!("runtime API socket not found at {sock}")));
     }
 
+    // 9. background log capture (see logpersist.rs).
+    out.push(log_capture_check(crate::logpersist::status()));
+
     out
+}
+
+fn log_capture_check(s: crate::logpersist::Status) -> DoctorCheck {
+    if !s.enabled {
+        return ok("background log capture: off (Settings → Save container logs)".into());
+    }
+    ok(format!(
+        "background log capture: {} container{} followed",
+        s.followers,
+        if s.followers == 1 { "" } else { "s" }
+    ))
 }
 
 /// Error check when the CLI is older than the supported minimum. None when
@@ -227,6 +241,25 @@ fn config_path(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_capture_line_reports_follower_count_or_off() {
+        use crate::logpersist::Status;
+        let s = |enabled, followers| Status {
+            enabled,
+            followers,
+            catching_up: 0,
+        };
+        assert_eq!(
+            log_capture_check(s(true, 1)).text,
+            "background log capture: 1 container followed"
+        );
+        assert_eq!(
+            log_capture_check(s(true, 3)).text,
+            "background log capture: 3 containers followed"
+        );
+        assert!(log_capture_check(s(false, 0)).text.contains("off"));
+    }
 
     #[test]
     fn mismatch_warns_with_restart_fix() {

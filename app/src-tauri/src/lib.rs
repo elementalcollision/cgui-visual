@@ -148,13 +148,24 @@ pub(crate) fn set_menubar_mode<R: tauri::Runtime>(app: &tauri::AppHandle<R>, on:
     apply_dock_policy(app, main_window_visible(app));
 }
 
+// Applies the "Save container logs in the background" pref: on starts the
+// followers on the next poll (woken now), off kills them all.
+pub(crate) fn set_background_logs(on: bool) {
+    logpersist::set_enabled(on);
+    if on {
+        WAKE_TICK.store(true, Ordering::Relaxed);
+    }
+}
+
 // Runs once from RunEvent::Exit (tray Quit, Cmd-Q, last window closed).
 // Children outlive us otherwise: the PTY children and `container logs -f`.
 fn on_exit() {
     pty::close_all();
-    // Kill every `container logs -f` child, then let the batching writer
-    // put already-queued lines on disk before the process goes away.
+    // Kill every `container logs -f` child (display streams and the
+    // background capture followers), then let the batching writer put
+    // already-queued lines on disk before the process goes away.
     commands::stop_all_log_streams();
+    logpersist::stop_all();
     history::flush_logs();
 }
 
@@ -256,6 +267,7 @@ pub fn run() {
             // Load prefs once: register optional global hotkey.
             let initial_prefs = prefs::Prefs::load();
             MENUBAR_MODE.store(initial_prefs.menubar_mode, Ordering::Relaxed);
+            logpersist::set_enabled(initial_prefs.background_logs);
 
             // Open the long-form history sidecar (B6). Failures only mean
             // the trends tab will be empty; the live UI keeps working.
@@ -426,6 +438,8 @@ pub fn run() {
                             // Persist this tick before any other side effects
                             // so a crash mid-tick still gets the data on disk.
                             crate::history::record(&cs);
+                            // Background log capture reuses this very list.
+                            logpersist::reconcile(&cs);
                             let running = cs
                                 .iter()
                                 .filter(|c| c.status.eq_ignore_ascii_case("running"))

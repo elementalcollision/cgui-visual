@@ -26,6 +26,10 @@ pub struct Prefs {
     /// (see menubar_hint.rs). Backend-owned: the frontend never sends it,
     /// so `save_prefs` preserves the on-disk value.
     pub menubar_hint_shown: bool,
+    /// Capture every running container's logs into the local history DB
+    /// even while no Logs view is open (see logpersist.rs). Applied live by
+    /// `save_prefs`. Default on.
+    pub background_logs: bool,
 }
 
 impl Default for Prefs {
@@ -38,6 +42,7 @@ impl Default for Prefs {
             global_hotkey: String::new(),
             notify_on_exit: true,
             menubar_hint_shown: false,
+            background_logs: true,
         }
     }
 }
@@ -88,6 +93,7 @@ mod tests {
             global_hotkey: "CmdOrCtrl+Alt+Space".into(),
             notify_on_exit: false,
             menubar_hint_shown: true,
+            background_logs: false,
         };
         let s = serde_json::to_string(&p).unwrap();
         let back: Prefs = serde_json::from_str(&s).unwrap();
@@ -98,6 +104,28 @@ mod tests {
         assert_eq!(back.global_hotkey, "CmdOrCtrl+Alt+Space");
         assert!(!back.notify_on_exit);
         assert!(back.menubar_hint_shown);
+        assert!(!back.background_logs);
+    }
+
+    #[test]
+    fn background_logs_defaults_on_and_old_files_load() {
+        assert!(Prefs::default().background_logs);
+        // A v0.7.0 state.json has no `backgroundLogs` key.
+        let s = r#"{"dark": true, "sidebarCollapsed": false, "lastTab": "containers",
+            "menubarMode": true, "globalHotkey": "", "notifyOnExit": true,
+            "menubarHintShown": true}"#;
+        let p: Prefs = serde_json::from_str(s).unwrap();
+        assert!(p.background_logs);
+        assert!(p.menubar_mode);
+        // An explicit off survives a round trip.
+        let off = Prefs {
+            background_logs: false,
+            ..Prefs::default()
+        };
+        let json = serde_json::to_string(&off).unwrap();
+        assert!(json.contains("\"backgroundLogs\":false"));
+        let back: Prefs = serde_json::from_str(&json).unwrap();
+        assert!(!back.background_logs);
     }
 
     #[test]

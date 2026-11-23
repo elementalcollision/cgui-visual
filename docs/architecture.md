@@ -57,7 +57,7 @@ New dialogs go in their own file under `modals/`, are exported from
 | `model.rs` | Wire types shared with the frontend |
 | `state.rs` | Per-container history and CPU / network / disk rate computation across polls. Uses the CLI's native CPU figure (1.7.1+) when present |
 | `history.rs` | SQLite sidecar (`~/.config/cgui-gui/history.db`, owner-only) with 7-day metric and log history and 90-day Trivy scan summaries |
-| `logpersist.rs` | Persists log lines separately from the display stream, so reopening the Logs view does not duplicate history |
+| `logpersist.rs` | Background log capture: a supervisor driven by the poll tick keeps one `logs -f` follower per running container (cap 32) and one-shot catch-ups for stopped ones, resuming each run exactly via `history`'s `log_runs` counters |
 | `stacks.rs`, `compose.rs`, `snapshot.rs` | Stacks: TOML schema, up/down ordering and healthchecks (`stacks.rs`); `docker-compose.yml` import / export (`compose.rs`, uses `serde-saphyr`); stack config snapshot and restore (`snapshot.rs`) |
 | `pty.rs` | Embedded terminal sessions: a pty running `container exec -it`, streamed over `pty:tick:<id>` events |
 | `updates.rs` | Release check against the GitHub API through `/usr/bin/curl` |
