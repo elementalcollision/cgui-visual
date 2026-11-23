@@ -1001,6 +1001,50 @@ mod tests {
         assert_eq!(tagged, 8);
     }
 
+    /// A burst: far more lines than the clock can tell apart, so every row
+    /// carries the same `ts` (`run_batch` stamps them all `ts = 1`). Order
+    /// and resume point come from insertion order (`id`) and the run
+    /// counter, never from `ts`.
+    #[test]
+    fn burst_sharing_one_timestamp_reads_back_in_insertion_order() {
+        let mut conn = logs_conn();
+        let mut counts = HashMap::new();
+        write_log_batch(&mut conn, &run_batch("a", Some(42), 0, 1000), &mut counts).unwrap();
+
+        let distinct_ts: i64 = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT ts) FROM container_logs WHERE container_id = 'a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(distinct_ts, 1, "every row shares one timestamp");
+        let want: Vec<String> = (0..1000).map(|i| format!("l{i}")).collect();
+        assert_eq!(lines_for(&conn, "a"), want);
+        assert_eq!(progress(&conn, "a", 42).persisted_lines, 1000);
+
+        // The burst goes on in the next writer batch, same second.
+        write_log_batch(&mut conn, &run_batch("a", Some(42), 1000, 500), &mut counts).unwrap();
+        let want: Vec<String> = (0..1500).map(|i| format!("l{i}")).collect();
+        assert_eq!(lines_for(&conn, "a"), want);
+        assert_eq!(progress(&conn, "a", 42).persisted_lines, 1500);
+
+        // load_logs' read: newest `limit` rows by id, then reversed.
+        let mut st = conn
+            .prepare(
+                "SELECT line FROM container_logs WHERE container_id = ?
+                 ORDER BY id DESC LIMIT ?",
+            )
+            .unwrap();
+        let mut tail: Vec<String> = st
+            .query_map(params!["a", 300], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        tail.reverse();
+        assert_eq!(tail, want[1200..]);
+    }
+
     #[test]
     fn failed_batch_rolls_back_rows_and_counter_together() {
         let mut conn = logs_conn();

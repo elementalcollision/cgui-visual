@@ -378,9 +378,16 @@ async fn export_running_container_and_copy_in() {
     );
 }
 
+/// Is a `logs -f <cname>` process of THIS test process running? Only our
+/// own children count: a running cgui app follows the test containers too.
 fn pgrep_logs(cname: &str) -> bool {
     Command::new("pgrep")
-        .args(["-f", &format!("logs -f {cname}")])
+        .args([
+            "-P",
+            &std::process::id().to_string(),
+            "-f",
+            &format!("logs -f {cname}"),
+        ])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)

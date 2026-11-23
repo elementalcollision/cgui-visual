@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   why — "ended", "container stopped", "container removed", or "not live"
   when the stream couldn't start — even if the view was paused.
 
+### Internal
+
+- A test shows that a burst of log lines sharing one timestamp is stored
+  and read back in order, with the run's line count matching.
+- The live tests' "log follower stopped" checks now only look at the test's
+  own processes, so they pass while cgui is open (the app follows the test
+  containers too).
+
 ## [0.7.2] — 2026-11-23
 
 ### Fixed
