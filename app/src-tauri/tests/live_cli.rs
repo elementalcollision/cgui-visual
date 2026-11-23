@@ -402,3 +402,31 @@ async fn aborting_logs_stream_kills_its_process() {
     }
     assert!(gone, "`logs -f {cname}` survived task abort");
 }
+
+/// F18: a quoted `sh -c "..."` command must reach the container as one
+/// script argument (whitespace splitting used to break it and the
+/// container exited immediately); flag-like ids never reach the CLI.
+#[tokio::test]
+#[ignore]
+async fn quoted_command_and_flag_like_id() {
+    live_only!();
+    let mut g = Guard::default();
+    let cname = g.container(&name("quoted"));
+    let args = RunArgs {
+        command: Some(r#"sh -c "echo hi && sleep 300""#.into()),
+        ..run_args(&cname)
+    };
+    runtime::run_image(args).await.expect("run_image");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(find(&cname).await.status, "running");
+
+    let bad = RunArgs {
+        command: Some("sh -c \"unterminated".into()),
+        ..run_args(&name("quoted-bad"))
+    };
+    let e = runtime::run_image(bad).await.unwrap_err();
+    assert!(format!("{e:#}").contains("unterminated"), "{e:#}");
+
+    assert!(runtime::stop("--all").await.is_err());
+    assert!(runtime::delete("-f").await.is_err());
+}

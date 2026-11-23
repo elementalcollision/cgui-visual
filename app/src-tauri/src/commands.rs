@@ -203,6 +203,7 @@ pub async fn start_push(app: AppHandle, reference: String) -> Result<(), String>
     if !runtime::available().await {
         return Err("container runtime is not available".into());
     }
+    runtime::reject_flag_like("image reference", &reference).map_err(err_str)?;
     let child =
         runtime::spawn(&["image", "push", "--progress", "plain", &reference]).map_err(err_str)?;
     let app2 = app.clone();
@@ -346,6 +347,7 @@ pub async fn start_build(app: AppHandle, args: runtime::BuildArgs) -> Result<(),
     if !runtime::available().await {
         return Err("container runtime is not available".into());
     }
+    runtime::reject_flag_like("build context", &args.context).map_err(err_str)?;
     let argv = runtime::build_argv(&args);
     let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
     let child = runtime::spawn(&argv_ref).map_err(err_str)?;
@@ -658,6 +660,7 @@ pub async fn start_log_stream(
     }
     // `--boot` swaps stdio for the VM boot log (1.0); `-n` tails the
     // last N lines instead of replaying the whole history on attach.
+    runtime::reject_flag_like("container id", &id).map_err(err_str)?;
     let mut argv: Vec<String> = vec!["logs".into(), "-f".into()];
     if boot.unwrap_or(false) {
         argv.push("--boot".into());
@@ -732,6 +735,7 @@ pub async fn start_pull(app: AppHandle, reference: String) -> Result<(), String>
         }
         return Err("container runtime is not available".into());
     }
+    runtime::reject_flag_like("image reference", &reference).map_err(err_str)?;
     let mut argv = vec!["image", "pull", "--progress=plain"];
     argv.push(&reference);
     let child = runtime::spawn(&argv).map_err(err_str)?;

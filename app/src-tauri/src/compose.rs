@@ -332,10 +332,11 @@ fn pick_depends_on(d: Option<ComposeDependsOn>) -> Vec<String> {
 fn convert_argv(a: Option<ComposeArgv>) -> Vec<String> {
     match a {
         None => vec![],
-        // Compose treats unquoted strings as shell-form; we punt on shell
-        // parsing and pass it through whitespace-split. Users with complex
-        // shell syntax should switch to the array form for an exact mapping.
-        Some(ComposeArgv::String(s)) => s.split_whitespace().map(String::from).collect(),
+        // Compose treats strings as shell-form. We word-split with POSIX
+        // quoting rules (no expansions); an unparsable string (unterminated
+        // quote) falls back to plain whitespace splitting.
+        Some(ComposeArgv::String(s)) => crate::runtime::split_command(&s)
+            .unwrap_or_else(|_| s.split_whitespace().map(String::from).collect()),
         Some(ComposeArgv::List(l)) => l,
     }
 }
@@ -918,5 +919,18 @@ services:
             s.services[0].args,
             vec!["node", "server.js", "--port", "3000"]
         );
+    }
+
+    #[test]
+    fn command_string_honours_shell_quoting() {
+        let s = parse(
+            r#"
+services:
+  app:
+    image: x
+    command: sh -c "echo hi && sleep 5"
+"#,
+        );
+        assert_eq!(s.services[0].args, vec!["sh", "-c", "echo hi && sleep 5"]);
     }
 }

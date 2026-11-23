@@ -19,7 +19,7 @@ pub async fn run() -> Vec<DoctorCheck> {
     out.push(ok(format!("active profile: container → {RUNTIME_BIN}")));
 
     // 2. Runtime binary on PATH.
-    match Command::new("which")
+    match Command::new("/usr/bin/which")
         .kill_on_drop(true)
         .arg(RUNTIME_BIN)
         .output()
@@ -124,7 +124,7 @@ pub async fn run() -> Vec<DoctorCheck> {
     }
 
     // 7. trivy on PATH (optional).
-    match Command::new("which")
+    match Command::new("/usr/bin/which")
         .kill_on_drop(true)
         .arg("trivy")
         .output()
