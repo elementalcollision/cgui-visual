@@ -458,64 +458,343 @@ async fn quoted_command_and_flag_like_id() {
     assert!(runtime::delete("-f").await.is_err());
 }
 
-/// Reopening a Logs view must not duplicate persisted history. Drives the
-/// same `logpersist::start/stop_owner` path commands.rs uses.
+// ─── Background log capture (logpersist supervisor) ───────────────────
+//
+// These tests drive `logpersist::Supervisor` the way the app's poll tick
+// does (`reconcile` with a fresh container list) and read the result back
+// through the history DB. History lives in a temp XDG_CONFIG_HOME shared by
+// the tests of this process (history::init opens once per process); every
+// container has its own unique name, so the tests stay independent.
+
+use app_lib::logpersist::Supervisor;
+use std::sync::Arc;
+
+fn init_history() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let tmp = std::env::temp_dir();
+        // Leftovers of earlier (killed) runs.
+        if let Ok(rd) = std::fs::read_dir(&tmp) {
+            for e in rd.flatten() {
+                if e.file_name()
+                    .to_string_lossy()
+                    .starts_with("cgui-live-hist-")
+                {
+                    let _ = std::fs::remove_dir_all(e.path());
+                }
+            }
+        }
+        let dir = tmp.join(format!("cgui-live-hist-{}", std::process::id()));
+        // history::init reads XDG_CONFIG_HOME; set once, before any log test
+        // spawns work that reads it.
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        app_lib::history::init().expect("history init");
+    });
+}
+
+/// One poll tick: list containers and reconcile, like lib.rs does. Only
+/// this test's containers (`cgui-live-<pid>-<tag>*`) are passed on: the
+/// tests run in parallel in one process, and two supervisors must not
+/// follow the same container (the app has exactly one).
+async fn tick(sup: &Arc<Supervisor>, tag: &str) {
+    let prefix = name(tag);
+    let (cs, _) = runtime::list_containers_raw().await.expect("list");
+    let mine: Vec<_> = cs
+        .into_iter()
+        .filter(|c| c.id.starts_with(&prefix))
+        .collect();
+    sup.reconcile(&mine);
+}
+
+/// Persisted lines of `cid` (oldest first).
+fn rows(cid: &str) -> Vec<String> {
+    app_lib::history::flush_logs();
+    app_lib::history::load_logs(cid, 5000, None)
+        .into_iter()
+        .map(|l| l.line)
+        .collect()
+}
+
+/// `n1`, `n2`, ... -> 1, 2, ...
+fn counters(lines: &[String]) -> Vec<i64> {
+    lines
+        .iter()
+        .filter_map(|l| l.strip_prefix('n').and_then(|d| d.parse().ok()))
+        .collect()
+}
+
+/// Split a counter sequence into runs (each restarts at 1) and assert that
+/// every run is exactly 1..=k: no gap and no duplicate.
+fn assert_contiguous_runs(seq: &[i64], expected_runs: usize) -> Vec<usize> {
+    let mut runs: Vec<Vec<i64>> = Vec::new();
+    for &n in seq {
+        if n == 1 {
+            runs.push(Vec::new());
+        }
+        runs.last_mut().expect("sequence starts at 1").push(n);
+    }
+    assert_eq!(runs.len(), expected_runs, "runs in {seq:?}");
+    for r in &runs {
+        let want: Vec<i64> = (1..=r.len() as i64).collect();
+        assert_eq!(r, &want, "gap or duplicate in run: {r:?}");
+    }
+    runs.iter().map(Vec::len).collect()
+}
+
+const COUNTER_CMD: &str = "sh -c \"i=0; while true; do i=$((i+1)); echo n$i; sleep 0.2; done\"";
+
+fn counter_args(cname: &str) -> RunArgs {
+    RunArgs {
+        command: Some(COUNTER_CMD.into()),
+        ..run_args(cname)
+    }
+}
+
+/// Tick every 500 ms until `f` holds or `secs` pass.
+async fn tick_until(sup: &Arc<Supervisor>, tag: &str, secs: u64, f: impl Fn() -> bool) -> bool {
+    for _ in 0..secs * 2 {
+        tick(sup, tag).await;
+        if f() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    f()
+}
+
+async fn wait_logs_follower(cname: &str, present: bool, secs: u64) -> bool {
+    for _ in 0..secs * 4 {
+        if pgrep_logs(cname) == present {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    false
+}
+
+/// (a) A container's output is captured with no Logs view open at all, and
+/// the follower is one `logs -f` process.
 #[tokio::test]
 #[ignore]
-async fn reopening_log_view_does_not_duplicate_history() {
+async fn background_capture_without_any_view() {
     live_only!();
-    let dir = std::env::temp_dir().join(format!("cgui-live-hist-{}", std::process::id()));
+    init_history();
     let mut g = Guard::default();
-    g.file(dir.join("cgui-gui").join("history.db"));
-    // history::init reads XDG_CONFIG_HOME; no other live test touches it.
-    std::env::set_var("XDG_CONFIG_HOME", &dir);
-    app_lib::history::init().expect("history init");
+    let cname = g.container(&name("bg"));
+    runtime::run_image(counter_args(&cname)).await.expect("run");
+    let sup = Arc::new(Supervisor::new());
 
-    let cname = g.container(&name("histdup"));
+    assert!(
+        tick_until(&sup, "bg", 20, || rows(&cname).len() >= 8).await,
+        "captured only {:?}",
+        rows(&cname)
+    );
+    assert!(pgrep_logs(&cname), "a follower process should be running");
+    assert_eq!(sup.status().followers, 1);
+    sup.stop_all();
+    assert!(wait_logs_follower(&cname, false, 10).await);
+    let seq = counters(&rows(&cname));
+    assert_contiguous_runs(&seq, 1);
+}
+
+/// (b) "App restart": followers are killed, the container keeps printing,
+/// a fresh supervisor resumes from the stored count. Contiguous counter,
+/// no duplicates, no gap. Done twice, with a pause that spans many lines.
+#[tokio::test]
+#[ignore]
+async fn app_restart_resumes_without_gap_or_duplicate() {
+    live_only!();
+    init_history();
+    let mut g = Guard::default();
+    let cname = g.container(&name("resume"));
+    runtime::run_image(counter_args(&cname)).await.expect("run");
+
+    let mut last = 0usize;
+    for round in 0..3 {
+        // A brand-new supervisor each time = a new app process.
+        let sup = Arc::new(Supervisor::new());
+        let want = last + 6;
+        assert!(
+            tick_until(&sup, "resume", 25, || rows(&cname).len() >= want).await,
+            "round {round}: only {:?}",
+            rows(&cname)
+        );
+        sup.stop_all();
+        assert!(wait_logs_follower(&cname, false, 10).await, "killed");
+        last = rows(&cname).len();
+        // The app is "closed": the container keeps writing unobserved.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let seq = counters(&rows(&cname));
+        assert_contiguous_runs(&seq, 1);
+    }
+    // Final restart: everything that was written during the pauses is there.
+    let sup = Arc::new(Supervisor::new());
+    assert!(tick_until(&sup, "resume", 25, || rows(&cname).len() >= last + 12).await);
+    sup.stop_all();
+    let seq = counters(&rows(&cname));
+    let lens = assert_contiguous_runs(&seq, 1);
+    assert!(lens[0] >= last + 12, "pauses were back-filled: {lens:?}");
+    let _ = wait_logs_follower(&cname, false, 10).await;
+}
+
+/// (c) Restarting a container starts a new run: the new run's lines are
+/// captured, the old run's stay.
+#[tokio::test]
+#[ignore]
+async fn container_restart_captures_new_run_and_keeps_old() {
+    live_only!();
+    init_history();
+    let mut g = Guard::default();
+    let cname = g.container(&name("rerun"));
+    runtime::run_image(counter_args(&cname)).await.expect("run");
+    let sup = Arc::new(Supervisor::new());
+
+    assert!(tick_until(&sup, "rerun", 20, || rows(&cname).len() >= 6).await);
+    let run1 = find(&cname).await.started_unix.expect("run 1 start");
+
+    runtime::stop(&cname).await.expect("stop");
+    // Stopping (not restarting yet): follower is killed, the run's tail is
+    // caught up and flagged complete.
+    assert!(
+        tick_until(&sup, "rerun", 20, || {
+            app_lib::history::run_progress(&cname, run1).is_some_and(|p| p.complete)
+        })
+        .await,
+        "run 1 completed"
+    );
+    assert!(wait_logs_follower(&cname, false, 10).await);
+    let run1_lines = rows(&cname).len();
+
+    tokio::time::sleep(Duration::from_millis(1200)).await; // distinct start second
+    runtime::start(&cname).await.expect("start");
+    let run2 = find(&cname).await.started_unix.expect("run 2 start");
+    assert!(run2 > run1, "a restart is a new run");
+    assert!(
+        tick_until(&sup, "rerun", 25, || rows(&cname).len() >= run1_lines + 6).await,
+        "new run captured: {:?}",
+        rows(&cname)
+    );
+    sup.stop_all();
+
+    let p1 = app_lib::history::run_progress(&cname, run1).unwrap();
+    let p2 = app_lib::history::run_progress(&cname, run2).unwrap();
+    assert_eq!(p1.persisted_lines as usize, run1_lines, "old run untouched");
+    assert!(p2.persisted_lines >= 6);
+    let lens = assert_contiguous_runs(&counters(&rows(&cname)), 2);
+    assert_eq!(lens[0], run1_lines);
+    let _ = wait_logs_follower(&cname, false, 10).await;
+}
+
+/// (d) A container that runs and exits while no supervisor is running is
+/// caught up on the next reconcile — exactly once. Also covers a container
+/// that exits while being followed (its unread tail is completed).
+#[tokio::test]
+#[ignore]
+async fn exited_container_is_caught_up_once() {
+    live_only!();
+    init_history();
+    let mut g = Guard::default();
+
+    // d1: ran and exited with no supervisor.
+    let c1 = g.container(&name("gone"));
     let args = RunArgs {
-        command: Some(
-            "sh -c \"i=0; while true; do i=$((i+1)); echo tick$i; sleep 1; done\"".into(),
-        ),
-        ..run_args(&cname)
+        command: Some("sh -c \"for i in 1 2 3 4 5 6 7 8 9 10; do echo n$i; done\"".into()),
+        ..run_args(&c1)
     };
     runtime::run_image(args).await.expect("run");
-    tokio::time::sleep(Duration::from_secs(4)).await; // pre-existing output
-
-    let rows = |c: &str| {
-        app_lib::history::flush_logs();
-        app_lib::history::load_logs(c, 5000, None)
-    };
-
-    // View open #1: no history yet -> full replay stored once.
-    assert!(app_lib::logpersist::start("s1", &cname).await.unwrap());
-    // A second view of the same container must not start a second follower.
-    assert!(!app_lib::logpersist::start("s1b", &cname).await.unwrap());
     tokio::time::sleep(Duration::from_secs(3)).await;
-    app_lib::logpersist::stop_owner("s1");
-    let first = rows(&cname);
-    assert!(
-        first.len() >= 5,
-        "replay + live stored, got {}",
-        first.len()
-    );
-    assert!(first.iter().any(|l| l.line == "tick1"), "replay captured");
+    assert_eq!(find(&c1).await.status, "exited");
+    assert!(rows(&c1).is_empty(), "nothing captured yet");
 
-    // View opens #2 and #3: history exists -> `-n 0`, new lines only.
-    for owner in ["s2", "s3"] {
-        assert!(app_lib::logpersist::start(owner, &cname).await.unwrap());
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        app_lib::logpersist::stop_owner(owner);
-    }
-    let all = rows(&cname);
+    // d2: starts printing, exits while the supervisor is following it.
+    let c2 = g.container(&name("gone-follow"));
+    let args = RunArgs {
+        command: Some(
+            "sh -c \"i=0; while [ $i -lt 30 ]; do i=$((i+1)); echo n$i; sleep 0.2; done\"".into(),
+        ),
+        ..run_args(&c2)
+    };
+    runtime::run_image(args).await.expect("run");
+
+    let sup = Arc::new(Supervisor::new());
+    assert!(tick_until(&sup, "gone", 20, || rows(&c1).len() == 10).await);
+    assert_eq!(counters(&rows(&c1)), (1..=10).collect::<Vec<_>>());
     assert!(
-        all.len() > first.len(),
-        "new live lines were still captured"
+        tick_until(&sup, "gone", 40, || rows(&c2).len() == 30).await,
+        "followed container fully captured: {:?}",
+        rows(&c2)
     );
-    let mut seen = std::collections::HashSet::new();
-    for l in &all {
-        assert!(seen.insert(l.line.clone()), "duplicate row: {}", l.line);
+    assert_eq!(counters(&rows(&c2)), (1..=30).collect::<Vec<_>>());
+
+    // More ticks, and a whole new supervisor: no re-read, no duplicates.
+    for s in [sup.clone(), Arc::new(Supervisor::new())] {
+        for _ in 0..4 {
+            tick(&s, "gone").await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        s.stop_all();
     }
-    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(rows(&c1).len(), 10);
+    assert_eq!(rows(&c2).len(), 30);
+    let started = find(&c1).await.started_unix.unwrap();
+    assert!(
+        app_lib::history::run_progress(&c1, started)
+            .unwrap()
+            .complete
+    );
+}
+
+/// (e) Stopping or deleting a container kills its `logs -f` process, and
+/// disabling the supervisor kills all of them.
+#[tokio::test]
+#[ignore]
+async fn stopping_container_or_supervisor_kills_follower_process() {
+    live_only!();
+    init_history();
+    let mut g = Guard::default();
+    let (a, b, c) = (
+        g.container(&name("kill-a")),
+        g.container(&name("kill-b")),
+        g.container(&name("kill-c")),
+    );
+    for n in [&a, &b, &c] {
+        runtime::run_image(counter_args(n)).await.expect("run");
+    }
+    let sup = Arc::new(Supervisor::new());
+    assert!(
+        tick_until(&sup, "kill", 20, || pgrep_logs(&a)
+            && pgrep_logs(&b)
+            && pgrep_logs(&c))
+        .await
+    );
+    assert_eq!(sup.status().followers, 3);
+
+    // Container stopped -> its follower dies, the others stay.
+    runtime::stop(&a).await.expect("stop");
+    assert!(
+        tick_until(&sup, "kill", 20, || !pgrep_logs(&a)).await,
+        "follower of stopped container survived"
+    );
+    assert!(pgrep_logs(&b) && pgrep_logs(&c));
+
+    // Container deleted -> follower dies.
+    cli_ok(&["delete", "--force", &b]);
+    assert!(
+        tick_until(&sup, "kill", 20, || !pgrep_logs(&b)).await,
+        "follower of deleted container survived"
+    );
+
+    // Setting switched off -> everything dies; on again -> resumes.
+    sup.set_enabled(false);
+    assert!(wait_logs_follower(&c, false, 10).await);
+    assert_eq!(sup.status().followers, 0);
+    tick(&sup, "kill").await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(!pgrep_logs(&c), "disabled supervisor must not follow");
+    sup.set_enabled(true);
+    assert!(tick_until(&sup, "kill", 20, || pgrep_logs(&c)).await);
+    sup.stop_all();
+    assert!(wait_logs_follower(&c, false, 10).await);
 }
 
 /// Commit (1.6+): works on a running and on a stopped container, and the
