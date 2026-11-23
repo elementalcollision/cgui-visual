@@ -44,7 +44,7 @@ describe('api fixture fallback (outside Tauri)', () => {
   it('savePrefs is a no-op outside Tauri', async () => {
     await expect(api.savePrefs({
       dark: true, sidebarCollapsed: false, lastTab: 'containers',
-      menubarMode: false, globalHotkey: '', notifyOnExit: true,
+      menubarMode: false, globalHotkey: '', notifyOnExit: true, backgroundLogs: true,
     })).resolves.toBeUndefined();
   });
 });

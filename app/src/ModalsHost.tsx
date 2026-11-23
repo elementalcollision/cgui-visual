@@ -46,6 +46,8 @@ export default function ModalsHost(props: {
   setGlobalHotkey: (s: string) => void;
   notifyOnExit: boolean;
   setNotifyOnExit: (b: boolean) => void;
+  backgroundLogs: boolean;
+  setBackgroundLogs: (b: boolean) => void;
   dark: boolean;
   setDark: (b: boolean) => void;
   // Command palette inputs + dispatch
@@ -62,6 +64,7 @@ export default function ModalsHost(props: {
   const {
     modal, t, onClose, onUpdateClosed, onOnboardingResolved,
     menubarMode, setMenubarMode, globalHotkey, setGlobalHotkey, notifyOnExit, setNotifyOnExit,
+    backgroundLogs, setBackgroundLogs,
     dark, setDark, containers, images, stacks, setTab, setModal, setLogTarget,
   } = props;
   if (!modal) return null;
@@ -92,6 +95,7 @@ export default function ModalsHost(props: {
         menubarMode={menubarMode} setMenubarMode={setMenubarMode}
         globalHotkey={globalHotkey} setGlobalHotkey={setGlobalHotkey}
         notifyOnExit={notifyOnExit} setNotifyOnExit={setNotifyOnExit}
+        backgroundLogs={backgroundLogs} setBackgroundLogs={setBackgroundLogs}
       />;
     case 'volumeInspect':
       return <JsonInspectModal t={t} title={modal.name} subtitle="container volume inspect"

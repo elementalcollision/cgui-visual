@@ -14,12 +14,14 @@ export function SettingsModal({
   menubarMode, setMenubarMode,
   globalHotkey, setGlobalHotkey,
   notifyOnExit, setNotifyOnExit,
+  backgroundLogs, setBackgroundLogs,
 }: {
   t: ThemeTokens; onClose: () => void;
   dark: boolean; setDark: (b: boolean) => void;
   menubarMode: boolean; setMenubarMode: (b: boolean) => void;
   globalHotkey: string; setGlobalHotkey: (s: string) => void;
   notifyOnExit: boolean; setNotifyOnExit: (b: boolean) => void;
+  backgroundLogs: boolean; setBackgroundLogs: (b: boolean) => void;
 }) {
   return (
     <Backdrop title="Settings" onClose={onClose}>
@@ -72,6 +74,15 @@ export function SettingsModal({
             hint="Show a macOS notification when a running container exits. Non-zero exit codes are highlighted."
             value={notifyOnExit}
             onChange={setNotifyOnExit}
+          />
+
+          <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: t.fg3, margin: '20px 0 10px' }}>Logs</div>
+          <SettingsToggle
+            t={t}
+            label="Save container logs in the background"
+            hint="Keeps one `container logs` process per running container (up to 32) so output is saved even while no Logs view is open, and stores it locally for 7 days. Containers that ran and exited while cgui was closed are caught up too. Boot logs are never saved. Takes effect immediately."
+            value={backgroundLogs}
+            onChange={setBackgroundLogs}
           />
 
           <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: t.fg3, margin: '20px 0 10px' }}>Services</div>

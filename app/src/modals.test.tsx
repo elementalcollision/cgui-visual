@@ -271,6 +271,7 @@ describe('SettingsModal runtime', () => {
         menubarMode={false} setMenubarMode={() => {}}
         globalHotkey="" setGlobalHotkey={() => {}}
         notifyOnExit setNotifyOnExit={() => {}}
+        backgroundLogs setBackgroundLogs={() => {}}
       />,
     );
     expect(screen.queryByText(/Runtime profile/i)).toBeNull();
@@ -288,6 +289,7 @@ describe('SettingsModal menu-bar toggle', () => {
         menubarMode={menubarMode} setMenubarMode={setMenubarMode}
         globalHotkey="" setGlobalHotkey={() => {}}
         notifyOnExit setNotifyOnExit={() => {}}
+        backgroundLogs setBackgroundLogs={() => {}}
       />,
     );
     return screen.getByRole('switch', { name: /menu-bar mode/i });
@@ -307,6 +309,36 @@ describe('SettingsModal menu-bar toggle', () => {
     expect(toggle).toHaveAttribute('aria-checked', 'false');
     await user.click(toggle);
     expect(setMenubarMode).toHaveBeenCalledWith(true);
+  });
+});
+
+describe('SettingsModal background log capture toggle', () => {
+  function renderLogs(backgroundLogs: boolean, setBackgroundLogs: (b: boolean) => void) {
+    render(
+      <SettingsModal
+        t={t} onClose={() => {}}
+        dark setDark={() => {}}
+        menubarMode={false} setMenubarMode={() => {}}
+        globalHotkey="" setGlobalHotkey={() => {}}
+        notifyOnExit setNotifyOnExit={() => {}}
+        backgroundLogs={backgroundLogs} setBackgroundLogs={setBackgroundLogs}
+      />,
+    );
+    return screen.getByRole('switch', { name: /save container logs in the background/i });
+  }
+
+  it('is a labelled switch that reflects the pref and explains the cost', () => {
+    const toggle = renderLogs(true, () => {});
+    expect(toggle).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByText(/one `container logs` process per running container/i)).toBeInTheDocument();
+    expect(screen.getByText(/stores it locally for 7 days/i)).toBeInTheDocument();
+  });
+
+  it('toggling calls setBackgroundLogs with the inverted value', async () => {
+    const user = userEvent.setup();
+    const set = vi.fn();
+    await user.click(renderLogs(true, set));
+    expect(set).toHaveBeenCalledWith(false);
   });
 });
 

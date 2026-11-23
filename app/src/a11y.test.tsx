@@ -201,11 +201,13 @@ describe('Settings toggles', () => {
         menubarMode={false} setMenubarMode={() => {}}
         globalHotkey="" setGlobalHotkey={() => {}}
         notifyOnExit={false} setNotifyOnExit={() => {}}
+        backgroundLogs setBackgroundLogs={() => {}}
       />,
     );
     expect(screen.getByRole('switch', { name: /dark mode/i })).toBeChecked();
     expect(screen.getByRole('switch', { name: /menu-bar mode/i })).not.toBeChecked();
     expect(screen.getByRole('switch', { name: /notify on container exit/i })).not.toBeChecked();
+    expect(screen.getByRole('switch', { name: /save container logs in the background/i })).toBeChecked();
   });
 });
 
@@ -292,6 +294,7 @@ describe('every button has an accessible name', () => {
           t={t} onClose={() => {}}
           dark setDark={() => {}} menubarMode setMenubarMode={() => {}}
           globalHotkey="" setGlobalHotkey={() => {}} notifyOnExit setNotifyOnExit={() => {}}
+          backgroundLogs setBackgroundLogs={() => {}}
         />
         <DoctorModal t={t} onClose={() => {}} />
       </>,

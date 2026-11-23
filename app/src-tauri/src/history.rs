@@ -31,6 +31,8 @@ const RETENTION_SECS: i64 = 7 * 24 * 3600;
 /// Persisted log lines age out on the same schedule as metrics (they are
 /// additionally capped per container by LOGS_PER_CONTAINER).
 const LOG_RETENTION_SECS: i64 = RETENTION_SECS;
+/// `log_runs` bookkeeping rows are kept this long after their last write.
+const LOG_RUNS_RETENTION_SECS: i64 = 90 * 24 * 3600;
 /// Trivy scan summaries are kept for 90 days...
 const SCAN_RETENTION_SECS: i64 = 90 * 24 * 3600;
 /// ...except that the newest this-many scans per image are always kept,
@@ -189,7 +191,36 @@ fn open_with_schema(path: &std::path::Path) -> Result<Connection> {
         "#,
     )
     .context("init schema")?;
+    migrate(&conn).context("migrate schema")?;
     Ok(conn)
+}
+
+/// Idempotent upgrades of databases written by older builds.
+///
+/// v0.7.1 adds per-run bookkeeping for background log capture:
+///   * `container_logs.started_at` (nullable): the run the line belongs to.
+///     Rows written by v0.7.0 and earlier keep NULL.
+///   * `log_runs`: one row per (container, run) holding how many lines of
+///     that run's stdio log have been persisted (see `write_log_batch`).
+fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    let has_col: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('container_logs') WHERE name = 'started_at'")?
+        .exists([])?;
+    if !has_col {
+        conn.execute_batch("ALTER TABLE container_logs ADD COLUMN started_at INTEGER;")?;
+    }
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS log_runs (
+            container_id    TEXT    NOT NULL,
+            started_at      INTEGER NOT NULL,
+            persisted_lines INTEGER NOT NULL DEFAULT 0,
+            complete        INTEGER NOT NULL DEFAULT 0,
+            updated_at      INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (container_id, started_at)
+        );
+        "#,
+    )
 }
 
 /// Cap on persisted log lines per container. Avoids the DB ballooning
@@ -275,6 +306,15 @@ fn gc_conn(conn: &Connection, now: i64) {
         params![now - LOG_RETENTION_SECS],
     ) {
         eprintln!("history gc (logs): {e}");
+    }
+    // Run bookkeeping outlives the lines themselves (a quiet long-running
+    // container must not forget how much of its log it already saved, or
+    // it would be re-saved in full); it is a few integers per run.
+    if let Err(e) = conn.execute(
+        "DELETE FROM log_runs WHERE updated_at < ?",
+        params![now - LOG_RUNS_RETENTION_SECS],
+    ) {
+        eprintln!("history gc (log runs): {e}");
     }
     // Old scans go, except the newest SCANS_KEEP_PER_IMAGE of each image.
     if let Err(e) = conn.execute(
@@ -446,6 +486,11 @@ pub struct LogLine {
     pub line: String,
 }
 
+/// Whether the DB is open (persistence is possible).
+pub fn ready() -> bool {
+    DB.get().is_some()
+}
+
 /// Flush a batch once it holds this many lines…
 const LOG_BATCH_MAX: usize = 200;
 /// …or once the oldest queued line has waited this long.
@@ -454,12 +499,31 @@ const LOG_BATCH_WINDOW: Duration = Duration::from_millis(100);
 /// container sitting at the cap isn't trimmed on every flush).
 const LOGS_TRIM_SLACK: i64 = LOGS_PER_CONTAINER / 20;
 
-enum LogMsg {
-    Line {
+/// One line of a container's stdio log on its way to disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogRow {
+    pub container_id: String,
+    /// Start time (unix seconds) of the run the line belongs to; `None`
+    /// for lines not tied to a run (they are stored but never counted).
+    pub started_at: Option<i64>,
+    pub ts: i64,
+    pub line: String,
+}
+
+/// One unit of work for the writer, applied in queue order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LogOp {
+    Row(LogRow),
+    /// The run's log was read to its end (the container is stopped), so a
+    /// catch-up is not needed again.
+    Complete {
         container_id: String,
-        ts: i64,
-        line: String,
+        started_at: i64,
     },
+}
+
+enum LogMsg {
+    Op(LogOp),
     /// Flush everything queued so far, then ack.
     Flush(mpsc::Sender<()>),
 }
@@ -484,21 +548,34 @@ fn log_sender() -> Option<&'static mpsc::Sender<LogMsg>> {
     LOG_TX.get()
 }
 
-/// Queue a log line for persistence. Best-effort and non-blocking —
-/// silently no-ops when the DB isn't initialised. A single writer
-/// thread batches lines (≤ LOG_BATCH_MAX or LOG_BATCH_WINDOW) into one
-/// transaction, so a chatty container no longer takes the global DB
-/// mutex per line and can't starve the 2 s metrics `record`.
-pub fn record_log(container_id: &str, line: &str) {
+/// Queue a log line of run (`container_id`, `started_at`) for persistence.
+/// Best-effort and non-blocking — silently no-ops when the DB isn't
+/// initialised. A single writer thread batches lines (≤ LOG_BATCH_MAX or
+/// LOG_BATCH_WINDOW) into one transaction, so a chatty container can't
+/// starve the 2 s metrics `record`.
+pub fn record_run_log(container_id: &str, started_at: i64, line: &str) {
+    queue(LogOp::Row(LogRow {
+        container_id: container_id.to_string(),
+        started_at: Some(started_at),
+        ts: crate::timeutil::now_unix(),
+        line: line.to_string(),
+    }));
+}
+
+/// Record that the run's log has been read to the end.
+pub fn mark_run_complete(container_id: &str, started_at: i64) {
+    queue(LogOp::Complete {
+        container_id: container_id.to_string(),
+        started_at,
+    });
+}
+
+fn queue(op: LogOp) {
     if DB.get().is_none() {
         return;
     }
     if let Some(tx) = log_sender() {
-        let _ = tx.send(LogMsg::Line {
-            container_id: container_id.to_string(),
-            ts: crate::timeutil::now_unix(),
-            line: line.to_string(),
-        });
+        let _ = tx.send(LogMsg::Op(op));
     }
 }
 
@@ -512,10 +589,49 @@ pub fn flush_logs() {
     }
 }
 
+/// How much of one run's log is already stored.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunProgress {
+    /// Lines of the run's stdio log that have been persisted (see
+    /// `write_log_batch` for exactly what that counts).
+    pub persisted_lines: i64,
+    /// The log was read to its end after the container stopped.
+    pub complete: bool,
+}
+
+/// Progress for one run; a run never seen before is `RunProgress::default()`.
+/// `None` when the DB isn't initialised. Callers that just stopped a writer
+/// should `flush_logs()` first so queued lines are reflected.
+pub fn run_progress(container_id: &str, started_at: i64) -> Option<RunProgress> {
+    let conn = DB.get()?.lock().ok()?;
+    run_progress_conn(&conn, container_id, started_at).ok()
+}
+
+fn run_progress_conn(
+    conn: &Connection,
+    container_id: &str,
+    started_at: i64,
+) -> rusqlite::Result<RunProgress> {
+    let row = conn.query_row(
+        "SELECT persisted_lines, complete FROM log_runs
+         WHERE container_id = ? AND started_at = ?",
+        params![container_id, started_at],
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? != 0)),
+    );
+    match row {
+        Ok((persisted_lines, complete)) => Ok(RunProgress {
+            persisted_lines,
+            complete,
+        }),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(RunProgress::default()),
+        Err(e) => Err(e),
+    }
+}
+
 fn log_writer_loop(rx: mpsc::Receiver<LogMsg>) {
     // Approximate per-container row counts, seeded lazily from the DB.
     let mut counts: HashMap<String, i64> = HashMap::new();
-    let mut batch: Vec<(String, i64, String)> = Vec::new();
+    let mut batch: Vec<LogOp> = Vec::new();
     let mut acks: Vec<mpsc::Sender<()>> = Vec::new();
     loop {
         // Wait for the first message, then gather more until the window
@@ -529,11 +645,7 @@ fn log_writer_loop(rx: mpsc::Receiver<LogMsg>) {
         let mut next = Some(first);
         while let Some(msg) = next.take() {
             match msg {
-                LogMsg::Line {
-                    container_id,
-                    ts,
-                    line,
-                } => batch.push((container_id, ts, line)),
+                LogMsg::Op(op) => batch.push(op),
                 LogMsg::Flush(ack) => {
                     acks.push(ack);
                     break;
@@ -568,22 +680,41 @@ fn log_writer_loop(rx: mpsc::Receiver<LogMsg>) {
     }
 }
 
-/// Insert `batch` in one transaction, then trim any container whose
-/// (approximate, in-memory) row count exceeds cap + slack. Counts are
-/// seeded with one COUNT(*) the first time a container is seen, so the
-/// steady state is a plain batched INSERT with no per-line query.
+/// Apply `batch` in ONE transaction: insert the rows, bump the per-run
+/// `log_runs.persisted_lines` by the number of rows inserted for each run,
+/// set `complete` flags, then trim any container whose (approximate,
+/// in-memory) row count exceeds cap + slack.
+///
+/// Rows and counters commit or roll back together, so after a crash
+/// `persisted_lines` is exactly the number of lines of that run the
+/// follower had delivered to the DB; a follower resuming from it (see
+/// `logpersist`) neither loses nor repeats a line.
+///
+/// `persisted_lines` counts lines SEEN for the run, not rows currently
+/// stored: trimming (per-container row cap) and age-based GC delete rows
+/// but never touch the counter, because the counter is an offset into the
+/// CLI's append-only log, which does not shrink when we drop old rows.
+///
+/// Row counts are seeded with one COUNT(*) the first time a container is
+/// seen, so the steady state is a plain batched INSERT with no per-line
+/// query.
 fn write_log_batch(
     conn: &mut Connection,
-    batch: &[(String, i64, String)],
+    batch: &[LogOp],
     counts: &mut HashMap<String, i64>,
 ) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
+    let now = crate::timeutil::now_unix();
     let mut touched: Vec<&str> = Vec::new();
+    let mut per_run: HashMap<(&str, i64), i64> = HashMap::new();
     {
         let mut ins = tx.prepare_cached(
-            "INSERT INTO container_logs (container_id, ts, line) VALUES (?, ?, ?)",
+            "INSERT INTO container_logs (container_id, ts, line, started_at)
+             VALUES (?, ?, ?, ?)",
         )?;
-        for (cid, ts, line) in batch {
+        for op in batch {
+            let LogOp::Row(r) = op else { continue };
+            let cid = &r.container_id;
             if !counts.contains_key(cid) {
                 let n: i64 = tx.query_row(
                     "SELECT COUNT(*) FROM container_logs WHERE container_id = ?",
@@ -592,13 +723,43 @@ fn write_log_batch(
                 )?;
                 counts.insert(cid.clone(), n);
             }
-            ins.execute(params![cid, ts, line])?;
+            ins.execute(params![cid, r.ts, r.line, r.started_at])?;
             if let Some(c) = counts.get_mut(cid) {
                 *c += 1;
             }
             if !touched.contains(&cid.as_str()) {
                 touched.push(cid);
             }
+            if let Some(s) = r.started_at {
+                *per_run.entry((cid.as_str(), s)).or_insert(0) += 1;
+            }
+        }
+    }
+    for ((cid, s), n) in &per_run {
+        tx.execute(
+            "INSERT INTO log_runs (container_id, started_at, persisted_lines, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (container_id, started_at) DO UPDATE SET
+                 persisted_lines = persisted_lines + excluded.persisted_lines,
+                 updated_at = excluded.updated_at",
+            params![cid, s, n, now],
+        )?;
+    }
+    // Completes come after the rows of their run in queue order, so
+    // applying them after the inserts above is equivalent.
+    for op in batch {
+        if let LogOp::Complete {
+            container_id,
+            started_at,
+        } = op
+        {
+            tx.execute(
+                "INSERT INTO log_runs (container_id, started_at, complete, updated_at)
+                 VALUES (?1, ?2, 1, ?3)
+                 ON CONFLICT (container_id, started_at) DO UPDATE SET
+                     complete = 1, updated_at = excluded.updated_at",
+                params![container_id, started_at, now],
+            )?;
         }
     }
     for cid in touched {
@@ -618,18 +779,6 @@ fn write_log_batch(
         }
     }
     tx.commit()
-}
-
-/// Whether any log line is stored for `container_id`. `None` when the DB
-/// isn't initialised (nothing can be persisted).
-pub fn has_logs(container_id: &str) -> Option<bool> {
-    let conn = DB.get()?.lock().ok()?;
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM container_logs WHERE container_id = ?)",
-        params![container_id],
-        |r| r.get::<_, bool>(0),
-    )
-    .ok()
 }
 
 /// Load the most recent `limit` lines for one container, optionally
@@ -790,6 +939,7 @@ mod tests {
             );",
         )
         .unwrap();
+        migrate(&conn).unwrap();
         conn
     }
 
@@ -803,10 +953,153 @@ mod tests {
             .collect()
     }
 
-    fn batch_of(cid: &str, from: usize, n: usize) -> Vec<(String, i64, String)> {
+    fn batch_of(cid: &str, from: usize, n: usize) -> Vec<LogOp> {
+        run_batch(cid, None, from, n)
+    }
+
+    fn run_batch(cid: &str, run: Option<i64>, from: usize, n: usize) -> Vec<LogOp> {
         (from..from + n)
-            .map(|i| (cid.to_string(), 1, format!("l{i}")))
+            .map(|i| {
+                LogOp::Row(LogRow {
+                    container_id: cid.to_string(),
+                    started_at: run,
+                    ts: 1,
+                    line: format!("l{i}"),
+                })
+            })
             .collect()
+    }
+
+    fn progress(conn: &Connection, cid: &str, run: i64) -> RunProgress {
+        run_progress_conn(conn, cid, run).unwrap()
+    }
+
+    #[test]
+    fn writer_updates_run_counter_in_the_same_transaction_as_rows() {
+        let mut conn = logs_conn();
+        let mut counts = HashMap::new();
+        let mut b = run_batch("a", Some(100), 0, 3);
+        b.extend(run_batch("a", Some(200), 0, 2));
+        b.extend(run_batch("b", Some(100), 0, 4));
+        write_log_batch(&mut conn, &b, &mut counts).unwrap();
+        assert_eq!(progress(&conn, "a", 100).persisted_lines, 3);
+        assert_eq!(progress(&conn, "a", 200).persisted_lines, 2);
+        assert_eq!(progress(&conn, "b", 100).persisted_lines, 4);
+        // Counters accumulate across batches.
+        write_log_batch(&mut conn, &run_batch("a", Some(100), 3, 5), &mut counts).unwrap();
+        assert_eq!(progress(&conn, "a", 100).persisted_lines, 8);
+        // Unknown run -> zero, not complete.
+        assert_eq!(progress(&conn, "a", 999), RunProgress::default());
+        // Row tagging.
+        let tagged: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM container_logs WHERE started_at = 100 AND container_id='a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tagged, 8);
+    }
+
+    #[test]
+    fn failed_batch_rolls_back_rows_and_counter_together() {
+        let mut conn = logs_conn();
+        let mut counts = HashMap::new();
+        write_log_batch(&mut conn, &run_batch("a", Some(1), 0, 2), &mut counts).unwrap();
+        // Make the counter upsert fail mid-transaction (after the inserts).
+        conn.execute_batch("DROP TABLE log_runs;").unwrap();
+        let r = write_log_batch(&mut conn, &run_batch("a", Some(1), 2, 3), &mut counts);
+        assert!(r.is_err());
+        assert_eq!(lines_for(&conn, "a"), vec!["l0", "l1"], "rows rolled back");
+    }
+
+    #[test]
+    fn trimming_and_gc_do_not_reduce_the_run_counter() {
+        let mut conn = logs_conn();
+        let mut counts = HashMap::new();
+        let n = (LOGS_PER_CONTAINER + LOGS_TRIM_SLACK + 1) as usize;
+        write_log_batch(&mut conn, &run_batch("a", Some(7), 0, n), &mut counts).unwrap();
+        assert_eq!(counts["a"], LOGS_PER_CONTAINER, "rows were trimmed");
+        // The counter counts lines SEEN, not rows stored.
+        assert_eq!(progress(&conn, "a", 7).persisted_lines, n as i64);
+        // Age GC drops rows (ts = 1 is ancient) but keeps the bookkeeping.
+        gc_conn(&conn, crate::timeutil::now_unix());
+        assert!(lines_for(&conn, "a").is_empty());
+        assert_eq!(progress(&conn, "a", 7).persisted_lines, n as i64);
+    }
+
+    #[test]
+    fn complete_flag_is_set_even_for_a_run_without_lines() {
+        let mut conn = logs_conn();
+        let mut counts = HashMap::new();
+        let mut b = run_batch("a", Some(5), 0, 2);
+        b.push(LogOp::Complete {
+            container_id: "a".into(),
+            started_at: 5,
+        });
+        b.push(LogOp::Complete {
+            container_id: "quiet".into(),
+            started_at: 9,
+        });
+        write_log_batch(&mut conn, &b, &mut counts).unwrap();
+        assert_eq!(
+            progress(&conn, "a", 5),
+            RunProgress {
+                persisted_lines: 2,
+                complete: true
+            }
+        );
+        assert_eq!(
+            progress(&conn, "quiet", 9),
+            RunProgress {
+                persisted_lines: 0,
+                complete: true
+            }
+        );
+    }
+
+    #[test]
+    fn migrates_a_v070_database_without_losing_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE container_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                container_id TEXT NOT NULL, ts INTEGER NOT NULL, line TEXT NOT NULL
+            );
+            INSERT INTO container_logs (container_id, ts, line) VALUES ('a', 5, 'old');",
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap(); // idempotent
+        assert_eq!(lines_for(&conn, "a"), vec!["old"]);
+        let started: Option<i64> = conn
+            .query_row("SELECT started_at FROM container_logs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(started, None, "legacy rows carry no run");
+        assert_eq!(progress(&conn, "a", 1), RunProgress::default());
+    }
+
+    #[test]
+    fn full_schema_init_on_a_v070_file_migrates_in_place() {
+        let dir = scratch("migrate-v070");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.db");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE container_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    container_id TEXT NOT NULL, ts INTEGER NOT NULL, line TEXT NOT NULL
+                );
+                CREATE INDEX idx_logs_container_ts ON container_logs (container_id, ts);
+                INSERT INTO container_logs (container_id, ts, line) VALUES ('a', 5, 'old');",
+            )
+            .unwrap();
+        }
+        let conn = open_with_schema(&path).unwrap();
+        assert_eq!(lines_for(&conn, "a"), vec!["old"]);
+        assert_eq!(progress(&conn, "a", 1), RunProgress::default());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
