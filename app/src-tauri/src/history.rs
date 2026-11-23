@@ -29,6 +29,15 @@ use crate::model::Container;
 /// Sample retention. Seven days at 2 s ticks ≈ 300k rows per container —
 /// trivial for SQLite. Adjustable later via prefs if needed.
 const RETENTION_SECS: i64 = 7 * 24 * 3600;
+/// Persisted log lines age out on the same schedule as metrics (they are
+/// additionally capped per container by LOGS_PER_CONTAINER).
+const LOG_RETENTION_SECS: i64 = RETENTION_SECS;
+/// Trivy scan summaries are kept for 90 days...
+const SCAN_RETENTION_SECS: i64 = 90 * 24 * 3600;
+/// ...except that the newest this-many scans per image are always kept,
+/// however old: the vuln-trend UI diffs the latest scan against the one
+/// before it (`load_scans`), so a single survivor would lose the diff.
+const SCANS_KEEP_PER_IMAGE: i64 = 2;
 
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 static LAST_GC_DAY: Mutex<Option<i64>> = Mutex::new(None);
@@ -48,17 +57,89 @@ pub fn init() -> Result<()> {
         return Ok(());
     }
     let path = db_path().context("could not resolve $XDG_CONFIG_HOME or $HOME")?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    let conn = open_with_schema(&path).or_else(|_| {
-        // If the file is corrupt, blow it away and start fresh — the
-        // history is best-effort and not worth a hard failure.
-        let _ = std::fs::remove_file(&path);
-        open_with_schema(&path)
-    })?;
+    let conn = open_secure(&path)?;
     let _ = DB.set(Mutex::new(conn));
     Ok(())
+}
+
+/// Create the (private) config dir, open the DB with owner-only
+/// permissions, and recover from a corrupt file by recreating it.
+fn open_secure(path: &std::path::Path) -> Result<Connection> {
+    if let Some(parent) = path.parent() {
+        secure_dir(parent)?;
+    }
+    let open = || -> Result<Connection> {
+        // Create the main file 0600 *before* SQLite does, so it is never
+        // world-readable; SQLite gives -wal/-shm the main file's mode.
+        create_private_file(path)?;
+        let conn = open_with_schema(path)?;
+        secure_db_files(path);
+        Ok(conn)
+    };
+    open().or_else(|_| {
+        // If the file is corrupt, blow it away and start fresh — the
+        // history is best-effort and not worth a hard failure. The WAL
+        // and SHM sidecars go too: a stale -wal would be replayed
+        // against the fresh file.
+        remove_db_files(path);
+        open()
+    })
+}
+
+/// Create `dir` (and parents) and force mode 0700 on it.
+fn secure_dir(dir: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .with_context(|| format!("create {}", dir.display()))?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("chmod {}", dir.display()))
+}
+
+/// Ensure `path` exists with mode 0600 (tightening an existing file).
+fn create_private_file(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("create {}", path.display()))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("chmod {}", path.display()))
+}
+
+fn sidecar(path: &std::path::Path, suffix: &str) -> PathBuf {
+    let mut os = path.as_os_str().to_owned();
+    os.push(suffix);
+    PathBuf::from(os)
+}
+
+/// chmod 0600 the main DB file and any `-wal` / `-shm` that exist.
+fn secure_db_files(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    for p in [
+        path.to_path_buf(),
+        sidecar(path, "-wal"),
+        sidecar(path, "-shm"),
+    ] {
+        if p.exists() {
+            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+}
+
+/// Delete the main DB file and its `-wal` / `-shm` sidecars.
+fn remove_db_files(path: &std::path::Path) {
+    for p in [
+        path.to_path_buf(),
+        sidecar(path, "-wal"),
+        sidecar(path, "-shm"),
+    ] {
+        let _ = std::fs::remove_file(p);
+    }
 }
 
 fn open_with_schema(path: &std::path::Path) -> Result<Connection> {
@@ -180,13 +261,40 @@ fn maybe_gc(now: i64) {
     *last = Some(today);
     let Some(db) = DB.get() else { return };
     if let Ok(conn) = db.lock() {
-        let cutoff = now - RETENTION_SECS;
-        if let Err(e) = conn.execute(
-            "DELETE FROM container_history WHERE ts < ?",
-            params![cutoff],
-        ) {
-            eprintln!("history gc: {e}");
-        }
+        gc_conn(&conn, now);
+    }
+}
+
+/// Age-based pruning of every table. Each statement is independent and
+/// best-effort so one failure can't block the others.
+fn gc_conn(conn: &Connection, now: i64) {
+    if let Err(e) = conn.execute(
+        "DELETE FROM container_history WHERE ts < ?",
+        params![now - RETENTION_SECS],
+    ) {
+        eprintln!("history gc (metrics): {e}");
+    }
+    if let Err(e) = conn.execute(
+        "DELETE FROM container_logs WHERE ts < ?",
+        params![now - LOG_RETENTION_SECS],
+    ) {
+        eprintln!("history gc (logs): {e}");
+    }
+    // Old scans go, except the newest SCANS_KEEP_PER_IMAGE of each image.
+    if let Err(e) = conn.execute(
+        "DELETE FROM trivy_scans
+         WHERE scanned_at < ?1
+           AND id NOT IN (
+               SELECT id FROM (
+                   SELECT id, ROW_NUMBER() OVER (
+                       PARTITION BY image ORDER BY scanned_at DESC, id DESC
+                   ) AS rn
+                   FROM trivy_scans
+               ) WHERE rn <= ?2
+           )",
+        params![now - SCAN_RETENTION_SECS, SCANS_KEEP_PER_IMAGE],
+    ) {
+        eprintln!("history gc (scans): {e}");
     }
 }
 
@@ -899,5 +1007,195 @@ mod tests {
             .flatten()
             .collect();
         assert_eq!(got, vec![300, 400]);
+    }
+
+    // ── Permissions, recovery and retention (real schema, temp dir) ──
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("cgui-history-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    fn mode_of(p: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn open_secure_makes_dir_0700_and_files_0600() {
+        let dir = scratch("perm").join("cgui-gui");
+        let db = dir.join("history.db");
+        let conn = open_secure(&db).unwrap();
+        // Force the WAL/SHM sidecars into existence.
+        conn.execute(
+            "INSERT INTO container_logs (container_id, ts, line) VALUES ('a', 1, 'x')",
+            [],
+        )
+        .unwrap();
+        secure_db_files(&db);
+        assert_eq!(mode_of(&dir), 0o700);
+        assert_eq!(mode_of(&db), 0o600);
+        for suffix in ["-wal", "-shm"] {
+            let p = sidecar(&db, suffix);
+            if p.exists() {
+                assert_eq!(mode_of(&p), 0o600, "{suffix}");
+            }
+        }
+        drop(conn);
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn open_secure_tightens_existing_loose_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("tighten").join("cgui-gui");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("history.db");
+        std::fs::write(&db, b"").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let conn = open_secure(&db).unwrap();
+        assert_eq!(mode_of(&dir), 0o700);
+        assert_eq!(mode_of(&db), 0o600);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn corrupt_db_recovery_removes_wal_and_shm_too() {
+        let dir = scratch("corrupt").join("cgui-gui");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("history.db");
+        std::fs::write(
+            &db,
+            b"this is not a sqlite database, just garbage bytes....",
+        )
+        .unwrap();
+        std::fs::write(sidecar(&db, "-wal"), b"stale wal").unwrap();
+        std::fs::write(sidecar(&db, "-shm"), b"stale shm").unwrap();
+        let conn = open_secure(&db).unwrap();
+        // Recreated and usable; the stale sidecar contents are gone.
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM container_history", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+        for suffix in ["-wal", "-shm"] {
+            let p = sidecar(&db, suffix);
+            if p.exists() {
+                assert_ne!(
+                    std::fs::read(&p).unwrap(),
+                    format!("stale {}", &suffix[1..]).as_bytes()
+                );
+            }
+        }
+        drop(conn);
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn remove_db_files_deletes_all_three() {
+        let dir = scratch("rm");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("history.db");
+        for p in [db.clone(), sidecar(&db, "-wal"), sidecar(&db, "-shm")] {
+            std::fs::write(p, b"x").unwrap();
+        }
+        remove_db_files(&db);
+        assert!(!db.exists() && !sidecar(&db, "-wal").exists() && !sidecar(&db, "-shm").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn gc_db(tag: &str) -> Connection {
+        let dir = scratch(tag);
+        open_secure(&dir.join("cgui-gui").join("history.db")).unwrap()
+    }
+
+    fn count(conn: &Connection, sql: &str) -> i64 {
+        conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn gc_prunes_metrics_and_logs_by_age() {
+        let conn = gc_db("gc-logs");
+        let now = 10_000_000_i64;
+        let old = now - RETENTION_SECS - 10;
+        let fresh = now - 60;
+        for ts in [old, fresh] {
+            conn.execute(
+                "INSERT INTO container_history VALUES ('a', ?, 1, 0, 0, 0, 'running')",
+                params![ts],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO container_logs (container_id, ts, line) VALUES ('a', ?, 'l')",
+                params![ts],
+            )
+            .unwrap();
+        }
+        gc_conn(&conn, now);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM container_history"), 1);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM container_logs"), 1);
+        assert_eq!(
+            count(&conn, "SELECT ts FROM container_logs"),
+            fresh,
+            "the recent line survives"
+        );
+    }
+
+    #[test]
+    fn gc_scans_keeps_recent_and_newest_two_per_image() {
+        let conn = gc_db("gc-scans-keep");
+        let now = 100_000_000_i64;
+        let day = 86_400;
+        let ins = |image: &str, age_days: i64| {
+            conn.execute(
+                "INSERT INTO trivy_scans (image, scanned_at, total) VALUES (?, ?, 1)",
+                params![image, now - age_days * day],
+            )
+            .unwrap();
+        };
+        // `old`: four ancient scans -> only the newest two (200d, 150d) stay.
+        for d in [400, 300, 200, 150] {
+            ins("old", d);
+        }
+        // `mixed`: one fresh, two ancient -> fresh + newest ancient survive
+        // (newest two overall), the oldest ancient goes.
+        for d in [10, 300, 500] {
+            ins("mixed", d);
+        }
+        // `lone`: single ancient scan is never pruned.
+        ins("lone", 1000);
+        gc_conn(&conn, now);
+        let ages = |image: &str| -> Vec<i64> {
+            let mut st = conn
+                .prepare(
+                    "SELECT scanned_at FROM trivy_scans WHERE image = ? ORDER BY scanned_at DESC",
+                )
+                .unwrap();
+            st.query_map(params![image], |r| r.get::<_, i64>(0))
+                .unwrap()
+                .flatten()
+                .map(|t| (now - t) / day)
+                .collect()
+        };
+        assert_eq!(ages("old"), vec![150, 200]);
+        assert_eq!(ages("mixed"), vec![10, 300]);
+        assert_eq!(ages("lone"), vec![1000]);
+    }
+
+    #[test]
+    fn gc_scans_drops_old_scans_beyond_the_newest_two_but_keeps_all_recent() {
+        let conn = gc_db("gc-scans-recent");
+        let now = 100_000_000_i64;
+        for d in [1, 2, 3, 4] {
+            conn.execute(
+                "INSERT INTO trivy_scans (image, scanned_at, total) VALUES ('img', ?, 1)",
+                params![now - d * 86_400],
+            )
+            .unwrap();
+        }
+        gc_conn(&conn, now);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM trivy_scans"), 4);
     }
 }
