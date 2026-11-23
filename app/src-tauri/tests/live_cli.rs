@@ -737,8 +737,26 @@ async fn stats_native_cpu_utilization() {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     let version = runtime::cli_version().await.expect("version");
-    let rows = runtime::stats_snapshot().await.expect("stats");
-    let row = rows.iter().find(|r| r.id == cname).expect("stat row");
+    // `stats --no-stream` samples every running container for ~2 s; when other
+    // live tests create/delete containers in that window the CLI call can fail,
+    // so retry a few times instead of flaking.
+    let mut last_err = None;
+    let mut rows = Vec::new();
+    for _ in 0..5 {
+        match runtime::stats_snapshot().await {
+            Ok(r) if r.iter().any(|r| r.id == cname) => {
+                rows = r;
+                break;
+            }
+            Ok(_) => last_err = Some("row missing".to_string()),
+            Err(e) => last_err = Some(format!("{e:#}")),
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let row = rows
+        .iter()
+        .find(|r| r.id == cname)
+        .unwrap_or_else(|| panic!("stat row for {cname}: {last_err:?}"));
     let Some(frac) = row.cpu_utilization else {
         eprintln!("CLI {version} has no cpuUtilization (needs 1.7.1+); skipping");
         return;
