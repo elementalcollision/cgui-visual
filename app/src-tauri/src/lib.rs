@@ -552,6 +552,8 @@ pub fn run() {
             commands::start_build,
             commands::machine_list,
             commands::machine_create,
+            commands::machine_logs,
+            commands::machine_inspect,
             commands::machine_stop,
             commands::machine_delete,
             commands::machine_set_default,

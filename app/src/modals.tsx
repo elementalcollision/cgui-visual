@@ -1508,6 +1508,72 @@ export function ImageInspectModal({ t, reference, onClose }: {
 }
 
 // Generic JSON inspect modal — shared by volume + network.
+// One-shot `container machine logs` viewer: machine output (stdio) or the VM
+// boot log, last N lines, with Refresh. Not a live follow.
+export function MachineLogsModal({ t, name, onClose }: {
+  t: ThemeTokens; name: string; onClose: () => void;
+}) {
+  const [boot, setBoot] = useState(false);
+  const [tail, setTail] = useState(200);
+  const [tick, setTick] = useState(0);
+  const [state, setState] = useState<{ text: string; error: string | null; loading: boolean }>({ text: '', error: null, loading: true });
+  const preRef = useRef<HTMLPreElement>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setState(s => ({ ...s, loading: true }));
+    api.machineLogs(name, { boot, tail })
+      .then(text => { if (!cancelled) setState({ text, error: null, loading: false }); })
+      .catch(e => { if (!cancelled) setState({ text: '', error: errMessage(e), loading: false }); });
+    return () => { cancelled = true; };
+  }, [name, boot, tail, tick]);
+  useEffect(() => {
+    const el = preRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [state.text]);
+  // A machine that has never booted has no stdio log file; say that plainly.
+  const friendly = state.error && /doesn.t exist|No such file/i.test(state.error)
+    ? `No ${boot ? 'boot ' : ''}log yet: ${name} hasn't booted. Start it (run a command in it) and refresh.`
+    : state.error;
+  const seg = (active: boolean) => ({
+    ...pillBtn(t), background: active ? t.accentSoft : 'transparent', color: active ? t.accent : t.fg2,
+  });
+  return (
+    <Backdrop onClose={onClose}>
+      <div style={{ width: 760, maxHeight: '85vh', background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 80px rgba(0,0,0,0.4)' }}>
+        <div style={{ padding: '18px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+          <Icon name="logs" size={20} color={t.accent} />
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 18, fontWeight: 600, color: t.fg1 }}>Machine logs</div>
+            <div style={{ fontSize: 12, color: t.fg3, fontFamily: t.mono, marginTop: 4 }}>container machine logs{boot ? ' --boot' : ''} {name}</div>
+          </div>
+          <button onClick={onClose} style={iconBtn()}><Icon name="x" size={16} color={t.fg2} /></button>
+        </div>
+        <div style={{ padding: '10px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button style={seg(!boot)} aria-pressed={!boot} onClick={() => setBoot(false)}>Output</button>
+          <button style={seg(boot)} aria-pressed={boot} onClick={() => setBoot(true)}>Boot log</button>
+          <div style={{ flex: 1 }} />
+          <label style={{ fontSize: 11, color: t.fg3, display: 'flex', alignItems: 'center', gap: 6 }}>
+            Last
+            <select aria-label="Lines to show" value={tail} onChange={e => setTail(Number(e.target.value))}
+                    style={{ background: t.surfaceAlt, color: t.fg1, border: `1px solid ${t.border}`, borderRadius: 4, fontSize: 12, padding: '3px 6px' }}>
+              {[100, 200, 1000, 5000].map(n => <option key={n} value={n}>{n}</option>)}
+            </select>
+            lines
+          </label>
+          <button style={pillBtn(t)} onClick={() => setTick(n => n + 1)} disabled={state.loading}>Refresh</button>
+        </div>
+        <pre ref={preRef} style={{ flex: 1, overflow: 'auto', margin: 0, padding: '14px 22px', minHeight: 240, fontFamily: t.mono, fontSize: 11, lineHeight: 1.6, color: friendly ? t.fg3 : t.fg2, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+          {state.loading && !state.text ? 'Loading…' : friendly ?? (state.text.trim() ? state.text : '(empty)')}
+        </pre>
+        <div style={{ padding: '12px 22px', borderTop: `1px solid ${t.border}`, display: 'flex', gap: 8, justifyContent: 'flex-end', background: t.surfaceAlt }}>
+          <button style={pillBtn(t)} onClick={() => navigator.clipboard?.writeText(state.text)} disabled={!state.text}>Copy</button>
+          <button style={pillBtn(t)} onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </Backdrop>
+  );
+}
+
 export function JsonInspectModal({ t, title, subtitle, fetcher, onClose }: {
   t: ThemeTokens; title: string; subtitle: string;
   fetcher: () => Promise<string>; onClose: () => void;
@@ -2186,7 +2252,7 @@ function ServicesPanel({ t }: { t: ThemeTokens }) {
   );
 }
 
-function MachinesPanel({ t }: { t: ThemeTokens }) {
+export function MachinesPanel({ t }: { t: ThemeTokens }) {
   type M = { id: string; status: string; cpus: number; memory: number; diskSize: number; isDefault: boolean; createdDate: string };
   const [machines, setMachines] = useState<M[] | null>(null);
   const [busy, setBusy] = useState(false);
@@ -2197,6 +2263,25 @@ function MachinesPanel({ t }: { t: ThemeTokens }) {
   const [image, setImage] = useState('alpine:latest');
   const [cpus, setCpus] = useState('');
   const [memory, setMemory] = useState('');
+  // Account options (container 1.6+): -u/--user, --uid, --gid, --home.
+  const userGate = useCliAtLeast('1.6.0');
+  const [showUser, setShowUser] = useState(false);
+  const [mUser, setMUser] = useState('');
+  const [mUid, setMUid] = useState('');
+  const [mGid, setMGid] = useState('');
+  const [mHome, setMHome] = useState('');
+  const homeError = mHome.trim() && !mHome.trim().startsWith('/') ? 'The home directory must be an absolute path, e.g. /home/dev' : null;
+  const userError = /\s/.test(mUser.trim()) ? 'The user must not contain spaces' : null;
+  const userOpts = {
+    user: mUser.trim() || undefined,
+    uid: mUid.trim() ? Number(mUid.trim()) : undefined,
+    gid: mGid.trim() ? Number(mGid.trim()) : undefined,
+    home: mHome.trim() || undefined,
+  };
+  const hasUserOpts = Object.values(userOpts).some(v => v !== undefined);
+  // Per-machine tools: `machine logs` and `machine inspect`.
+  const [logsFor, setLogsFor] = useState<string | null>(null);
+  const [inspectFor, setInspectFor] = useState<string | null>(null);
   const act = (label: string, p: Promise<void>) => {
     setBusy(true);
     withToast(label, p).then(reload).catch(() => {}).finally(() => setBusy(false));
@@ -2226,6 +2311,10 @@ function MachinesPanel({ t }: { t: ThemeTokens }) {
               {m.status} · {m.cpus} cpu · {gib(m.memory)} mem · {gib(m.diskSize)} disk
             </div>
           </div>
+          <button style={pillBtn(t)} title="Show this machine's logs (container machine logs)"
+                  onClick={() => setLogsFor(m.id)}>Logs</button>
+          <button style={pillBtn(t)} title="Show this machine's configuration (container machine inspect)"
+                  onClick={() => setInspectFor(m.id)}>Inspect</button>
           {!m.isDefault && (
             <button style={{ ...pillBtn(t), opacity: busy ? 0.5 : 1 }} disabled={busy}
                     onClick={() => act(`set default ${m.id}`, api.machineSetDefault(m.id))}>Set default</button>
@@ -2249,16 +2338,37 @@ function MachinesPanel({ t }: { t: ThemeTokens }) {
             <input style={inputStyle} value={name} onChange={e => setName(e.target.value)} placeholder="machine name" spellCheck={false} />
             <input style={inputStyle} value={image} onChange={e => setImage(e.target.value)} placeholder="image (e.g. alpine:latest)" spellCheck={false} />
           </div>
+          <button type="button" onClick={() => setShowUser(v => !v)} disabled={!userGate.ok} title={userGate.title}
+                  style={{ background: 'none', border: 'none', cursor: userGate.ok ? 'pointer' : 'not-allowed', color: t.fg2, fontSize: 12, display: 'flex', alignItems: 'center', gap: 6, padding: 0, fontFamily: 'inherit', alignSelf: 'flex-start', opacity: userGate.ok ? 1 : 0.5 }}>
+            <span style={{ display: 'inline-block', transform: showUser && userGate.ok ? 'rotate(90deg)' : 'none', transition: 'transform 120ms ease' }}>
+              <Icon name="chevron" size={12} color={t.fg3} />
+            </span>
+            User options
+          </button>
+          {showUser && userGate.ok && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input style={inputStyle} aria-label="Machine user" value={mUser} onChange={e => setMUser(e.target.value)} placeholder="user (name or uid[:gid])" spellCheck={false} aria-invalid={userError ? true : undefined} />
+                <input style={{ ...inputStyle, flex: '0 0 80px' }} aria-label="Machine UID" value={mUid} onChange={e => setMUid(e.target.value.replace(/[^0-9]/g, ''))} placeholder="uid" />
+                <input style={{ ...inputStyle, flex: '0 0 80px' }} aria-label="Machine GID" value={mGid} onChange={e => setMGid(e.target.value.replace(/[^0-9]/g, ''))} placeholder="gid" />
+              </div>
+              <input style={{ ...inputStyle, flex: 'none', borderColor: homeError ? t.danger : t.border }} aria-label="Machine home" value={mHome} onChange={e => setMHome(e.target.value)} placeholder="home directory (default /home/<user>)" spellCheck={false} aria-invalid={homeError ? true : undefined} />
+              <div style={{ fontSize: 10, color: homeError || userError ? t.danger : t.fg3 }}>
+                {homeError ?? userError ?? 'The machine account defaults to your macOS user, uid and gid.'}
+              </div>
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <input style={{ ...inputStyle, flex: '0 0 90px' }} value={cpus} onChange={e => setCpus(e.target.value.replace(/[^0-9]/g, ''))} placeholder="cpus" />
             <input style={{ ...inputStyle, flex: '0 0 90px' }} value={memory} onChange={e => setMemory(e.target.value)} placeholder="mem (4G)" />
             <div style={{ flex: 1 }} />
             <button style={pillBtn(t)} onClick={() => setShowCreate(false)}>Cancel</button>
-            <button style={{ ...pillBtn(t), opacity: name.trim() && image.trim() ? 1 : 0.5 }}
-                    disabled={!name.trim() || !image.trim() || busy}
+            <button style={{ ...pillBtn(t), opacity: name.trim() && image.trim() && !homeError && !userError ? 1 : 0.5 }}
+                    disabled={!name.trim() || !image.trim() || busy || !!homeError || !!userError}
                     onClick={() => {
                       act(`create ${name.trim()}`, api.machineCreate(name.trim(), image.trim(),
-                        cpus.trim() ? Number(cpus.trim()) : undefined, memory.trim() || undefined));
+                        cpus.trim() ? Number(cpus.trim()) : undefined, memory.trim() || undefined, true,
+                        showUser && userGate.ok && hasUserOpts ? userOpts : undefined));
                       setShowCreate(false); setName('');
                     }}>Create</button>
           </div>
@@ -2266,6 +2376,11 @@ function MachinesPanel({ t }: { t: ThemeTokens }) {
             Created without booting — it boots on first use.
           </div>
         </div>
+      )}
+      {logsFor && <MachineLogsModal t={t} name={logsFor} onClose={() => setLogsFor(null)} />}
+      {inspectFor && (
+        <JsonInspectModal t={t} title={inspectFor} subtitle="container machine inspect"
+                          fetcher={() => api.machineInspect(inspectFor)} onClose={() => setInspectFor(null)} />
       )}
     </div>
   );

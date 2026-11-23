@@ -336,10 +336,35 @@ pub async fn machine_create(
     cpus: Option<u32>,
     memory: Option<String>,
     no_boot: Option<bool>,
+    user_opts: Option<runtime::MachineUserOpts>,
 ) -> Result<(), String> {
-    runtime::machine_create(&name, &image, cpus, memory, no_boot.unwrap_or(true))
+    runtime::machine_create(
+        &name,
+        &image,
+        cpus,
+        memory,
+        no_boot.unwrap_or(true),
+        &user_opts.unwrap_or_default(),
+    )
+    .await
+    .map_err(err_str)
+}
+
+/// One-shot `container machine logs` (stdio, or the VM boot log).
+#[tauri::command]
+pub async fn machine_logs(
+    name: String,
+    boot: Option<bool>,
+    tail: Option<u32>,
+) -> Result<String, String> {
+    runtime::machine_logs(&name, boot.unwrap_or(false), tail)
         .await
         .map_err(err_str)
+}
+
+#[tauri::command]
+pub async fn machine_inspect(name: String) -> Result<String, String> {
+    runtime::machine_inspect(&name).await.map_err(err_str)
 }
 
 #[tauri::command]

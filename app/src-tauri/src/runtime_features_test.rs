@@ -365,6 +365,97 @@ fn network_create_argv_builds_flags_and_validates() {
     }
 }
 
+// ─── machines ─────────────────────────────────────────────────────────
+
+#[test]
+fn machine_user_args_render_in_order() {
+    assert!(machine_user_args(&MachineUserOpts::default())
+        .unwrap()
+        .is_empty());
+    let o = MachineUserOpts {
+        user: Some(" dev ".into()),
+        uid: Some(1234),
+        gid: Some(0),
+        home: Some("/home/dev".into()),
+    };
+    assert_eq!(
+        machine_user_args(&o).unwrap(),
+        [
+            "--user",
+            "dev",
+            "--uid",
+            "1234",
+            "--gid",
+            "0",
+            "--home",
+            "/home/dev"
+        ]
+    );
+    // `name|uid[:gid]` is passed through as typed.
+    let o = MachineUserOpts {
+        user: Some("1000:1000".into()),
+        ..Default::default()
+    };
+    assert_eq!(machine_user_args(&o).unwrap(), ["--user", "1000:1000"]);
+    // Blank strings mean "unset".
+    let o = MachineUserOpts {
+        user: Some("  ".into()),
+        home: Some("".into()),
+        ..Default::default()
+    };
+    assert!(machine_user_args(&o).unwrap().is_empty());
+}
+
+#[test]
+fn machine_user_args_reject_bad_values() {
+    for (user, home) in [
+        (Some("-x"), None),
+        (Some("a b"), None),
+        (None, Some("home/dev")),
+        (None, Some("~/dev")),
+    ] {
+        let o = MachineUserOpts {
+            user: user.map(String::from),
+            home: home.map(String::from),
+            ..Default::default()
+        };
+        assert!(machine_user_args(&o).is_err(), "{user:?} {home:?}");
+    }
+}
+
+#[test]
+fn machine_user_opts_deserialize_from_the_ui() {
+    let o: MachineUserOpts =
+        serde_json::from_str(r#"{"user":"dev","uid":501,"home":"/home/dev"}"#).unwrap();
+    assert_eq!(o.uid, Some(501));
+    assert_eq!(o.gid, None);
+    let none: MachineUserOpts = serde_json::from_str("{}").unwrap();
+    assert!(none.user.is_none() && none.uid.is_none() && none.home.is_none());
+}
+
+#[tokio::test]
+async fn machine_calls_validate_before_spawning() {
+    assert!(machine_logs("--boot", false, None).await.is_err());
+    assert!(machine_inspect("-x").await.is_err());
+    let bad = MachineUserOpts {
+        home: Some("relative".into()),
+        ..Default::default()
+    };
+    assert!(machine_create("dev1", "alpine", None, None, true, &bad)
+        .await
+        .is_err());
+    assert!(machine_create(
+        "dev1",
+        "--evil",
+        None,
+        None,
+        true,
+        &MachineUserOpts::default()
+    )
+    .await
+    .is_err());
+}
+
 #[test]
 fn create_args_deserialize_from_the_ui() {
     let v: VolumeCreateArgs =

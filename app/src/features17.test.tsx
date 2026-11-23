@@ -4,7 +4,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { CreateNetworkModal, CreateVolumeModal, DetailModal, RunImageModal, parseInspect } from './modals';
+import { CreateNetworkModal, CreateVolumeModal, DetailModal, MachineLogsModal, MachinesPanel, RunImageModal, parseInspect } from './modals';
 import { TopBar } from './components';
 import type { Tab } from './types';
 import { getTheme } from './theme';
@@ -341,5 +341,97 @@ describe('create-form validators', () => {
     for (const bad of ['fd00::', 'fd00::/129', '10.0.0.0/8']) expect(validateCidr6(bad), bad).not.toBeNull();
     expect(validateLabel('a=b')).toBeNull();
     expect(validateLabel('novalue')).not.toBeNull();
+  });
+});
+
+describe('machines: user options, logs, inspect', () => {
+  const machine = { id: 'dev1', status: 'running', cpus: 4, memory: 8 * 1024 ** 3, diskSize: 2 * 1024 ** 3, isDefault: true, createdDate: '' };
+  const renderPanel = async () => {
+    vi.spyOn(api, 'machineList').mockResolvedValue([machine]);
+    render(<MachinesPanel t={t} />);
+    await screen.findByText('dev1');
+  };
+
+  it('passes the user options to machineCreate', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'cliVersion').mockResolvedValue('1.7.1');
+    const create = vi.spyOn(api, 'machineCreate').mockResolvedValue(undefined);
+    await renderPanel();
+    await user.click(screen.getByRole('button', { name: 'New machine…' }));
+    await user.type(screen.getByPlaceholderText('machine name'), 'dev2');
+    await user.click(screen.getByRole('button', { name: /User options/ }));
+    await user.type(screen.getByLabelText('Machine user'), 'dev');
+    await user.type(screen.getByLabelText('Machine UID'), '501');
+    await user.type(screen.getByLabelText('Machine GID'), '20');
+    await user.type(screen.getByLabelText('Machine home'), '/home/dev');
+    await user.click(screen.getByRole('button', { name: 'Create' }));
+    await waitFor(() => expect(create).toHaveBeenCalledWith(
+      'dev2', 'alpine:latest', undefined, undefined, true,
+      { user: 'dev', uid: 501, gid: 20, home: '/home/dev' },
+    ));
+  });
+
+  it('sends no user options by default, and blocks a relative home', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'cliVersion').mockResolvedValue('1.7.1');
+    const create = vi.spyOn(api, 'machineCreate').mockResolvedValue(undefined);
+    await renderPanel();
+    await user.click(screen.getByRole('button', { name: 'New machine…' }));
+    await user.type(screen.getByPlaceholderText('machine name'), 'dev3');
+    await user.click(screen.getByRole('button', { name: /User options/ }));
+    await user.type(screen.getByLabelText('Machine home'), 'home/dev');
+    expect(screen.getByLabelText('Machine home')).toBeInvalid();
+    expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled();
+    await user.clear(screen.getByLabelText('Machine home'));
+    await user.click(screen.getByRole('button', { name: 'Create' }));
+    await waitFor(() => expect(create).toHaveBeenCalledWith('dev3', 'alpine:latest', undefined, undefined, true, undefined));
+  });
+
+  it('disables user options with a tooltip on a CLI older than 1.6', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'cliVersion').mockResolvedValue('1.4.1');
+    await renderPanel();
+    await user.click(screen.getByRole('button', { name: 'New machine…' }));
+    const toggle = screen.getByRole('button', { name: /User options/ });
+    await waitFor(() => expect(toggle).toBeDisabled());
+    expect(toggle).toHaveAttribute('title', 'Needs Apple container 1.6 or later');
+  });
+
+  it('opens the machine inspect JSON', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'cliVersion').mockResolvedValue('1.7.1');
+    const inspect = vi.spyOn(api, 'machineInspect').mockResolvedValue('[{"id":"dev1","userSetup":{"username":"dev"}}]');
+    await renderPanel();
+    await user.click(screen.getByRole('button', { name: 'Inspect' }));
+    expect(await screen.findByText(/"username":"dev"/)).toBeInTheDocument();
+    expect(inspect).toHaveBeenCalledWith('dev1');
+  });
+
+  it('shows machine logs, switches to the boot log, and changes the line count', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'cliVersion').mockResolvedValue('1.7.1');
+    const logs = vi.spyOn(api, 'machineLogs').mockImplementation(async (_n, o) => (o?.boot ? 'boot line 1' : 'stdio line 1'));
+    await renderPanel();
+    await user.click(screen.getByRole('button', { name: 'Logs' }));
+    expect(await screen.findByText('stdio line 1')).toBeInTheDocument();
+    expect(logs).toHaveBeenLastCalledWith('dev1', { boot: false, tail: 200 });
+    await user.click(screen.getByRole('button', { name: 'Boot log' }));
+    expect(await screen.findByText('boot line 1')).toBeInTheDocument();
+    expect(logs).toHaveBeenLastCalledWith('dev1', { boot: true, tail: 200 });
+    await user.selectOptions(screen.getByLabelText('Lines to show'), '1000');
+    await waitFor(() => expect(logs).toHaveBeenLastCalledWith('dev1', { boot: true, tail: 1000 }));
+  });
+
+  it('explains a machine that has never booted instead of dumping the CLI error', async () => {
+    vi.spyOn(api, 'machineLogs').mockRejectedValue(
+      'failed to get logs for container machine dev1 (cause: The file “stdio.log” doesn’t exist.)');
+    render(<MachineLogsModal t={t} name="dev1" onClose={() => {}} />);
+    expect(await screen.findByText(/dev1 hasn't booted/)).toBeInTheDocument();
+  });
+
+  it('shows other log failures verbatim', async () => {
+    vi.spyOn(api, 'machineLogs').mockRejectedValue('Plugins are unavailable');
+    render(<MachineLogsModal t={t} name="dev1" onClose={() => {}} />);
+    expect(await screen.findByText('Plugins are unavailable')).toBeInTheDocument();
   });
 });

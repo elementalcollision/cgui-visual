@@ -1571,14 +1571,71 @@ pub async fn machine_list() -> Result<Vec<Machine>> {
     serde_json::from_slice(&bytes).context("parse `machine list` json")
 }
 
+/// Optional account settings for the machine's user (container 1.6+):
+/// `-u/--user`, `--uid`, `--gid`, `--home`. Unset fields keep the CLI
+/// defaults (the host user's name/ids, home `/home/<user>`).
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineUserOpts {
+    /// `name` or `uid[:gid]` (the CLI's `-u` format).
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub uid: Option<u32>,
+    #[serde(default)]
+    pub gid: Option<u32>,
+    /// Absolute home directory inside the machine.
+    #[serde(default)]
+    pub home: Option<String>,
+}
+
+/// Validate and render `MachineUserOpts` as CLI flags (empty when unset).
+pub fn machine_user_args(opts: &MachineUserOpts) -> Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    let text = |o: &Option<String>| {
+        o.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
+    if let Some(user) = text(&opts.user) {
+        reject_flag_like("machine user", &user)?;
+        if user.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(anyhow!("machine user `{user}` must not contain spaces"));
+        }
+        out.push("--user".into());
+        out.push(user);
+    }
+    if let Some(uid) = opts.uid {
+        out.push("--uid".into());
+        out.push(uid.to_string());
+    }
+    if let Some(gid) = opts.gid {
+        out.push("--gid".into());
+        out.push(gid.to_string());
+    }
+    if let Some(home) = text(&opts.home) {
+        if !home.starts_with('/') || home.chars().any(|c| c.is_control()) {
+            return Err(anyhow!(
+                "machine home `{home}` must be an absolute path such as /home/dev"
+            ));
+        }
+        out.push("--home".into());
+        out.push(home);
+    }
+    Ok(out)
+}
+
 /// Create a machine. Pulls the image on first use, so long timeout.
 /// `no_boot` creates without booting (cheaper; boots on first use).
+/// `user` carries the optional 1.6+ account flags.
 pub async fn machine_create(
     name: &str,
     image: &str,
     cpus: Option<u32>,
     memory: Option<String>,
     no_boot: bool,
+    user: &MachineUserOpts,
 ) -> Result<()> {
     validate_entity_name("machine", name)?;
     reject_flag_like("image reference", image)?;
@@ -1599,11 +1656,40 @@ pub async fn machine_create(
     if no_boot {
         argv.push("--no-boot".into());
     }
+    argv.extend(machine_user_args(user)?);
     argv.push(image.into());
     let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
     run_with_timeout(&argv_ref, RUN_LONG_TIMEOUT)
         .await
         .map(|_| ())
+}
+
+/// `container machine logs [--boot] [-n N] <name>`: a one-shot fetch (no
+/// `--follow`). `boot` shows the VM boot log instead of stdio. `tail` limits
+/// to the last N lines (clamped to 1..=5000); the CLI prints everything when
+/// omitted, which can be huge, so callers pass one. A machine that has
+/// never booted has no log file and the CLI says so.
+pub async fn machine_logs(name: &str, boot: bool, tail: Option<u32>) -> Result<String> {
+    reject_flag_like("machine name", name)?;
+    let mut argv: Vec<String> = vec!["machine".into(), "logs".into()];
+    if boot {
+        argv.push("--boot".into());
+    }
+    if let Some(n) = tail {
+        argv.push("-n".into());
+        argv.push(n.clamp(1, 5000).to_string());
+    }
+    argv.push(name.into());
+    let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let bytes = run_with_timeout(&argv_ref, LIFECYCLE_TIMEOUT).await?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// `container machine inspect <name>` as pretty JSON (the CLI already
+/// pretty-prints it; non-JSON output is passed through).
+pub async fn machine_inspect(name: &str) -> Result<String> {
+    reject_flag_like("machine name", name)?;
+    inspect_args(&["machine", "inspect", name]).await
 }
 
 pub async fn machine_stop(name: &str) -> Result<()> {
@@ -2311,9 +2397,16 @@ mod tests {
         assert!(copy_path("web:/etc/hosts", bad).await.is_err());
         assert!(export_container(bad, "/tmp/o.tar").await.is_err());
         assert!(export_container("web", bad).await.is_err());
-        assert!(machine_create("ok-machine", bad, None, None, true)
-            .await
-            .is_err());
+        assert!(machine_create(
+            "ok-machine",
+            bad,
+            None,
+            None,
+            true,
+            &MachineUserOpts::default()
+        )
+        .await
+        .is_err());
         assert!(machine_stop(bad).await.is_err());
         assert!(machine_delete(bad).await.is_err());
         assert!(machine_set_default(bad).await.is_err());

@@ -559,6 +559,52 @@ async fn create_volume_and_network_with_options() {
     .is_err());
 }
 
+/// Machines (1.6+ user options): create a small alpine machine with a custom
+/// account, then read it back via inspect, fetch both log kinds, delete it.
+/// Alpine is already pulled by `ensure_alpine`, so nothing large downloads.
+#[tokio::test]
+#[ignore]
+async fn machine_user_options_inspect_and_logs() {
+    live_only!();
+    let mut g = Guard::default();
+    let m = g.track_machine(&name("mach"));
+    let opts = runtime::MachineUserOpts {
+        user: Some("cguilive".into()),
+        uid: Some(1234),
+        gid: Some(1234),
+        home: Some("/home/cguilive".into()),
+    };
+    runtime::machine_create(&m, "alpine:latest", None, None, false, &opts)
+        .await
+        .expect("machine create");
+
+    let listed = runtime::machine_list().await.unwrap();
+    assert!(listed.iter().any(|x| x.id == m), "{listed:?}");
+
+    let inspected = runtime::machine_inspect(&m).await.expect("inspect");
+    // `machine inspect` prints a one-element array.
+    let v: serde_json::Value = serde_json::from_str(&inspected).expect("json");
+    let v = &v[0];
+    assert_eq!(v["id"], m.as_str());
+    assert_eq!(v["userSetup"]["username"], "cguilive");
+    assert_eq!(v["userSetup"]["uid"], 1234);
+    assert_eq!(v["userSetup"]["home"], "/home/cguilive");
+
+    let boot = runtime::machine_logs(&m, true, Some(20))
+        .await
+        .expect("boot log");
+    assert!(!boot.trim().is_empty(), "boot log empty");
+    assert!(boot.lines().count() <= 20, "-n not honoured");
+    // stdio may legitimately be empty, but the call must succeed once booted.
+    runtime::machine_logs(&m, false, Some(5))
+        .await
+        .expect("stdio log");
+
+    runtime::machine_delete(&m).await.expect("delete");
+    let after = runtime::machine_list().await.unwrap();
+    assert!(after.iter().all(|x| x.id != m));
+}
+
 /// DNS aliases (1.6+): run with `--network net,alias=...` and read them back
 /// from `ls` (`configuration.networks[].options.aliases`) and `inspect`.
 #[tokio::test]

@@ -117,8 +117,17 @@ export const api = {
 
   // Container machines (phase 4): named VMs that containers run in.
   machineList: () => call<{ id: string; status: string; cpus: number; memory: number; diskSize: number; isDefault: boolean; createdDate: string }[]>('machine_list', []),
-  machineCreate: (name: string, image: string, cpus?: number, memory?: string, noBoot = true) =>
-    inTauri ? invokeStrict<void>('machine_create', { name, image, cpus, memory, noBoot }) : Promise.resolve(),
+  // `userOpts` (container 1.6+): the machine account's name/uid/gid/home.
+  machineCreate: (name: string, image: string, cpus?: number, memory?: string, noBoot = true,
+                  userOpts?: { user?: string; uid?: number; gid?: number; home?: string }) =>
+    inTauri ? invokeStrict<void>('machine_create', { name, image, cpus, memory, noBoot, userOpts }) : Promise.resolve(),
+  // One-shot `machine logs` (stdio, or the VM boot log with `boot`).
+  machineLogs: (name: string, opts?: { boot?: boolean; tail?: number }) =>
+    inTauri ? invokeStrict<string>('machine_logs', { name, boot: opts?.boot, tail: opts?.tail })
+            : Promise.resolve(`[dev mode] ${opts?.boot ? 'boot' : 'stdio'} log for ${name}\n`),
+  machineInspect: (name: string) =>
+    inTauri ? invokeStrict<string>('machine_inspect', { name })
+            : Promise.resolve(`[\n  {\n    "id": "${name}"\n  }\n]`),
   machineStop: (name: string) => inTauri ? invokeStrict<void>('machine_stop', { name }) : Promise.resolve(),
   machineDelete: (name: string) => inTauri ? invokeStrict<void>('machine_delete', { name }) : Promise.resolve(),
   machineSetDefault: (name: string) => inTauri ? invokeStrict<void>('machine_set_default', { name }) : Promise.resolve(),
