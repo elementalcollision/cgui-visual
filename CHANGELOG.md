@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.4] — 2026-11-23
+
 ### Changed
 
 - **Updates will keep arriving after the project is renamed.** cgui is
@@ -631,7 +633,8 @@ Initial macOS-only release. Tauri + React + TypeScript GUI for Apple's
   binary. Apple's `container` CLI is similarly optional but required for
   any real data.
 
-[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.7.4...HEAD
+[0.7.4]: https://github.com/elementalcollision/cgui-visual/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/elementalcollision/cgui-visual/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/elementalcollision/cgui-visual/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/elementalcollision/cgui-visual/compare/v0.7.0...v0.7.1
