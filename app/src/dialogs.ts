@@ -47,7 +47,7 @@ export async function askConfirm(message: string, opts: ConfirmOptions = {}): Pr
 
 // ---- text prompt -------------------------------------------------------
 // The dialog plugin has no text-input dialog, so while <TextPromptHost/>
-// (modals.tsx, mounted once in App) is mounted this opens an in-app modal.
+// (TextPromptHost.tsx, mounted once in App) is mounted this opens an in-app modal.
 // Requests are served one at a time.
 
 export interface TextRequest {

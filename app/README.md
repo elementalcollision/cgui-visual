@@ -33,24 +33,27 @@ app/
 │   ├── api.ts          invoke() wrapper + event subscribers
 │   ├── components.tsx  Sidebar / TopBar / StatusBar / icons / primitives
 │   ├── views.tsx       Containers / Images / Volumes / Networks / Stacks / Logs
-│   ├── modals.tsx      Detail / Pull / Trivy / Update / Doctor / Settings
+│   ├── modals/         One file per dialog + index.ts barrel (see docs/architecture.md)
 │   ├── toast.tsx       Action-failure toast queue
 │   └── App.tsx         Root: state, key handling, prefs, modal routing
 └── src-tauri/          Rust backend
     └── src/
-        ├── runtime.rs  Async wrapper around the `container` CLI
+        ├── runtime/    Async wrapper around the `container` CLI (mod.rs + parse, containers, images, …)
         ├── state.rs    Per-id History + CPU%/net/disk delta computation
         ├── stacks.rs   ~/.config/cgui/stacks/*.toml parser
         ├── doctor.rs   Health checks
         ├── trivy.rs    `trivy image --format json` parser
         ├── updates.rs  GitHub Releases API check
         ├── prefs.rs    UI prefs persisted to ~/.config/cgui-gui/state.json
+        ├── paths.rs    Shared config-directory resolution
         ├── model.rs    Wire types (camelCase serde for round-trip with TS)
         ├── commands.rs Tauri command handlers
         └── lib.rs      Builder + 2s polling task that emits containers:tick
 ```
 
 ## Architecture
+
+The full module map is in [`../docs/architecture.md`](../docs/architecture.md).
 
 - **Initial paint** uses `invoke('list_*')` for each tab.
 - **Container updates** stream over the `containers:tick` event emitted every

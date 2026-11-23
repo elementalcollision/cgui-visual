@@ -45,21 +45,42 @@ cgui-visual targets a specific niche: **devs on Apple Silicon who want a GUI for
 
 ## What it does
 
-- **Containers** — list / inspect / start / stop / restart / kill / delete with live CPU, memory, network, disk rates derived from `container stats` deltas
-- **Images** — list / inspect / Trivy scan / run (with name, ports, env, command form) / tag / push / save / load / delete; unreadable images (container 1.6+) are skipped with a warning banner instead of failing the list
+cgui-visual drives Apple's `container` CLI and nothing else (Docker and Podman are not supported). It shells out to the CLI, so anything you do here you could also do in a terminal.
+
+- **Containers** — list / inspect / start / stop / restart / kill / delete, with live CPU, memory, network and disk rates. CPU uses the CLI's native `cpuUtilization` when it reports one (container 1.7.1+) and falls back to deltas of `container stats` on older versions
+- **Commit to image** — turn a container into an image from its detail pane (container 1.6+)
+- **Images** — list / inspect (with a layer-history view) / Trivy scan / run / tag / push / save / load / delete. The run form covers name, ports, env and a quote-aware command, plus DNS aliases on the chosen network (container 1.6+). Unreadable images (container 1.6+) are skipped with a warning banner instead of failing the list
 - **Build** — Dockerfile builds with streamed output, plus builder VM start / stop / delete in Settings
-- **Volumes / Networks** — list with reference counts, JSON inspect, delete
-- **Stacks** — TOML compose-style at `~/.config/cgui/stacks/*.toml`; up/down with topological ordering; live TCP/HTTP/cmd healthchecks with `start_period_s` grace window; import a `docker-compose.yml`, or export a stack back to one
+- **Volumes / Networks** — list with reference counts, JSON inspect, delete, and create from the UI (size and labels for volumes; subnets and labels for networks) with inline validation
+- **Stacks** — TOML compose-style at `~/.config/cgui/stacks/*.toml`; up/down with topological ordering; live TCP/HTTP/cmd healthchecks with `start_period_s` grace window; per-network DNS aliases; import a `docker-compose.yml`, or export a stack back to one
 - **Terminal and trends** — interactive shell into a container; CPU / memory / network / disk history
-- **Machines, registry, prune, disk usage** — machine management, registry logins, prune for containers / images / volumes / networks, and `system df`
-- **Logs** — streaming `container logs -f` with 5 000-line ring buffer, level filter, free-text search
+- **Machines** — list, create (including user options on container 1.6+), stop, delete, set default, plus per-machine logs (stdio or boot log) and inspect
+- **Registry, prune, disk usage** — registry logins, prune for containers / images / volumes / networks, and `system df`
+- **Logs** — streaming `container logs -f` with a 5 000-line ring buffer, level filter and free-text search; history is kept locally for 7 days
 - **Pull** — streaming `container image pull` with progress
 - **Doctor** — local-environment health check, including minimum-version and CLI/server version-mismatch checks with one-click service start / restart
+- **Command palette and menu-bar mode** — `⌘K` jumps to any tab, container, image or stack; an optional menu-bar mode keeps the app running with the window closed
+- **Accessibility** — dialogs are labelled, trap focus and close on Esc; icon buttons carry accessible names; toggles are real switches; toasts are announced to screen readers; container rows are reachable and operable from the keyboard
 - **Self-update** — Tauri-updater plugin against a GitHub-Pages-hosted manifest
+
+### Privacy and network use
+
+Fonts (Inter, JetBrains Mono) ship inside the app and the Content Security Policy only allows the app's own origin. cgui-visual itself makes no network calls except the update checks (GitHub releases and the update manifest) and any HTTP healthchecks you configure on a stack. Pulling images and Trivy's vulnerability-database refresh are done by `container` and `trivy`, not by this app.
 
 ## Compatibility
 
-Requires Apple `container` 1.4.1 or later. Tested with 1.4.1 and 1.7.1 on macOS 26.7 and macOS 27.2.
+Requires Apple `container` **1.4.1 or later** (Doctor flags anything older). Tested with 1.4.1 and 1.7.1 on macOS 26.7 and macOS 27.2.
+
+Some features need a newer CLI and are disabled, with an explanatory tooltip, when the detected version is too old:
+
+| Feature | Needs `container` |
+| --- | --- |
+| Commit container to image | 1.6+ |
+| DNS aliases (Run dialog, stacks) | 1.6+ |
+| Machine user options | 1.6+ |
+| Native CPU utilization (otherwise computed from deltas) | 1.7.1+ |
+
+Unreadable-image handling (a warning banner instead of a failed list) applies to 1.6+ output.
 
 ## Layout
 
@@ -70,13 +91,13 @@ Requires Apple `container` 1.4.1 or later. Tested with 1.4.1 and 1.7.1 on macOS 
 │   ├── src/                Frontend
 │   ├── src-tauri/          Rust backend
 │   └── …
-├── docs/screenshots/       Screenshots used in this README
+├── docs/                   architecture.md, archived notes, screenshots
 ├── CHANGELOG.md
 ├── CONTRIBUTING.md
 └── LICENSE                 MIT
 ```
 
-The bulk of the project documentation is in [`app/README.md`](./app/README.md).
+The bulk of the project documentation is in [`app/README.md`](./app/README.md); the module layout is in [`docs/architecture.md`](./docs/architecture.md).
 
 ## Install
 
