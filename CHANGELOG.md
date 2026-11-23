@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-11-23
+
+Security and data-safety hotfix. **Every version from 0.2.0 to 0.6.0 is
+affected; please update.**
+
+### Fixed
+
+- **Confirmations now wait for your answer.** Since 0.2.0, no confirmation
+  in cgui actually waited: the dialog plugin replaces `window.confirm()` with
+  an asynchronous version, so the check always passed and the action ran
+  immediately, with the native dialog appearing only afterwards. Affected:
+  installing an update, deleting volumes (including their data), images,
+  networks, machines and the builder, bulk container actions, stack down,
+  prune, stopping the container services, pushing an image and overwriting a
+  stack on import. All of these now wait for a native confirmation, and
+  anything that goes wrong with the dialog counts as "no".
+- **Kill, Retag, Copy in and Copy out work.** They asked for input with
+  `prompt()`, which returns nothing inside the app, so they silently did
+  nothing. They now use an in-app text box (Enter to confirm, Esc to cancel).
+- **The update dialog** shows the new and current versions and the release
+  notes, and only downloads after you choose **Install and Relaunch**.
+
+Updating from 0.6.0 or earlier still uses the old update code, so that one
+update installs without waiting for your answer. Updates after 0.6.1 ask
+first.
+
 ## [0.6.0] — 2026-11-23
 
 Targets Apple's `container` CLI 1.7.1; **1.4.1 or later is now required.**
@@ -388,7 +414,8 @@ Initial macOS-only release. Tauri + React + TypeScript GUI for Apple's
   binary. Apple's `container` CLI is similarly optional but required for
   any real data.
 
-[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/elementalcollision/cgui-visual/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.4...v0.6.0
 [0.5.4]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.2...v0.5.3
