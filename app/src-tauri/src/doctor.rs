@@ -143,15 +143,11 @@ pub async fn run() -> Vec<DoctorCheck> {
         }
     }
 
-    // 8. runtime API socket.
-    let sock = "/var/run/container.sock";
-    if std::path::Path::new(sock).exists() {
-        out.push(ok(format!("runtime API reachable on {sock}")));
-    } else {
-        out.push(warn(format!("runtime API socket not found at {sock}")));
-    }
+    // No runtime-socket check: Apple's container services talk over
+    // XPC/launchd and never create one. Check 4 (`system status`) already
+    // shows whether the API server is reachable.
 
-    // 9. background log capture (see logpersist.rs).
+    // 8. background log capture (see logpersist.rs).
     out.push(log_capture_check(crate::logpersist::status()));
 
     out

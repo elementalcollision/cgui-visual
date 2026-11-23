@@ -707,7 +707,7 @@ pub fn doctor() -> Vec<DoctorCheck> {
         warn("no profiles.toml at ~/.config/cgui/profiles.toml (using built-in default)"),
         ok("state.json at ~/.config/cgui/state.json parses cleanly"),
         warn("trivy not on PATH (image scan disabled — brew install trivy)"),
-        ok("runtime API reachable on /var/run/container.sock"),
+        ok("background log capture: 2 containers followed"),
     ]
 }
 
