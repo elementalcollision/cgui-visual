@@ -1,5 +1,5 @@
 // Client-side validators for values typed into the 1.6/1.7 forms. They mirror
-// the backend checks (runtime.rs) so the user gets the reason inline instead
+// the backend checks (runtime/) so the user gets the reason inline instead
 // of a CLI error toast. Each returns an error message, or null when valid.
 
 /** New image reference: `[host[:port]/]repo[:tag][@digest]`, lowercase repo. */

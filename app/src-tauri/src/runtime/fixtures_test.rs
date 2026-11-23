@@ -24,7 +24,7 @@ struct Set {
 
 macro_rules! fx {
     ($v:literal, $f:literal) => {
-        include_str!(concat!("../tests/fixtures/", $v, "/", $f))
+        include_str!(concat!("../../tests/fixtures/", $v, "/", $f))
     };
 }
 
