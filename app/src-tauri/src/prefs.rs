@@ -22,6 +22,10 @@ pub struct Prefs {
     /// Fire a macOS notification when a container exits with a non-zero
     /// status. Only meaningful when the runtime is reachable.
     pub notify_on_exit: bool,
+    /// Set once the "still running in the menu bar" hint has been shown
+    /// (see menubar_hint.rs). Backend-owned: the frontend never sends it,
+    /// so `save_prefs` preserves the on-disk value.
+    pub menubar_hint_shown: bool,
 }
 
 impl Default for Prefs {
@@ -33,6 +37,7 @@ impl Default for Prefs {
             menubar_mode: false,
             global_hotkey: String::new(),
             notify_on_exit: true,
+            menubar_hint_shown: false,
         }
     }
 }
@@ -85,6 +90,7 @@ mod tests {
             menubar_mode: true,
             global_hotkey: "CmdOrCtrl+Alt+Space".into(),
             notify_on_exit: false,
+            menubar_hint_shown: true,
         };
         let s = serde_json::to_string(&p).unwrap();
         let back: Prefs = serde_json::from_str(&s).unwrap();
@@ -94,6 +100,7 @@ mod tests {
         assert!(back.menubar_mode);
         assert_eq!(back.global_hotkey, "CmdOrCtrl+Alt+Space");
         assert!(!back.notify_on_exit);
+        assert!(back.menubar_hint_shown);
     }
 
     #[test]

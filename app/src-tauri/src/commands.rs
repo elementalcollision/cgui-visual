@@ -597,6 +597,7 @@ static LOG_STREAMS: LazyLock<LogStreams> = LazyLock::new(LogStreams::default);
 /// should also call `history::flush_logs`).
 pub fn stop_all_log_streams() {
     LOG_STREAMS.stop_all();
+    crate::logpersist::stop_all();
 }
 
 /// Stream ids become part of an event name, which Tauri restricts to
@@ -612,6 +613,7 @@ fn valid_stream_id(id: &str) -> bool {
 #[tauri::command]
 pub fn stop_log_stream(stream_id: String) {
     LOG_STREAMS.stop(&stream_id);
+    crate::logpersist::stop_owner(&stream_id);
 }
 
 #[tauri::command]
@@ -667,25 +669,32 @@ pub async fn start_log_stream(
     // Boot logs are VM console output, not container stdio — don't mix
     // them into the per-container log history sidecar.
     let persist = !boot.unwrap_or(false);
+    // The display stream replays the log on every open, so it never
+    // persists; a separate follower owned by this stream does (see
+    // logpersist.rs).
+    let sid_persist = stream_id.clone();
     // Hold the registry lock across spawn+insert so a stream that ends
     // instantly can't call finish() before it is registered (which would
     // leave a stale entry behind).
-    let mut streams = LOG_STREAMS.lock();
-    let task = tokio::spawn(async move {
-        let ev2 = event.clone();
-        let _ = runtime::drain_lines(child, move |line| {
-            // record_log queues for the batching writer (non-blocking);
-            // it no-ops when the DB isn't init'd.
-            if persist {
-                crate::history::record_log(&id_for_persist, &line);
-            }
-            let _ = app2.emit(&ev2, line);
-        })
-        .await;
-        let _ = app.emit(&event, "[follow ended]".to_string());
-        LOG_STREAMS.finish(&sid);
-    });
-    LogStreams::register(&mut streams, stream_id, task.abort_handle());
+    {
+        let mut streams = LOG_STREAMS.lock();
+        let task = tokio::spawn(async move {
+            let ev2 = event.clone();
+            let _ = runtime::drain_lines(child, move |line| {
+                let _ = app2.emit(&ev2, line);
+            })
+            .await;
+            let _ = app.emit(&event, "[follow ended]".to_string());
+            LOG_STREAMS.finish(&sid);
+            crate::logpersist::stop_owner(&sid);
+        });
+        LogStreams::register(&mut streams, stream_id, task.abort_handle());
+    }
+    if persist {
+        if let Err(e) = crate::logpersist::start(&sid_persist, &id_for_persist).await {
+            eprintln!("log persistence not started for {id_for_persist}: {e:#}");
+        }
+    }
     Ok(())
 }
 
@@ -804,7 +813,9 @@ pub fn load_prefs() -> Prefs {
 }
 
 #[tauri::command]
-pub fn save_prefs(app: tauri::AppHandle, prefs: Prefs) -> Result<(), String> {
+pub fn save_prefs(app: tauri::AppHandle, mut prefs: Prefs) -> Result<(), String> {
+    // Backend-owned flag the frontend doesn't round-trip: keep the stored one.
+    prefs.menubar_hint_shown = prefs.menubar_hint_shown || Prefs::load().menubar_hint_shown;
     prefs.save().map_err(err_str)?;
     // Apply menubar mode live (close behaviour + Dock icon), no restart.
     crate::set_menubar_mode(&app, prefs.menubar_mode);

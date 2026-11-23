@@ -3,6 +3,8 @@ pub mod compose;
 mod doctor;
 mod fixtures;
 pub mod history;
+pub mod logpersist;
+mod menubar_hint;
 pub mod model;
 mod prefs;
 pub mod pty;
@@ -10,6 +12,7 @@ pub mod runtime;
 pub mod snapshot;
 pub mod stacks;
 pub mod state;
+pub mod timeutil;
 pub mod trivy;
 pub mod updates;
 
@@ -237,6 +240,7 @@ pub fn run() {
                 {
                     api.prevent_close();
                     hide_main_window(window.app_handle());
+                    menubar_hint::on_hidden_by_close(window.app_handle());
                 }
             }
         })

@@ -16,7 +16,6 @@
 //     swallowed so a corrupt DB can't take the live UI down.
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -217,7 +216,7 @@ const LOGS_PER_CONTAINER: i64 = 50_000;
 /// loop — silently no-ops when init() hasn't been called or fails.
 pub fn record(snapshot: &[Container]) {
     let Some(db) = DB.get() else { return };
-    let now = Utc::now().timestamp();
+    let now = crate::timeutil::now_unix();
     if let Ok(mut conn) = db.lock() {
         let tx = match conn.transaction() {
             Ok(t) => t,
@@ -338,7 +337,7 @@ pub struct VulnHistory {
 /// "new CVEs since last scan" diff doesn't require re-running trivy.
 pub fn record_scan(image: &str, findings: &[crate::model::TrivyFinding]) {
     let Some(db) = DB.get() else { return };
-    let scanned_at = Utc::now().timestamp();
+    let scanned_at = crate::timeutil::now_unix();
     let mut critical = 0u32;
     let mut high = 0u32;
     let mut medium = 0u32;
@@ -500,7 +499,7 @@ pub fn record_log(container_id: &str, line: &str) {
     if let Some(tx) = log_sender() {
         let _ = tx.send(LogMsg::Line {
             container_id: container_id.to_string(),
-            ts: Utc::now().timestamp(),
+            ts: crate::timeutil::now_unix(),
             line: line.to_string(),
         });
     }
@@ -624,6 +623,18 @@ fn write_log_batch(
     tx.commit()
 }
 
+/// Whether any log line is stored for `container_id`. `None` when the DB
+/// isn't initialised (nothing can be persisted).
+pub fn has_logs(container_id: &str) -> Option<bool> {
+    let conn = DB.get()?.lock().ok()?;
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM container_logs WHERE container_id = ?)",
+        params![container_id],
+        |r| r.get::<_, bool>(0),
+    )
+    .ok()
+}
+
 /// Load the most recent `limit` lines for one container, optionally
 /// filtered by a substring `query`. Returned in ascending-by-ts order
 /// so the LogsView can append them to its render buffer as if they
@@ -692,7 +703,7 @@ pub fn load_logs(container_id: &str, limit: i64, query: Option<&str>) -> Vec<Log
 /// Empty when the DB isn't initialised or has no rows for `id`.
 pub fn load(id: &str, since_secs: i64) -> Vec<HistoryPoint> {
     let Some(db) = DB.get() else { return vec![] };
-    let now = Utc::now().timestamp();
+    let now = crate::timeutil::now_unix();
     let from = now - since_secs.max(0);
     let conn = match db.lock() {
         Ok(c) => c,

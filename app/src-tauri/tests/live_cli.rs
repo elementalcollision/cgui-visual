@@ -430,3 +430,63 @@ async fn quoted_command_and_flag_like_id() {
     assert!(runtime::stop("--all").await.is_err());
     assert!(runtime::delete("-f").await.is_err());
 }
+
+/// Reopening a Logs view must not duplicate persisted history. Drives the
+/// same `logpersist::start/stop_owner` path commands.rs uses.
+#[tokio::test]
+#[ignore]
+async fn reopening_log_view_does_not_duplicate_history() {
+    live_only!();
+    let dir = std::env::temp_dir().join(format!("cgui-live-hist-{}", std::process::id()));
+    let mut g = Guard::default();
+    g.file(dir.join("cgui-gui").join("history.db"));
+    // history::init reads XDG_CONFIG_HOME; no other live test touches it.
+    std::env::set_var("XDG_CONFIG_HOME", &dir);
+    app_lib::history::init().expect("history init");
+
+    let cname = g.container(&name("histdup"));
+    let args = RunArgs {
+        command: Some(
+            "sh -c \"i=0; while true; do i=$((i+1)); echo tick$i; sleep 1; done\"".into(),
+        ),
+        ..run_args(&cname)
+    };
+    runtime::run_image(args).await.expect("run");
+    tokio::time::sleep(Duration::from_secs(4)).await; // pre-existing output
+
+    let rows = |c: &str| {
+        app_lib::history::flush_logs();
+        app_lib::history::load_logs(c, 5000, None)
+    };
+
+    // View open #1: no history yet -> full replay stored once.
+    assert!(app_lib::logpersist::start("s1", &cname).await.unwrap());
+    // A second view of the same container must not start a second follower.
+    assert!(!app_lib::logpersist::start("s1b", &cname).await.unwrap());
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    app_lib::logpersist::stop_owner("s1");
+    let first = rows(&cname);
+    assert!(
+        first.len() >= 5,
+        "replay + live stored, got {}",
+        first.len()
+    );
+    assert!(first.iter().any(|l| l.line == "tick1"), "replay captured");
+
+    // View opens #2 and #3: history exists -> `-n 0`, new lines only.
+    for owner in ["s2", "s3"] {
+        assert!(app_lib::logpersist::start(owner, &cname).await.unwrap());
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        app_lib::logpersist::stop_owner(owner);
+    }
+    let all = rows(&cname);
+    assert!(
+        all.len() > first.len(),
+        "new live lines were still captured"
+    );
+    let mut seen = std::collections::HashSet::new();
+    for l in &all {
+        assert!(seen.insert(l.line.clone()), "duplicate row: {}", l.line);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

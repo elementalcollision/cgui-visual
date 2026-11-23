@@ -4,7 +4,6 @@
 // is active.
 
 use anyhow::{anyhow, Context, Result};
-use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 use std::process::Stdio;
@@ -357,8 +356,8 @@ fn parse_container(v: Value) -> Container {
         .get("status")
         .and_then(|s| s.get("startedDate"))
         .and_then(Value::as_str)
-        .and_then(|t| DateTime::parse_from_rfc3339(t).ok());
-    let started_unix = started_at.map(|t| t.timestamp());
+        .and_then(crate::timeutil::parse_rfc3339_unix);
+    let started_unix = started_at;
     let started_iso = v
         .get("status")
         .and_then(|s| s.get("startedDate"))
@@ -440,7 +439,7 @@ fn parse_container(v: Value) -> Container {
 }
 
 fn format_uptime_from_unix(unix_secs: i64) -> String {
-    let secs = (Utc::now().timestamp() - unix_secs).max(0);
+    let secs = (crate::timeutil::now_unix() - unix_secs).max(0);
     format_duration(secs)
 }
 

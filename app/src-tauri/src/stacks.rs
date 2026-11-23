@@ -596,7 +596,7 @@ pub async fn health_check_stack(name: &str) -> Result<Vec<(String, String)>> {
         Ok((cs, _)) => cs,
         Err(_) => vec![],
     };
-    let now_unix = chrono::Utc::now().timestamp();
+    let now_unix = crate::timeutil::now_unix();
 
     let mut out = Vec::with_capacity(stack.services.len());
     for svc in &stack.services {
