@@ -7,9 +7,10 @@ describe('toast', () => {
   beforeEach(() => { vi.useFakeTimers(); });
   afterEach(() => { vi.useRealTimers(); });
 
-  it('renders nothing when the queue is empty', () => {
+  it('renders no toasts when the queue is empty (live region stays mounted)', () => {
     const { container } = render(<ToastTray t={getTheme(true)} />);
-    expect(container.firstChild).toBeNull();
+    expect(container.firstChild).toHaveAttribute('aria-live', 'polite');
+    expect(container.firstChild?.childNodes.length).toBe(0);
   });
 
   it('renders a toast and auto-dismisses after 4s', () => {

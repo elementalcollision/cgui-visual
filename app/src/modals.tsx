@@ -1,20 +1,20 @@
 // Modals: Detail / Pull / Trivy / Update / Doctor / Settings.
 
-import React, { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import React, { Fragment, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ThemeTokens } from './theme';
 import type { Container, Image, ScanResponse, Severity, Stack, Tab, TrivyFinding, Update, DoctorCheck, DoctorFix, HistoryPoint, VulnHistory, Runtime, DiskUsage, DiskUsageRow } from './types';
 import { Icon, Bar, Sparkline, iconBtn, pillBtn, fmtCreated } from './components';
 import { api } from './api';
 import { toast, withToast } from './toast';
 import { askConfirm, askText } from './dialogs';
+import { DialogBackdrop } from './a11y';
 import { errMessage, looksLikeServicesDown } from './loadState';
 
-function Backdrop({ onClose, children }: { onClose: () => void; children: ReactNode }) {
-  return (
-    <div onClick={onClose} style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100, backdropFilter: 'blur(2px)' }}>
-      <div onClick={e => e.stopPropagation()}>{children}</div>
-    </div>
-  );
+// Shared modal shell (role=dialog, Esc, focus trap/restore, drag-safe backdrop
+// click) lives in a11y.tsx. `title` is the dialog's accessible name; always
+// pass one for new modals.
+function Backdrop({ onClose, title, children }: { onClose: () => void; title?: string; children: ReactNode }) {
+  return <DialogBackdrop onClose={onClose} title={title}>{children}</DialogBackdrop>;
 }
 
 // Tabs available in the inspect drawer. Each maps to a different
@@ -411,7 +411,7 @@ export function DetailModal({ item, t, onClose, onExec }: {
   // shows whatever came back, even when it isn't valid JSON.
   const parsed = useMemo(() => parseInspect(json), [json]);
   return (
-    <Backdrop onClose={onClose}>
+    <Backdrop title={`Container ${c.name}`} onClose={onClose}>
       <div style={{ width: 760, maxHeight: '85vh', background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 80px rgba(0,0,0,0.4)' }}>
         <div style={{ padding: '18px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'flex-start', gap: 12 }}>
           <Icon name="box" size={20} color={t.accent} />
@@ -419,7 +419,7 @@ export function DetailModal({ item, t, onClose, onExec }: {
             <div style={{ fontSize: 18, fontWeight: 600, color: t.fg1 }}>{c.name}</div>
             <div style={{ fontSize: 12, color: t.fg3, fontFamily: t.mono, marginTop: 4 }}>{c.shortId} · {c.image}</div>
           </div>
-          <button onClick={onClose} style={iconBtn()}><Icon name="x" size={16} color={t.fg2} /></button>
+          <button onClick={onClose} style={iconBtn()} aria-label="Close"><Icon name="x" size={16} color={t.fg2} /></button>
         </div>
         <div style={{ padding: '14px 22px', display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, borderBottom: `1px solid ${t.border}` }}>
           {[
@@ -558,7 +558,7 @@ export function PullModal({ t, reference, onClose }: {
     :                   'Pulling image';
 
   return (
-    <Backdrop onClose={onClose}>
+    <Backdrop title={headerTitle} onClose={onClose}>
       <div style={{ width: 640, background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 80px rgba(0,0,0,0.4)' }}>
         <div style={{ padding: '16px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 12 }}>
           <Icon name="download" size={18} color={t.accent} />
@@ -568,7 +568,7 @@ export function PullModal({ t, reference, onClose }: {
               <div style={{ fontSize: 12, color: t.fg3, fontFamily: t.mono, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{submitted}</div>
             )}
           </div>
-          <button onClick={onClose} style={iconBtn()}><Icon name="x" size={16} color={t.fg2} /></button>
+          <button onClick={onClose} style={iconBtn()} aria-label="Close"><Icon name="x" size={16} color={t.fg2} /></button>
         </div>
 
         {/* Idle phase: input + Pull. Once submitted we swap in the
@@ -729,7 +729,7 @@ export function BuildModal({ t, onClose }: { t: ThemeTokens; onClose: () => void
   );
 
   return (
-    <Backdrop onClose={onClose}>
+    <Backdrop title={headerTitle} onClose={onClose}>
       <div style={{ width: 680, background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 80px rgba(0,0,0,0.4)' }}>
         <div style={{ padding: '16px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 12 }}>
           <Icon name="layers" size={18} color={done === false ? t.danger : t.accent} />
@@ -739,7 +739,7 @@ export function BuildModal({ t, onClose }: { t: ThemeTokens; onClose: () => void
               <div style={{ fontSize: 12, color: t.fg3, fontFamily: t.mono, marginTop: 2 }}>{tag} · {context}</div>
             )}
           </div>
-          <button onClick={onClose} style={iconBtn()}><Icon name="x" size={16} color={t.fg2} /></button>
+          <button onClick={onClose} style={iconBtn()} aria-label="Close"><Icon name="x" size={16} color={t.fg2} /></button>
         </div>
 
         {!submitted ? (
@@ -845,7 +845,7 @@ export function TrivyModal({ t, image, onClose }: { t: ThemeTokens; image?: stri
     // Neither of these is a clean result: never render counts/findings.
     const notInstalled = resp.status === 'notInstalled';
     return (
-      <Backdrop onClose={onClose}>
+      <Backdrop title={notInstalled ? 'Trivy is not installed' : 'Scan failed'} onClose={onClose}>
         <div role="alert" style={{ width: 560, background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden' }}>
           <div style={{ padding: '16px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 12 }}>
             <Icon name="shield" size={18} color={t.danger} />
@@ -853,7 +853,7 @@ export function TrivyModal({ t, image, onClose }: { t: ThemeTokens; image?: stri
               <div style={{ fontSize: 15, fontWeight: 600, color: t.fg1 }}>{notInstalled ? 'Trivy is not installed' : 'Scan failed'}</div>
               <div style={{ fontSize: 12, color: t.fg3, fontFamily: t.mono }}>{image}</div>
             </div>
-            <button onClick={onClose} style={iconBtn()}><Icon name="x" size={16} color={t.fg2} /></button>
+            <button onClick={onClose} style={iconBtn()} aria-label="Close"><Icon name="x" size={16} color={t.fg2} /></button>
           </div>
           <div style={{ padding: '18px 22px', fontSize: 13, color: t.fg2, lineHeight: 1.5 }}>
             {notInstalled ? (
@@ -879,7 +879,7 @@ export function TrivyModal({ t, image, onClose }: { t: ThemeTokens; image?: stri
     (!search || (f.cve + f.pkg + f.title).toLowerCase().includes(search.toLowerCase()))
   );
   return (
-    <Backdrop onClose={onClose}>
+    <Backdrop title="Trivy scan" onClose={onClose}>
       <div style={{ width: 1000, maxHeight: '85vh', background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         <div style={{ padding: '16px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 12 }}>
           <Icon name="shield" size={18} color={t.warning} />
@@ -887,7 +887,7 @@ export function TrivyModal({ t, image, onClose }: { t: ThemeTokens; image?: stri
             <div style={{ fontSize: 15, fontWeight: 600, color: t.fg1 }}>Trivy scan</div>
             <div style={{ fontSize: 12, color: t.fg3, fontFamily: t.mono }}>{data.image}</div>
           </div>
-          <button onClick={onClose} style={iconBtn()}><Icon name="x" size={16} color={t.fg2} /></button>
+          <button onClick={onClose} style={iconBtn()} aria-label="Close"><Icon name="x" size={16} color={t.fg2} /></button>
         </div>
         <div style={{ padding: '14px 22px', display: 'flex', gap: 8, borderBottom: `1px solid ${t.border}` }}>
           {(Object.entries(data.counts) as [Severity, number][]).map(([sev, n]) => (
@@ -968,7 +968,7 @@ function CveDrawer({ t, f, sevColor, onClose }: {
             <div style={{ fontSize: 11, color: t.fg3, fontFamily: t.mono, marginTop: 2 }}>CVSS v3 · <span style={{ color: t.fg2 }}>{f.cvss.toFixed(1)}</span></div>
           )}
         </div>
-        <button onClick={onClose} style={iconBtn()}><Icon name="x" size={14} color={t.fg2} /></button>
+        <button onClick={onClose} style={iconBtn()} aria-label="Close"><Icon name="x" size={14} color={t.fg2} /></button>
       </div>
       {f.title && (
         <div style={{ fontSize: 13, color: t.fg1, lineHeight: 1.5 }}>{f.title}</div>
@@ -1090,7 +1090,7 @@ export function UpdateModal({ t, onClose }: { t: ThemeTokens; onClose: () => voi
   }, []);
   if (error) {
     return (
-      <Backdrop onClose={onClose}>
+      <Backdrop title="Update check failed" onClose={onClose}>
         <div role="alert" style={{ width: 520, background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, padding: '18px 22px' }}>
           <div style={{ fontSize: 15, fontWeight: 600, color: t.fg1 }}>Couldn't check for updates</div>
           <div style={{ marginTop: 8, fontSize: 12, color: t.fg2, fontFamily: t.mono }}>{error}</div>
@@ -1115,7 +1115,7 @@ export function UpdateModal({ t, onClose }: { t: ThemeTokens; onClose: () => voi
   };
 
   return (
-    <Backdrop onClose={onClose}>
+    <Backdrop title="Update available" onClose={onClose}>
       <div style={{ width: 640, maxHeight: '85vh', background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         <div style={{ padding: '16px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 12 }}>
           <Icon name="download" size={18} color={t.warning} />
@@ -1131,10 +1131,10 @@ export function UpdateModal({ t, onClose }: { t: ThemeTokens; onClose: () => voi
           </div>
           <div style={{ display: 'flex', gap: 4 }}>
             {items.map((_, i) => (
-              <button key={i} onClick={() => setIdx(i)} style={{ width: 8, height: 8, borderRadius: '50%', background: i === idx ? t.accent : t.border, border: 'none', cursor: 'pointer' }} />
+              <button key={i} onClick={() => setIdx(i)} aria-label={`Update ${i + 1} of ${items.length}`} aria-current={i === idx ? 'true' : undefined} style={{ width: 8, height: 8, borderRadius: '50%', background: i === idx ? t.accent : t.border, border: 'none', cursor: 'pointer' }} />
             ))}
           </div>
-          <button onClick={onClose} style={iconBtn()}><Icon name="x" size={16} color={t.fg2} /></button>
+          <button onClick={onClose} style={iconBtn()} aria-label="Close"><Icon name="x" size={16} color={t.fg2} /></button>
         </div>
         <div style={{ flex: 1, overflow: 'auto', padding: '16px 22px', maxHeight: 360 }}>
           <pre style={{ margin: 0, fontFamily: t.mono, fontSize: 12, lineHeight: 1.6, color: t.fg2, whiteSpace: 'pre-wrap' }}>{u.notes}</pre>
@@ -1260,12 +1260,12 @@ export function DoctorModal({ t, onClose }: { t: ThemeTokens; onClose: () => voi
   const warns = checks.filter(c => !c.ok && c.warn).length;
   const fails = checks.filter(c => !c.ok && !c.warn).length;
   return (
-    <Backdrop onClose={onClose}>
+    <Backdrop title="cgui doctor" onClose={onClose}>
       <div style={{ width: 600, background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden' }}>
         <div style={{ padding: '16px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 12 }}>
           <Icon name="heart" size={18} color={t.success} />
           <div style={{ flex: 1, fontSize: 15, fontWeight: 600, color: t.fg1 }}>cgui doctor</div>
-          <button onClick={onClose} style={iconBtn()}><Icon name="x" size={16} color={t.fg2} /></button>
+          <button onClick={onClose} style={iconBtn()} aria-label="Close"><Icon name="x" size={16} color={t.fg2} /></button>
         </div>
         <div style={{ padding: '14px 22px', fontFamily: t.mono, fontSize: 12 }}>
           {checks.map((d, i) => <DoctorRow key={i} t={t} d={d} />)}
@@ -1379,7 +1379,7 @@ export function ImageInspectModal({ t, reference, onClose }: {
   const realLayers = layers.filter(l => !l.emptyLayer).length;
 
   return (
-    <Backdrop onClose={onClose}>
+    <Backdrop title={`Image ${reference}`} onClose={onClose}>
       <div style={{ width: 820, maxHeight: '85vh', background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 80px rgba(0,0,0,0.4)' }}>
         <div style={{ padding: '18px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'flex-start', gap: 12 }}>
           <Icon name="image" size={20} color={t.accent} />
@@ -1395,7 +1395,7 @@ export function ImageInspectModal({ t, reference, onClose }: {
               )}
             </div>
           </div>
-          <button onClick={onClose} style={iconBtn()}><Icon name="x" size={16} color={t.fg2} /></button>
+          <button onClick={onClose} style={iconBtn()} aria-label="Close"><Icon name="x" size={16} color={t.fg2} /></button>
         </div>
         <div style={{ display: 'flex', gap: 4, padding: '8px 16px 0', borderBottom: `1px solid ${t.border}` }}>
           {([
@@ -1486,7 +1486,7 @@ export function JsonInspectModal({ t, title, subtitle, fetcher, onClose }: {
     return () => { cancelled = true; };
   }, [fetcher]);
   return (
-    <Backdrop onClose={onClose}>
+    <Backdrop title={title} onClose={onClose}>
       <div style={{ width: 720, maxHeight: '85vh', background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 80px rgba(0,0,0,0.4)' }}>
         <div style={{ padding: '18px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'flex-start', gap: 12 }}>
           <Icon name="info" size={20} color={t.accent} />
@@ -1494,7 +1494,7 @@ export function JsonInspectModal({ t, title, subtitle, fetcher, onClose }: {
             <div style={{ fontSize: 18, fontWeight: 600, color: t.fg1 }}>{title}</div>
             <div style={{ fontSize: 12, color: t.fg3, fontFamily: t.mono, marginTop: 4 }}>{subtitle}</div>
           </div>
-          <button onClick={onClose} style={iconBtn()}><Icon name="x" size={16} color={t.fg2} /></button>
+          <button onClick={onClose} style={iconBtn()} aria-label="Close"><Icon name="x" size={16} color={t.fg2} /></button>
         </div>
         <div style={{ flex: 1, overflow: 'auto', padding: '14px 22px', minHeight: 200 }}>
           <pre style={{ margin: 0, fontFamily: t.mono, fontSize: 11, lineHeight: 1.6, color: t.fg2, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{json}</pre>
@@ -1576,7 +1576,7 @@ export function RunImageModal({ t, image, onLaunched, onClose }: {
   const labelStyle = { fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase' as const, color: t.fg3, marginBottom: 6, display: 'block' };
 
   return (
-    <Backdrop onClose={onClose}>
+    <Backdrop title="Run image" onClose={onClose}>
       <div style={{ width: 560, background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 80px rgba(0,0,0,0.4)' }}>
         <div style={{ padding: '18px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'flex-start', gap: 12 }}>
           <Icon name="play" size={20} color={t.success} />
@@ -1584,7 +1584,7 @@ export function RunImageModal({ t, image, onLaunched, onClose }: {
             <div style={{ fontSize: 18, fontWeight: 600, color: t.fg1 }}>Run image</div>
             <div style={{ fontSize: 12, color: t.fg3, fontFamily: t.mono, marginTop: 4 }}>{image}</div>
           </div>
-          <button onClick={onClose} style={iconBtn()}><Icon name="x" size={16} color={t.fg2} /></button>
+          <button onClick={onClose} style={iconBtn()} aria-label="Close"><Icon name="x" size={16} color={t.fg2} /></button>
         </div>
         <div style={{ padding: '18px 22px', display: 'flex', flexDirection: 'column', gap: 14, maxHeight: '62vh', overflow: 'auto' }}>
           <div>
@@ -1714,7 +1714,7 @@ export function OnboardingModal({ t, onAvailable, onDismiss }: {
   };
 
   return (
-    <Backdrop onClose={onDismiss}>
+    <Backdrop title="Container CLI not detected" onClose={onDismiss}>
       <div style={{ width: 560, background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 80px rgba(0,0,0,0.4)' }}>
         <div style={{ padding: '20px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'flex-start', gap: 12 }}>
           <Icon name="info" size={22} color={t.warning} />
@@ -1823,12 +1823,12 @@ export function SettingsModal({
   }, []);
 
   return (
-    <Backdrop onClose={onClose}>
+    <Backdrop title="Settings" onClose={onClose}>
       <div style={{ width: 640, background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', maxHeight: '85vh', display: 'flex', flexDirection: 'column' }}>
         <div style={{ padding: '16px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 12 }}>
           <Icon name="cog" size={18} color={t.fg2} />
           <div style={{ flex: 1, fontSize: 15, fontWeight: 600, color: t.fg1 }}>Settings</div>
-          <button onClick={onClose} style={iconBtn()}><Icon name="x" size={16} color={t.fg2} /></button>
+          <button onClick={onClose} style={iconBtn()} aria-label="Close"><Icon name="x" size={16} color={t.fg2} /></button>
         </div>
         <div style={{ flex: 1, overflow: 'auto', padding: '18px 22px' }}>
           <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: t.fg3, marginBottom: 10 }}>Runtime profile</div>
@@ -2208,18 +2208,22 @@ function SettingsToggle({ t, label, hint, value, onChange }: {
   t: ThemeTokens; label: string; hint?: string;
   value: boolean; onChange: (v: boolean) => void;
 }) {
+  const uid = useId();
+  const labelId = `${uid}-label`;
+  const hintId = `${uid}-hint`;
   return (
     <div style={{
       display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       padding: '10px 0', borderBottom: `1px solid ${t.border}`, gap: 12,
     }}>
       <div style={{ minWidth: 0 }}>
-        <div style={{ fontSize: 13, color: t.fg1 }}>{label}</div>
-        {hint && <div style={{ fontSize: 11, color: t.fg3, marginTop: 2 }}>{hint}</div>}
+        <div id={labelId} style={{ fontSize: 13, color: t.fg1 }}>{label}</div>
+        {hint && <div id={hintId} style={{ fontSize: 11, color: t.fg3, marginTop: 2 }}>{hint}</div>}
       </div>
       <button
+        type="button" role="switch" aria-checked={value}
+        aria-labelledby={labelId} aria-describedby={hint ? hintId : undefined}
         onClick={() => onChange(!value)}
-        aria-pressed={value}
         style={{
           flex: '0 0 auto',
           width: 38, height: 22, borderRadius: 999,
@@ -2365,7 +2369,7 @@ export function CommandPaletteModal({
   };
 
   return (
-    <Backdrop onClose={onClose}>
+    <Backdrop title="Command palette" onClose={onClose}>
       <div style={{ width: 580, background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', boxShadow: '0 24px 80px rgba(0,0,0,0.45)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', borderBottom: `1px solid ${t.border}` }}>
           <Icon name="info" size={16} color={t.fg3} />
@@ -2460,12 +2464,12 @@ export function HelpModal({ t, onClose }: { t: ThemeTokens; onClose: () => void 
     },
   ];
   return (
-    <Backdrop onClose={onClose}>
+    <Backdrop title="Keyboard shortcuts" onClose={onClose}>
       <div style={{ width: 580, maxHeight: '85vh', background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         <div style={{ padding: '14px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 12 }}>
           <Icon name="info" size={18} color={t.fg2} />
           <div style={{ flex: 1, fontSize: 15, fontWeight: 600, color: t.fg1 }}>Keyboard shortcuts</div>
-          <button onClick={onClose} style={iconBtn()}><Icon name="x" size={16} color={t.fg2} /></button>
+          <button onClick={onClose} style={iconBtn()} aria-label="Close"><Icon name="x" size={16} color={t.fg2} /></button>
         </div>
         <div style={{ flex: 1, overflow: 'auto', padding: '14px 22px', display: 'flex', flexDirection: 'column', gap: 18 }}>
           {groups.map(g => (
