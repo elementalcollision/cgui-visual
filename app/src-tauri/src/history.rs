@@ -42,10 +42,7 @@ static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 static LAST_GC_DAY: Mutex<Option<i64>> = Mutex::new(None);
 
 fn db_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("cgui-gui").join("history.db"))
+    Some(crate::paths::config_dir("cgui-gui")?.join("history.db"))
 }
 
 /// Open the DB and run idempotent schema setup. Safe to call repeatedly;

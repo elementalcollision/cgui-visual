@@ -221,10 +221,7 @@ fn err(text: String) -> DoctorCheck {
 }
 
 fn config_path(name: &str) -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("cgui").join(name))
+    Some(crate::paths::config_dir("cgui")?.join(name))
 }
 
 #[cfg(test)]

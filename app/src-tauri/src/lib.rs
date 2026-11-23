@@ -6,6 +6,7 @@ pub mod history;
 pub mod logpersist;
 mod menubar_hint;
 pub mod model;
+mod paths;
 mod prefs;
 pub mod pty;
 pub mod runtime;

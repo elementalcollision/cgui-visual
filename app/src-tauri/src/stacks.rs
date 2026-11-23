@@ -91,10 +91,7 @@ fn default_interval() -> u64 {
 }
 
 pub fn stacks_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("cgui").join("stacks"))
+    Some(crate::paths::config_dir("cgui")?.join("stacks"))
 }
 
 /// Validate a stack name before it is ever used to build a file path.

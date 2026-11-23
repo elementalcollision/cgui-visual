@@ -63,10 +63,7 @@ impl Prefs {
 }
 
 fn path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("cgui-gui").join("state.json"))
+    Some(crate::paths::config_dir("cgui-gui")?.join("state.json"))
 }
 
 #[cfg(test)]
