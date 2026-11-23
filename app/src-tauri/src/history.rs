@@ -119,6 +119,17 @@ fn open_with_schema(path: &std::path::Path) -> Result<Connection> {
 /// container, plenty for "what happened five minutes ago" use cases.
 const LOGS_PER_CONTAINER: i64 = 50_000;
 
+/// History/log rows are keyed by the FULL container id (`Container.id`).
+/// Before the full-id fix they were keyed by an 8-char truncation, so rows
+/// written by older builds for containers with ids longer than 8 chars are
+/// orphaned under the short key. No migration: the short key cannot be
+/// mapped back to one container safely (truncations collide, e.g.
+/// `stack_web` / `stack_api`), and aliasing old rows in at read time would
+/// show another container's data. Orphaned metric rows are removed by the
+/// existing 7-day retention GC; orphaned log rows are simply unreachable
+/// (the UI only queries by full id) until the user clears the history DB.
+/// Containers whose id is <= 8 chars keep their existing history unchanged.
+///
 /// Record one tick's worth of samples. Called from the container poll
 /// loop — silently no-ops when init() hasn't been called or fails.
 pub fn record(snapshot: &[Container]) {
@@ -487,6 +498,7 @@ mod tests {
     fn mk_container(id: &str, cpu: f64) -> Container {
         Container {
             id: id.into(),
+            short_id: id.chars().take(8).collect(),
             name: id.into(),
             image: "test".into(),
             status: "running".into(),

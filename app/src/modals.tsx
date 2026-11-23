@@ -412,7 +412,7 @@ export function DetailModal({ item, t, onClose, onExec }: {
           <Icon name="box" size={20} color={t.accent} />
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 18, fontWeight: 600, color: t.fg1 }}>{c.name}</div>
-            <div style={{ fontSize: 12, color: t.fg3, fontFamily: t.mono, marginTop: 4 }}>{c.id} · {c.image}</div>
+            <div style={{ fontSize: 12, color: t.fg3, fontFamily: t.mono, marginTop: 4 }}>{c.shortId} · {c.image}</div>
           </div>
           <button onClick={onClose} style={iconBtn()}><Icon name="x" size={16} color={t.fg2} /></button>
         </div>

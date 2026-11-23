@@ -179,7 +179,7 @@ export default function TerminalModal({ container, t, onClose }: {
             <div style={{ fontSize: 14, fontWeight: 600, color: t.fg1 }}>{container.name}</div>
             <div style={{ fontSize: 11, color: t.fg3, fontFamily: t.mono, marginTop: 2 }}>
               <span style={{ color: statusColor }}>● {status}</span>
-              {' · '}{container.id}
+              {' · '}{container.shortId}
               {' · '}exec -it {container.id} /bin/sh
             </div>
           </div>

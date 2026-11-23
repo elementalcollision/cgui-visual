@@ -57,7 +57,7 @@ describe('App integration', () => {
     render(<App />);
     await screen.findByText('mlperf-inference-llama2');
 
-    // Running row ('mlperf-inference-llama2', fixture id a3f8e2c1) gets the action.
+    // Running row ('mlperf-inference-llama2', fixture id is a full UUID) gets the action.
     const runningRow = screen.getByText('mlperf-inference-llama2').parentElement!.parentElement!;
     const reclaimBtn = within(runningRow).getByTitle(/Reclaim space/);
     expect(reclaimBtn).toBeInTheDocument();
@@ -67,6 +67,27 @@ describe('App integration', () => {
     expect(within(stoppedRow).queryByTitle(/Reclaim space/)).not.toBeInTheDocument();
 
     await user.click(reclaimBtn);
-    expect(spy).toHaveBeenCalledWith(['a3f8e2c1']);
+    expect(spy).toHaveBeenCalledWith(['a3f8e2c1-5d0b-4e7a-9c3f-1b2d4e6f8a90']);
+  });
+
+  it('shows the short id but sends the FULL id for row actions on long-id containers', async () => {
+    const user = userEvent.setup();
+    const stop = vi.spyOn(api, 'stopContainer').mockResolvedValue(undefined);
+    render(<App />);
+    await screen.findByText('mlperf-inference-llama2');
+
+    // UUID-id container: UI shows the 8-char short id only.
+    expect(screen.getByText('a3f8e2c1')).toBeInTheDocument();
+    expect(screen.queryByText('a3f8e2c1-5d0b-4e7a-9c3f-1b2d4e6f8a90')).not.toBeInTheDocument();
+    // Stack-style `{stack}_{service}` id: short form is its first 8 chars.
+    expect(screen.getByText('mlperf-i')).toBeInTheDocument();
+
+    const row = screen.getByText('mlperf-inference-llama2').parentElement!.parentElement!;
+    await user.click(within(row).getByTitle('Stop'));
+    expect(stop).toHaveBeenCalledWith('a3f8e2c1-5d0b-4e7a-9c3f-1b2d4e6f8a90');
+
+    const stackRow = screen.getByText('pgvector-embeddings').parentElement!.parentElement!;
+    await user.click(within(stackRow).getByTitle('Stop'));
+    expect(stop).toHaveBeenCalledWith('mlperf-inference_pgvector');
   });
 });

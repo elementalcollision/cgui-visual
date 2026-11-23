@@ -244,10 +244,16 @@ pub async fn stats_snapshot() -> Result<Vec<StatRow>> {
         .collect())
 }
 
-pub fn match_stat<'a>(stats: &'a [StatRow], short_id: &str) -> Option<&'a StatRow> {
-    stats
-        .iter()
-        .find(|s| s.id.starts_with(short_id) || short_id.starts_with(&s.id))
+/// Match a stats row to a container by exact id. `Container.id` is the full
+/// CLI id and `container stats` reports the same id; prefix matching would
+/// conflate containers that share a prefix (e.g. `stack_web` / `stack_worker`).
+pub fn match_stat<'a>(stats: &'a [StatRow], id: &str) -> Option<&'a StatRow> {
+    stats.iter().find(|s| s.id == id)
+}
+
+/// Display-only abbreviation of a container id (first 8 chars).
+pub fn short_container_id(id: &str) -> String {
+    id.chars().take(8).collect()
 }
 
 fn parse_container(v: Value) -> Container {
@@ -295,8 +301,8 @@ fn parse_container(v: Value) -> Container {
     let mem_limit_gib = bytes_to_gib(memory_bytes);
     let stack = compose_project(&cfg);
 
-    // Short-id (first 8 chars) for parity with the prototype's display.
-    let short_id = id.chars().take(8).collect::<String>();
+    // Display-only short id; `Container.id` stays the full CLI id.
+    let short_id = short_container_id(&id);
 
     // 0.x reported `startedDate` (or `createdDate`) as a top-level float
     // in NSDate reference epoch (seconds since 2001-01-01 UTC). 1.0 moved
@@ -369,7 +375,8 @@ fn parse_container(v: Value) -> Container {
         .unwrap_or_default();
 
     Container {
-        id: short_id,
+        id,
+        short_id,
         name,
         image,
         status: normalized,
@@ -1894,7 +1901,8 @@ mod tests {
             }
         });
         let c = parse_container(v);
-        assert_eq!(c.id, "abcdef12");
+        assert_eq!(c.id, "abcdef1234567890");
+        assert_eq!(c.short_id, "abcdef12");
         assert_eq!(c.name, "myapp");
         assert_eq!(c.image, "docker.io/library/alpine:latest");
         assert_eq!(c.status, "running");
@@ -1947,5 +1955,48 @@ mod tests {
             anyhow!("`container clean` exited exit status: 64: Error: Missing expected argument");
         let msg = usage.to_string();
         assert_eq!(map_clean_unsupported(usage).to_string(), msg);
+    }
+    fn container_json(id: &str) -> Value {
+        json!({
+            "status": { "state": "running" },
+            "configuration": {
+                "id": id,
+                "image": { "reference": "docker.io/library/alpine:latest" }
+            }
+        })
+    }
+
+    #[test]
+    fn parse_container_keeps_full_id_for_uuid_and_stack_names() {
+        for id in [
+            "d5d88c0b-3037-4d11-bac4-4ed8d55c4461",
+            "mystack_web",
+            "cgui-live-ids-12345",
+        ] {
+            let c = parse_container(container_json(id));
+            // The CLI matches ids exactly: id must be passed through intact.
+            assert_eq!(c.id, id);
+            assert_eq!(c.short_id, id.chars().take(8).collect::<String>());
+            assert_eq!(c.short_id.len(), 8);
+        }
+        // Ids of 8 chars or fewer are unchanged in both fields.
+        let c = parse_container(container_json("web"));
+        assert_eq!((c.id.as_str(), c.short_id.as_str()), ("web", "web"));
+    }
+
+    #[test]
+    fn match_stat_is_exact_not_prefix() {
+        let stat = |id: &str| StatRow {
+            id: id.into(),
+            ..Default::default()
+        };
+        let stats = vec![stat("stack_web"), stat("stack_worker")];
+        assert_eq!(
+            match_stat(&stats, "stack_worker").unwrap().id,
+            "stack_worker"
+        );
+        assert_eq!(match_stat(&stats, "stack_web").unwrap().id, "stack_web");
+        assert!(match_stat(&stats, "stack_").is_none());
+        assert!(match_stat(&stats, "stack_web_extra").is_none());
     }
 }
