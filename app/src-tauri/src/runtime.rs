@@ -1418,7 +1418,7 @@ pub async fn system_running() -> Result<bool> {
 // is cached for the process lifetime; start/stop/restart of the services
 // clears it so an upgrade followed by a services restart is picked up.
 
-static CLI_VERSION: RwLock<Option<String>> = RwLock::new(None);
+static CLI_VERSION: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 
 fn clear_cli_version_cache() {
     *CLI_VERSION.write().unwrap() = None;
