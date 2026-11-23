@@ -55,15 +55,7 @@ pub(super) fn parse_container(v: Value) -> Container {
     let ports = cfg
         .get("publishedPorts")
         .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .map(|p| {
-                    let host = p.get("hostPort").and_then(Value::as_u64).unwrap_or(0);
-                    let cont = p.get("containerPort").and_then(Value::as_u64).unwrap_or(0);
-                    format!("{host}:{cont}")
-                })
-                .collect()
-        })
+        .map(|arr| arr.iter().map(format_published_port).collect())
         .unwrap_or_default();
 
     let mem_limit_gib = bytes_to_gib(memory_bytes);
@@ -157,6 +149,25 @@ pub(super) fn parse_container(v: Value) -> Container {
         net_io_bps: 0.0,
         disk_io_bps: 0.0,
         started_unix,
+    }
+}
+
+/// One `configuration.publishedPorts[]` entry as `host:container`, the
+/// `-p` order. `count` > 1 publishes consecutive ports, shown as a range:
+/// `{hostPort: 9000, containerPort: 7000, count: 3}` → `9000-9002:7000-7002`.
+fn format_published_port(p: &Value) -> String {
+    let host = p.get("hostPort").and_then(Value::as_u64).unwrap_or(0);
+    let cont = p.get("containerPort").and_then(Value::as_u64).unwrap_or(0);
+    let count = p.get("count").and_then(Value::as_u64).unwrap_or(1);
+    if count > 1 {
+        let last = count - 1;
+        format!(
+            "{host}-{}:{cont}-{}",
+            host.saturating_add(last),
+            cont.saturating_add(last)
+        )
+    } else {
+        format!("{host}:{cont}")
     }
 }
 
@@ -503,6 +514,32 @@ mod tests {
         // RFC3339 startedDate must produce a real uptime, not "—".
         assert_ne!(c.uptime, "—");
         assert_eq!(c.cmd, vec!["sleep", "120"]);
+    }
+
+    #[test]
+    fn published_port_ranges_show_in_full() {
+        // `container create -p 127.0.0.1:9000-9002:7000-7002/udp -p 8082:81`
+        // on 1.7.1 (configuration.publishedPorts, verbatim).
+        let v = json!({
+            "id": "ranges",
+            "status": { "state": "stopped" },
+            "configuration": {
+                "id": "ranges",
+                "publishedPorts": [
+                    { "containerPort": 7000, "count": 3, "hostAddress": "127.0.0.1", "hostPort": 9000, "proto": "udp" },
+                    { "containerPort": 81, "count": 1, "hostAddress": "0.0.0.0", "hostPort": 8082, "proto": "tcp" }
+                ]
+            }
+        });
+        assert_eq!(
+            parse_container(v).ports,
+            vec!["9000-9002:7000-7002", "8082:81"]
+        );
+        // Payloads without `count` keep the single-port form.
+        assert_eq!(
+            format_published_port(&json!({ "hostPort": 8080, "containerPort": 80 })),
+            "8080:80"
+        );
     }
 
     #[test]

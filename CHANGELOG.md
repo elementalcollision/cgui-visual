@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   volumes and tmpfs mounts (read-only ones are marked `ro`), and its published
   ports written like the list view, e.g. `8080:80/tcp`, or
   `9000-9002:7000-7002/udp` for a range.
+- **The container list shows published port ranges in full.** A range such as
+  `-p 9000-9002:7000-7002` showed only its first pair, `9000:7000`; it now
+  shows `9000-9002:7000-7002`.
 - **Doctor no longer warns "runtime API socket not found".** That check was
   left over from Docker; Apple's `container` never creates the socket, so the
   warning always showed. The `container system status` check already covers
