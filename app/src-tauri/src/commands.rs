@@ -817,7 +817,9 @@ pub fn load_prefs() -> Prefs {
 }
 
 #[tauri::command]
-pub fn save_prefs(app: tauri::AppHandle, prefs: Prefs) -> Result<(), String> {
+pub fn save_prefs(app: tauri::AppHandle, mut prefs: Prefs) -> Result<(), String> {
+    // Backend-owned flag the frontend doesn't round-trip: keep the stored one.
+    prefs.menubar_hint_shown = prefs.menubar_hint_shown || Prefs::load().menubar_hint_shown;
     runtime::set_bin(&prefs.runtime);
     prefs.save().map_err(err_str)?;
     // Apply menubar mode live (close behaviour + Dock icon), no restart.

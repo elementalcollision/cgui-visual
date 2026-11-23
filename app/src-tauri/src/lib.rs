@@ -3,6 +3,7 @@ pub mod compose;
 mod doctor;
 mod fixtures;
 pub mod history;
+mod menubar_hint;
 pub mod model;
 mod prefs;
 pub mod pty;
@@ -238,6 +239,7 @@ pub fn run() {
                 {
                     api.prevent_close();
                     hide_main_window(window.app_handle());
+                    menubar_hint::on_hidden_by_close(window.app_handle());
                 }
             }
         })
