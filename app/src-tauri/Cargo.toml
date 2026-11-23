@@ -39,5 +39,5 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "ti
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 toml = { version = "1", default-features = false, features = ["parse", "display"] }
-serde_yaml = "0.9"
+serde-saphyr = { version = "2.2", default-features = false, features = ["serialize", "deserialize"] }
 
