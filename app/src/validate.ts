@@ -39,9 +39,9 @@ export function validateAlias(alias: string): string | null {
   return null;
 }
 
-/** Split a comma/space/newline separated alias list, dropping blanks. */
+/** Split a comma/newline separated alias list, dropping blanks. */
 export function splitList(text: string): string[] {
-  return text.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+  return text.split(/[,\n]+/).map(s => s.trim()).filter(Boolean);
 }
 
 /** Volume name (same rule as containers: 2-63 chars, alphanumeric start). */

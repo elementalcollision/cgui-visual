@@ -10,6 +10,7 @@ import { askConfirm, askText } from './dialogs';
 import { errMessage, looksLikeServicesDown } from './loadState';
 import { useCliAtLeast } from './cliVersion';
 import { commitContainerFlow } from './containerActions';
+import { splitList, validateAlias } from './validate';
 
 function Backdrop({ onClose, children }: { onClose: () => void; children: ReactNode }) {
   return (
@@ -27,7 +28,7 @@ type InspectTab = 'trends' | 'env' | 'mounts' | 'network' | 'ports' | 'health' |
 interface ParsedInspect {
   env: { key: string; value: string }[];
   mounts: { source: string; destination: string; type: string; readOnly?: boolean }[];
-  network: { name: string; ip: string; mac?: string }[];
+  network: { name: string; ip: string; mac?: string; aliases?: string[] }[];
   ports: { container: string; host: string }[];
   health?: { status: string; failingStreak?: number; log: { exitCode: number; output: string }[] };
 }
@@ -73,14 +74,37 @@ export function parseInspect(text: string): ParsedInspect | null {
 
   // ── Network: docker NetworkSettings.Networks is { netName: { IPAddress } };
   //         older payloads have just IPAddress at top level.
-  const networks: { name: string; ip: string; mac?: string }[] = [];
+  const networks: { name: string; ip: string; mac?: string; aliases?: string[] }[] = [];
   const dockerNets = ns.Networks ?? ns.networks;
+  // Apple `container inspect`: `configuration.networks[]` holds the per-network
+  // options (DNS `aliases`, hostname, mtu; aliases need container 1.6+) and
+  // `status.networks[]` the live address once running.
+  const appleCfgNets: any[] = Array.isArray(root.configuration?.networks) ? root.configuration.networks : [];
+  const appleStatusNets: any[] = Array.isArray(root.status?.networks) ? root.status.networks : [];
+  const cleanAliases = (a: unknown): string[] | undefined =>
+    Array.isArray(a) && a.length ? a.filter((x): x is string => typeof x === 'string') : undefined;
   if (dockerNets && typeof dockerNets === 'object') {
     for (const [name, info] of Object.entries(dockerNets as Record<string, any>)) {
       networks.push({
         name,
         ip: info?.IPAddress ?? info?.ipAddress ?? '',
         mac: info?.MacAddress ?? info?.macAddress,
+        aliases: cleanAliases(info?.Aliases ?? info?.aliases),
+      });
+    }
+  } else if (appleCfgNets.length || appleStatusNets.length) {
+    const names = [...new Set([
+      ...appleCfgNets.map(n => n?.network),
+      ...appleStatusNets.map(n => n?.network),
+    ].filter((n): n is string => typeof n === 'string'))];
+    for (const name of names) {
+      const cfg = appleCfgNets.find(n => n?.network === name);
+      const live = appleStatusNets.find(n => n?.network === name);
+      networks.push({
+        name,
+        ip: live?.ipv4Address ?? '',
+        mac: live?.macAddress,
+        aliases: cleanAliases(cfg?.options?.aliases),
       });
     }
   } else if (ns.IPAddress || ns.ipAddress) {
@@ -226,6 +250,7 @@ function InspectPanel({ t, tab, parsed, json, container }: {
         rows={parsed.network.flatMap(n => {
           const out: { k: string; v: string }[] = [{ k: n.name, v: n.ip || '—' }];
           if (n.mac) out.push({ k: `${n.name} (mac)`, v: n.mac });
+          if (n.aliases?.length) out.push({ k: `${n.name} (aliases)`, v: n.aliases.join(', ') });
           return out;
         })}
       />
@@ -1533,6 +1558,11 @@ export function RunImageModal({ t, image, onLaunched, onClose }: {
   const [volumes, setVolumes] = useState('');
   const [labels, setLabels] = useState('');
   const [network, setNetwork] = useState('');
+  // DNS aliases (container 1.6+): `--network <net>,alias=NAME,...`.
+  const aliasGate = useCliAtLeast('1.6.0');
+  const [aliases, setAliases] = useState('');
+  const aliasList = splitList(aliases);
+  const aliasError = aliasList.map(validateAlias).find(Boolean) ?? null;
   const [workdir, setWorkdir] = useState('');
   const [user, setUser] = useState('');
   const [platform, setPlatform] = useState('');
@@ -1540,6 +1570,7 @@ export function RunImageModal({ t, image, onLaunched, onClose }: {
   const [rosetta, setRosetta] = useState(false);
 
   const submit = () => {
+    if (aliasError) return;
     setBusy(true);
     // `withToast` surfaces backend errors (image-pull failure, port
     // already in use, container_system not running, etc.) — previously
@@ -1558,6 +1589,7 @@ export function RunImageModal({ t, image, onLaunched, onClose }: {
         volumes: volumes.split('\n').map(l => l.trim()).filter(Boolean),
         labels: labels.split('\n').map(l => l.trim()).filter(Boolean),
         network: network.trim() || undefined,
+        aliases: aliasList.length ? aliasList : undefined,
         workdir: workdir.trim() || undefined,
         user: user.trim() || undefined,
         platform: platform.trim() || undefined,
@@ -1635,6 +1667,17 @@ export function RunImageModal({ t, image, onLaunched, onClose }: {
                   <input style={inputStyle} value={network} onChange={e => setNetwork(e.target.value)} placeholder="default" />
                 </div>
                 <div>
+                  <label style={labelStyle} htmlFor="run-aliases">DNS aliases</label>
+                  <input id="run-aliases" style={{ ...inputStyle, opacity: aliasGate.ok ? 1 : 0.5, borderColor: aliasError ? t.danger : t.border }}
+                         value={aliases} onChange={e => setAliases(e.target.value)}
+                         disabled={!aliasGate.ok} title={aliasGate.title}
+                         aria-invalid={aliasError ? true : undefined}
+                         placeholder="api.example.test, db.example.test" spellCheck={false} />
+                  <div style={{ fontSize: 10, color: aliasError ? t.danger : t.fg3, marginTop: 4, lineHeight: 1.4 }}>
+                    {aliasError ?? 'Extra names for this container on the network (comma separated). Use fully qualified names unless a default DNS domain is set; uses the default network when none is chosen.'}
+                  </div>
+                </div>
+                <div>
                   <label style={labelStyle}>Platform</label>
                   <input style={inputStyle} value={platform} onChange={e => setPlatform(e.target.value)} placeholder="linux/arm64" />
                 </div>
@@ -1671,7 +1714,7 @@ export function RunImageModal({ t, image, onLaunched, onClose }: {
         <div style={{ padding: '12px 22px', borderTop: `1px solid ${t.border}`, display: 'flex', gap: 8, justifyContent: 'flex-end', background: t.surfaceAlt }}>
           <button style={pillBtn(t)} onClick={onClose} disabled={busy}>Cancel</button>
           <button style={{ padding: '6px 14px', background: t.fg1, color: t.bg, border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: busy ? 'wait' : 'pointer', opacity: busy ? 0.6 : 1 }}
-                  onClick={submit} disabled={busy}>{busy ? 'Starting…' : 'Run'}</button>
+                  onClick={submit} disabled={busy || !!aliasError}>{busy ? 'Starting…' : 'Run'}</button>
         </div>
       </div>
     </Backdrop>

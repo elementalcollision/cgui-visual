@@ -4,12 +4,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { DetailModal } from './modals';
+import { DetailModal, RunImageModal, parseInspect } from './modals';
 import { getTheme } from './theme';
 import { containers } from './fixtures';
 import { api } from './api';
 import { resetCliVersion } from './cliVersion';
-import { validateImageRef } from './validate';
+import { splitList, validateAlias, validateImageRef } from './validate';
 import { defaultCommitRef } from './containerActions';
 
 const t = getTheme(true);
@@ -84,5 +84,111 @@ describe('validateImageRef / defaultCommitRef', () => {
       expect(validateImageRef(defaultCommitRef(n))).toBeNull();
     }
     expect(defaultCommitRef('Web')).toBe('web:latest');
+  });
+});
+
+describe('DNS aliases', () => {
+  const openAdvanced = async (user: ReturnType<typeof userEvent.setup>) => {
+    await user.click(screen.getByRole('button', { name: /Advanced options/ }));
+  };
+
+  it('sends the alias list (and network) to runImage', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'cliVersion').mockResolvedValue('1.7.1');
+    const run = vi.spyOn(api, 'runImage').mockResolvedValue('id1');
+    const onLaunched = vi.fn();
+    render(<RunImageModal t={t} image="alpine" onLaunched={onLaunched} onClose={() => {}} />);
+    await openAdvanced(user);
+    await user.type(screen.getByPlaceholderText('default'), 'backend');
+    await user.type(screen.getByLabelText('DNS aliases'), 'db.example.test, pg.example.test');
+    await user.click(screen.getByRole('button', { name: 'Run' }));
+    await waitFor(() => expect(run).toHaveBeenCalled());
+    const args = run.mock.calls[0][0];
+    expect(args.network).toBe('backend');
+    expect(args.aliases).toEqual(['db.example.test', 'pg.example.test']);
+  });
+
+  it('omits aliases when the field is empty', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'cliVersion').mockResolvedValue('1.7.1');
+    const run = vi.spyOn(api, 'runImage').mockResolvedValue('id1');
+    render(<RunImageModal t={t} image="alpine" onLaunched={() => {}} onClose={() => {}} />);
+    await user.click(screen.getByRole('button', { name: 'Run' }));
+    await waitFor(() => expect(run).toHaveBeenCalled());
+    expect(run.mock.calls[0][0].aliases).toBeUndefined();
+  });
+
+  it('flags an invalid alias inline and blocks Run', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'cliVersion').mockResolvedValue('1.7.1');
+    const run = vi.spyOn(api, 'runImage').mockResolvedValue('id1');
+    render(<RunImageModal t={t} image="alpine" onLaunched={() => {}} onClose={() => {}} />);
+    await openAdvanced(user);
+    await user.type(screen.getByLabelText('DNS aliases'), 'bad name.test');
+    expect(screen.getByLabelText('DNS aliases')).toBeInvalid();
+    expect(screen.getByText(/not a valid DNS name/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Run' })).toBeDisabled();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('disables the field with a tooltip on a CLI older than 1.6', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'cliVersion').mockResolvedValue('1.4.1');
+    render(<RunImageModal t={t} image="alpine" onLaunched={() => {}} onClose={() => {}} />);
+    await openAdvanced(user);
+    const input = screen.getByLabelText('DNS aliases');
+    await waitFor(() => expect(input).toBeDisabled());
+    expect(input).toHaveAttribute('title', 'Needs Apple container 1.6 or later');
+  });
+
+  it('validateAlias / splitList', () => {
+    expect(validateAlias('api.example.test')).toBeNull();
+    expect(validateAlias('db')).toBeNull();
+    expect(validateAlias('a,alias=b')).not.toBeNull();
+    expect(validateAlias('-x.test')).not.toBeNull();
+    expect(validateAlias('under_score.test')).not.toBeNull();
+    expect(validateAlias('')).not.toBeNull();
+    expect(splitList(' a.test,b.test\nc.test ,, ')).toEqual(['a.test', 'b.test', 'c.test']);
+  });
+
+  it('parseInspect reads aliases from Apple inspect output', () => {
+    const payload = JSON.stringify([{
+      configuration: {
+        id: 'web',
+        networks: [{ network: 'backend', options: { aliases: ['db.example.test', 'pg.example.test'], hostname: 'web', mtu: 1280 } }],
+      },
+      status: {
+        state: 'running',
+        networks: [{ network: 'backend', ipv4Address: '192.168.65.2/24', macAddress: 'f6:1c:44:d4:e9:27' }],
+      },
+    }]);
+    const p = parseInspect(payload)!;
+    expect(p.network).toEqual([{
+      name: 'backend', ip: '192.168.65.2/24', mac: 'f6:1c:44:d4:e9:27',
+      aliases: ['db.example.test', 'pg.example.test'],
+    }]);
+  });
+
+  it('parseInspect shows a stopped container’s configured aliases without an address', () => {
+    const payload = JSON.stringify([{
+      configuration: { id: 'web', networks: [{ network: 'backend', options: { aliases: ['a.test'] } }] },
+      status: { state: 'stopped', networks: [] },
+    }]);
+    const p = parseInspect(payload)!;
+    expect(p.network[0]).toMatchObject({ name: 'backend', ip: '', aliases: ['a.test'] });
+  });
+
+  it('shows aliases in the detail modal Network tab', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'cliVersion').mockResolvedValue('1.7.1');
+    vi.spyOn(api, 'inspectContainer').mockResolvedValue(JSON.stringify([{
+      configuration: { id: 'web', networks: [{ network: 'backend', options: { aliases: ['db.example.test'] } }] },
+      status: { state: 'running', networks: [{ network: 'backend', ipv4Address: '192.168.65.2/24' }] },
+    }]));
+    render(<DetailModal item={containers.find(c => c.status === 'running')!} t={t} onClose={() => {}} onExec={() => {}} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /^network/i })).toBeEnabled());
+    await user.click(screen.getByRole('button', { name: /^network/i }));
+    expect(await screen.findByText('db.example.test')).toBeInTheDocument();
+    expect(screen.getByText('backend (aliases)')).toBeInTheDocument();
   });
 });

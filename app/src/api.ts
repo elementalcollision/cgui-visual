@@ -105,7 +105,7 @@ export const api = {
   runImage: (args: {
     image: string; name?: string; ports?: string[]; env?: string[]; command?: string;
     cpus?: number; memory?: string; volumes?: string[]; labels?: string[];
-    network?: string; workdir?: string; user?: string; platform?: string;
+    network?: string; aliases?: string[]; workdir?: string; user?: string; platform?: string;
     rm?: boolean; rosetta?: boolean;
   }) =>
     inTauri ? invokeStrict<string>('run_image', { args }) : Promise.resolve('dev-mode-no-op'),

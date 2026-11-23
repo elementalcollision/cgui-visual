@@ -1027,6 +1027,10 @@ pub struct RunArgs {
     pub labels: Vec<String>, // "key=value" each
     #[serde(default)]
     pub network: Option<String>,
+    /// DNS aliases for the container on `network` (container 1.6+):
+    /// emitted as `--network <net>,alias=A,alias=B`. See `network_spec`.
+    #[serde(default)]
+    pub aliases: Vec<String>,
     #[serde(default)]
     pub workdir: Option<String>,
     #[serde(default)]
@@ -1120,7 +1124,61 @@ pub fn split_command(input: &str) -> Result<Vec<String>> {
     Ok(words)
 }
 
+/// Validate a network DNS alias (container 1.6+, `--network net,alias=NAME`):
+/// a hostname of 1-63 character DNS labels (letters, digits, inner `-`),
+/// at most 253 characters in all. The CLI additionally wants a fully
+/// qualified name (two or more labels, e.g. `api.example.test`) unless a
+/// default DNS domain is configured, and says so itself; we don't duplicate
+/// that rule because the configured domain isn't known here.
+///
+/// This also guarantees an alias can't smuggle `,` / `=` into the
+/// `--network` option list.
+pub fn validate_alias(alias: &str) -> Result<()> {
+    if alias.is_empty() {
+        return Err(anyhow!("network alias must not be empty"));
+    }
+    if alias.len() > 253 {
+        return Err(anyhow!(
+            "network alias `{alias}` is longer than 253 characters"
+        ));
+    }
+    let name = alias.strip_suffix('.').unwrap_or(alias);
+    for label in name.split('.') {
+        let ok = (1..=63).contains(&label.len())
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            && !label.starts_with('-')
+            && !label.ends_with('-');
+        if !ok {
+            return Err(anyhow!(
+                "network alias `{alias}` is not a valid DNS name: each part must be 1-63 letters, digits or `-`, not starting or ending with `-`"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The value for `--network`: the network name (or `default` when only
+/// aliases were given) followed by `,alias=NAME` per alias. `None` when
+/// there is neither a network nor an alias, so the CLI default applies.
+/// Aliases must already be validated (`validate_alias`).
+pub fn network_spec(network: Option<&str>, aliases: &[String]) -> Option<String> {
+    let net = network.filter(|s| !s.is_empty());
+    let aliases: Vec<&String> = aliases.iter().filter(|a| !a.is_empty()).collect();
+    if aliases.is_empty() {
+        return net.map(String::from);
+    }
+    let mut spec = net.unwrap_or("default").to_string();
+    for a in aliases {
+        spec.push_str(",alias=");
+        spec.push_str(a);
+    }
+    Some(spec)
+}
+
 pub fn run_image_argv(args: &RunArgs) -> Result<Vec<String>> {
+    for a in args.aliases.iter().filter(|a| !a.is_empty()) {
+        validate_alias(a)?;
+    }
     let mut argv: Vec<String> = vec!["run".into(), "-d".into()];
     let mut opt = |flag: &str, val: Option<&str>| {
         if let Some(v) = val.filter(|s| !s.is_empty()) {
@@ -1131,7 +1189,10 @@ pub fn run_image_argv(args: &RunArgs) -> Result<Vec<String>> {
     opt("--name", args.name.as_deref());
     opt("--cpus", args.cpus.map(|c| c.to_string()).as_deref());
     opt("--memory", args.memory.as_deref());
-    opt("--network", args.network.as_deref());
+    opt(
+        "--network",
+        network_spec(args.network.as_deref(), &args.aliases).as_deref(),
+    );
     opt("--workdir", args.workdir.as_deref());
     opt("--user", args.user.as_deref());
     opt("--platform", args.platform.as_deref());
@@ -2278,6 +2339,7 @@ mod tests {
             volumes: vec!["data:/data".into()],
             labels: vec!["team=infra".into()],
             network: Some("default".into()),
+            aliases: vec![],
             workdir: Some("/srv".into()),
             user: Some("1000:1000".into()),
             platform: Some("linux/arm64".into()),

@@ -147,7 +147,16 @@ pub enum ComposeVolume {
 #[serde(untagged)]
 pub enum ComposeNetworks {
     List(Vec<String>),
-    Map(BTreeMap<String, IgnoredAny>),
+    Map(BTreeMap<String, Option<ComposeNetworkAttach>>),
+}
+
+/// Per-network settings in the map form. Only `aliases` is used (it maps to
+/// `--network <net>,alias=NAME`); other keys (`ipv4_address`, `priority`, ...)
+/// are ignored.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ComposeNetworkAttach {
+    #[serde(default)]
+    pub aliases: Vec<String>,
 }
 
 /// `depends_on:` short form is `[name1, name2]`; long form is
@@ -244,6 +253,7 @@ pub fn convert(compose: ComposeFile, default_name: &str) -> Result<StackToml> {
             env: convert_env(svc.environment),
             ports: convert_ports(svc.ports),
             volumes: convert_volumes(svc.volumes),
+            aliases: pick_aliases(&svc.networks),
             network: pick_network(svc.networks),
             depends_on: pick_depends_on(svc.depends_on),
             args: convert_argv(svc.command.or(svc.entrypoint)),
@@ -346,6 +356,20 @@ fn pick_network(n: Option<ComposeNetworks>) -> Option<String> {
     match n? {
         ComposeNetworks::List(l) => l.into_iter().next(),
         ComposeNetworks::Map(m) => m.into_keys().next(),
+    }
+}
+
+/// Aliases of the network `pick_network` selects (the first one, in
+/// either form); only the map form can carry them.
+fn pick_aliases(n: &Option<ComposeNetworks>) -> Vec<String> {
+    match n {
+        Some(ComposeNetworks::Map(m)) => m
+            .values()
+            .next()
+            .and_then(|v| v.as_ref())
+            .map(|a| a.aliases.clone())
+            .unwrap_or_default(),
+        _ => vec![],
     }
 }
 
@@ -489,7 +513,7 @@ struct ExportService<'a> {
     // Map form so we can support per-service networks if needed later;
     // the parser's pick_network handles list and map.
     #[serde(skip_serializing_if = "Option::is_none")]
-    networks: Option<BTreeMap<&'a str, ()>>,
+    networks: Option<BTreeMap<&'a str, Option<ExportNetworkAttach<'a>>>>,
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     depends_on: &'a [String],
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -505,6 +529,12 @@ struct ExportService<'a> {
     command: &'a [String],
     #[serde(skip_serializing_if = "Option::is_none")]
     healthcheck: Option<ExportHealthcheck>,
+}
+
+/// `networks: { net: { aliases: [...] } }`; absent (null) without aliases.
+#[derive(Serialize)]
+struct ExportNetworkAttach<'a> {
+    aliases: &'a [String],
 }
 
 #[derive(Serialize)]
@@ -530,7 +560,12 @@ pub fn export(stack: &StackToml) -> Result<String> {
                     .collect(),
                 ports: &svc.ports,
                 volumes: &svc.volumes,
-                networks: svc.network.as_deref().map(|n| BTreeMap::from([(n, ())])),
+                networks: svc.network.as_deref().map(|n| {
+                    let attach = (!svc.aliases.is_empty()).then_some(ExportNetworkAttach {
+                        aliases: &svc.aliases,
+                    });
+                    BTreeMap::from([(n, attach)])
+                }),
                 depends_on: &svc.depends_on,
                 restart: svc.restart.as_deref(),
                 cap_add: &svc.cap_add,
@@ -620,7 +655,40 @@ mod export_tests {
             assert_eq!(a.restart, b.restart, "restart preserved for {}", a.name);
             assert_eq!(a.args, b.args, "args preserved for {}", a.name);
             assert_eq!(a.network, b.network, "network preserved for {}", a.name);
+            assert_eq!(a.aliases, b.aliases, "aliases preserved for {}", a.name);
         }
+    }
+
+    #[test]
+    fn network_aliases_import_and_round_trip() {
+        let yaml = r#"
+name: web
+services:
+  db:
+    image: postgres:16
+    networks:
+      backend:
+        aliases:
+          - db.example.test
+          - pg.example.test
+        ipv4_address: 172.20.0.5
+  cache:
+    image: redis:7
+    networks:
+      backend:
+  plain:
+    image: nginx
+    networks: [backend]
+"#;
+        let s = convert(parse_compose(yaml).unwrap(), "fallback").unwrap();
+        let by = |n: &str| s.services.iter().find(|x| x.name == n).unwrap();
+        assert_eq!(by("db").network.as_deref(), Some("backend"));
+        assert_eq!(by("db").aliases, vec!["db.example.test", "pg.example.test"]);
+        assert!(by("cache").aliases.is_empty());
+        assert!(by("plain").aliases.is_empty());
+        round_trip(yaml);
+        let exported = export(&s).unwrap();
+        assert!(exported.contains("db.example.test"), "{exported}");
     }
 
     #[test]

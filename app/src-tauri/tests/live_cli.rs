@@ -485,6 +485,62 @@ async fn commit_running_and_stopped_container() {
     assert!(runtime::commit_container(&cname, "-x").await.is_err());
 }
 
+/// DNS aliases (1.6+): run with `--network net,alias=...` and read them back
+/// from `ls` (`configuration.networks[].options.aliases`) and `inspect`.
+#[tokio::test]
+#[ignore]
+async fn run_with_dns_aliases_reads_back() {
+    live_only!();
+    let mut g = Guard::default();
+    let net = g.network(&name("al-net"));
+    let cname = g.container(&name("alias"));
+    let args = RunArgs {
+        network: Some(net.clone()),
+        aliases: vec!["web.example.test".into(), "www.example.test".into()],
+        ..run_args(&cname)
+    };
+    runtime::run_image(args).await.expect("run with aliases");
+
+    let ls: serde_json::Value =
+        serde_json::from_str(&cli_ok(&["ls", "--all", "--format", "json"])).unwrap();
+    let mine = ls
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["configuration"]["id"] == cname.as_str())
+        .expect("container in ls");
+    let nets = mine["configuration"]["networks"].as_array().unwrap();
+    assert_eq!(nets[0]["network"], net.as_str());
+    let aliases: Vec<&str> = nets[0]["options"]["aliases"]
+        .as_array()
+        .expect("aliases in ls json")
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect();
+    assert_eq!(aliases, ["web.example.test", "www.example.test"]);
+
+    // The same data is in `inspect` (what the detail modal shows).
+    let inspected = runtime::inspect(&cname).await.expect("inspect");
+    assert!(inspected.contains("web.example.test"), "{inspected}");
+
+    // An alias without a dot needs a default DNS domain; the CLI says so
+    // and we surface its message rather than hiding it.
+    let single = RunArgs {
+        network: Some(net.clone()),
+        aliases: vec!["justone".into()],
+        ..run_args(&g.container(&name("alias-bad")))
+    };
+    if let Err(e) = runtime::run_image(single).await {
+        assert!(format!("{e:#}").contains("fully qualified"), "{e:#}");
+    }
+    // Invalid names never reach the CLI.
+    let bad = RunArgs {
+        aliases: vec!["a,alias=b".into()],
+        ..run_args(&name("alias-inj"))
+    };
+    assert!(runtime::run_image(bad).await.is_err());
+}
+
 /// Stats (1.7.1+): `cpuUtilization` is a fraction of ONE core, and the
 /// first poll already reports it (no baseline poll needed).
 #[tokio::test]
