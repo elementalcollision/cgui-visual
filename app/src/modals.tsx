@@ -472,7 +472,7 @@ export function DetailModal({ item, t, onClose, onExec, onImagesChanged }: {
         <div style={{ flex: 1, overflow: 'auto', padding: '14px 22px', minHeight: 200 }}>
           <InspectPanel t={t} tab={tab} parsed={parsed} json={json} container={c} />
         </div>
-        <div style={{ padding: '12px 22px', borderTop: `1px solid ${t.border}`, display: 'flex', gap: 8, justifyContent: 'flex-end', background: t.surfaceAlt }}>
+        <div style={{ padding: '12px 22px', borderTop: `1px solid ${t.border}`, display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'flex-end', background: t.surfaceAlt }}>
           {/* File operations (phase 2): copy in/out + filesystem export. */}
           <button style={pillBtn(t)} title="Copy a file from this container to a local folder"
                   onClick={async () => {

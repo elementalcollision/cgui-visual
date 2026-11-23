@@ -108,7 +108,7 @@ export function iconBtn(): CSSProperties {
 }
 
 export function pillBtn(t: ThemeTokens, accent?: string): CSSProperties {
-  return { display: 'inline-flex', alignItems: 'center', gap: 4, padding: '4px 10px', background: t.surfaceAlt, border: `1px solid ${t.border}`, borderRadius: 999, color: accent || t.fg2, fontSize: 11, fontFamily: 'inherit', cursor: 'pointer' };
+  return { display: 'inline-flex', alignItems: 'center', gap: 4, padding: '4px 10px', background: t.surfaceAlt, border: `1px solid ${t.border}`, borderRadius: 999, color: accent || t.fg2, fontSize: 11, fontFamily: 'inherit', cursor: 'pointer', whiteSpace: 'nowrap' };
 }
 
 export function tableHeader(t: ThemeTokens, cols: string): CSSProperties {
@@ -259,10 +259,6 @@ export function TopBar({ tab, t, search, setSearch, onPull, onPrune, onImport, o
         <input value={search} onChange={e => setSearch(e.target.value)} placeholder={`Filter ${tab}…`} aria-label={`Filter ${tab}`} style={{ background: 'transparent', border: 'none', outline: 'none', color: t.fg1, fontSize: 13, fontFamily: 'inherit', flex: 1, minWidth: 0 }} />
         <kbd style={{ fontSize: 10, color: t.fg3, fontFamily: t.mono, padding: '2px 5px', background: t.surface, border: `1px solid ${t.border}`, borderRadius: 3 }}>/</kbd>
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 10px', height: 32, background: t.accentSoft, color: t.accent, border: `1px solid ${t.border}`, borderRadius: 999, fontSize: 11, fontFamily: t.mono }}>
-        <span style={{ width: 6, height: 6, borderRadius: '50%', background: t.success }} />
-        runtime: container
-      </div>
       {onUpdate && updateCount > 0 && (
         // Two visual states: unseen (warning-orange, demands attention)
         // and seen (muted frame, stays clickable so the user can re-open
@@ -288,30 +284,30 @@ export function TopBar({ tab, t, search, setSearch, onPull, onPrune, onImport, o
         <Icon name={dark ? 'sun' : 'moon'} size={14} />
       </button>
       {onBuild && (
-        <button onClick={onBuild} title="Build an image from a Dockerfile" style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 12px', height: 32, background: 'transparent', color: t.fg2, border: `1px solid ${t.border}`, borderRadius: 6, fontSize: 13, fontFamily: 'inherit', cursor: 'pointer' }}>
+        <button onClick={onBuild} title="Build an image from a Dockerfile" style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 12px', height: 32, background: 'transparent', color: t.fg2, border: `1px solid ${t.border}`, borderRadius: 6, fontSize: 13, fontFamily: 'inherit', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0 }}>
           <Icon name="layers" size={13} color={t.fg2} />
           Build
         </button>
       )}
       {onNew && (
-        <button onClick={onNew} title={`Create a new ${tab === 'volumes' ? 'volume' : 'network'}`} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 12px', height: 32, background: 'transparent', color: t.fg2, border: `1px solid ${t.border}`, borderRadius: 6, fontSize: 13, fontFamily: 'inherit', cursor: 'pointer' }}>
+        <button onClick={onNew} title={`Create a new ${tab === 'volumes' ? 'volume' : 'network'}`} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 12px', height: 32, background: 'transparent', color: t.fg2, border: `1px solid ${t.border}`, borderRadius: 6, fontSize: 13, fontFamily: 'inherit', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0 }}>
           <Icon name="plus" size={13} color={t.fg2} />
           {tab === 'volumes' ? 'New volume…' : 'New network…'}
         </button>
       )}
       {onImport && (
-        <button onClick={onImport} title="Load images from an OCI tar archive" style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 12px', height: 32, background: 'transparent', color: t.fg2, border: `1px solid ${t.border}`, borderRadius: 6, fontSize: 13, fontFamily: 'inherit', cursor: 'pointer' }}>
+        <button onClick={onImport} title="Load images from an OCI tar archive" style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 12px', height: 32, background: 'transparent', color: t.fg2, border: `1px solid ${t.border}`, borderRadius: 6, fontSize: 13, fontFamily: 'inherit', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0 }}>
           <Icon name="download" size={13} color={t.fg2} />
           Import
         </button>
       )}
       {onPrune && (
-        <button onClick={onPrune} title={`Prune ${tab}`} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 12px', height: 32, background: 'transparent', color: t.fg2, border: `1px solid ${t.border}`, borderRadius: 6, fontSize: 13, fontFamily: 'inherit', cursor: 'pointer' }}>
+        <button onClick={onPrune} title={`Prune ${tab}`} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 12px', height: 32, background: 'transparent', color: t.fg2, border: `1px solid ${t.border}`, borderRadius: 6, fontSize: 13, fontFamily: 'inherit', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0 }}>
           <Icon name="trash" size={13} color={t.fg2} />
           Prune
         </button>
       )}
-      <button onClick={onPull} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 14px', height: 32, background: t.fg1, color: t.bg, border: 'none', borderRadius: 6, fontSize: 13, fontFamily: 'inherit', fontWeight: 500, cursor: 'pointer' }}>
+      <button onClick={onPull} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 14px', height: 32, background: t.fg1, color: t.bg, border: 'none', borderRadius: 6, fontSize: 13, fontFamily: 'inherit', fontWeight: 500, cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0 }}>
         <Icon name="plus" size={14} color={t.bg} />
         Pull image
       </button>
