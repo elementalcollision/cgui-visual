@@ -267,6 +267,17 @@ export function ContainersView({ t, search, selected, setSelected, onInspect, on
 }
 
 // ─── Images ───────────────────────────────────────────────────────────
+// Non-blocking notice: container >= 1.6 skips unreadable images and still
+// lists the rest.
+function ImageWarning({ t, message }: { t: ThemeTokens; message: string }) {
+  return (
+    <div role="status" data-testid="image-warning" style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '8px 16px', fontSize: 12, color: t.fg2, background: t.surfaceAlt, borderBottom: `1px solid ${t.border}` }}>
+      <Icon name="info" size={14} color={t.warning} />
+      <span style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', minWidth: 0 }}>{message}</span>
+    </div>
+  );
+}
+
 const COLS_IMAGES = '32px 1fr 100px 110px 100px 140px';
 
 export function ImagesView({ t, search, onScan, onRun, onInspect, reloadKey = 0 }: {
@@ -277,8 +288,9 @@ export function ImagesView({ t, search, onScan, onRun, onInspect, reloadKey = 0 
   /** Bump to force a list refresh after out-of-view mutations (prune). */
   reloadKey?: number;
 }) {
-  const { data, error, loading, reload } = useLoad(api.listImages, reloadKey);
-  const items = useMemo(() => data ?? [], [data]);
+  const { data, error, loading, reload } = useLoad(api.listImagesChecked, reloadKey);
+  const items = useMemo(() => data?.images ?? [], [data]);
+  const warning = data?.warning;
   const rows = items.filter(i => !search || i.ref.toLowerCase().includes(search.toLowerCase()));
   const onDelete = (img: Image) => {
     if (!confirm(`Delete image ${img.ref}?\nThis cannot be undone.`)) return;
@@ -355,10 +367,11 @@ export function ImagesView({ t, search, onScan, onRun, onInspect, reloadKey = 0 
   };
 
   if (error) return <div style={{ flex: 1, overflow: 'auto', background: t.bg }}><LoadErrorState t={t} message={error} onRetry={reload} /></div>;
-  if (!loading && items.length === 0) return <div style={{ flex: 1, overflow: 'auto', background: t.bg }}><EmptyState t={t}>No images. Pull one to get started.</EmptyState></div>;
+  if (!loading && items.length === 0) return <div style={{ flex: 1, overflow: 'auto', background: t.bg }}>{warning && <ImageWarning t={t} message={warning} />}<EmptyState t={t}>No images. Pull one to get started.</EmptyState></div>;
 
   return (
     <div style={{ flex: 1, overflow: 'auto', background: t.bg }}>
+      {warning && <ImageWarning t={t} message={warning} />}
       <div style={tableHeader(t, COLS_IMAGES)}>
         <SelectCheckbox
           t={t}

@@ -4,7 +4,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
-  Container, Image, Volume, Network, StackListing,
+  Container, Image, ImageListing, Volume, Network, StackListing,
   ScanResponse, Update, DoctorCheck, HistoryPoint, VulnHistory, DiskUsage,
 } from './types';
 import * as fixtures from './fixtures';
@@ -57,6 +57,9 @@ export const api = {
   // an explicit error state rather than "nothing exists".
   listContainers: () => callOrDevFallback<Container[]>('list_containers', fixtures.containers),
   listImages:     () => callOrDevFallback<Image[]>('list_images', fixtures.images),
+  listImagesChecked: () => inTauri
+    ? invoke<ImageListing>('list_images_checked')
+    : Promise.resolve<ImageListing>({ images: fixtures.images, warning: null }),
   listVolumes:    () => callOrDevFallback<Volume[]>('list_volumes', fixtures.volumes),
   listNetworks:   () => callOrDevFallback<Network[]>('list_networks', fixtures.networks),
   listStacks:     () => callOrDevFallback<StackListing>('list_stacks', { stacks: fixtures.stacks, invalid: [] }),
@@ -302,7 +305,8 @@ export const api = {
 
   // Build experience (phase 3). The builder is a dedicated VM; status
   // returns null when no builder instance exists yet.
-  builderStatus: () => call<Container | null>('builder_status', null),
+  // Rejects on CLI failure so the Builder panel can offer Start services.
+  builderStatus: () => callOrDevFallback<Container | null>('builder_status', null),
   builderStart: (cpus?: number, memory?: string) =>
     inTauri ? invokeStrict<void>('builder_start', { cpus, memory }) : Promise.resolve(),
   builderStop: () => inTauri ? invokeStrict<void>('builder_stop') : Promise.resolve(),
@@ -310,6 +314,7 @@ export const api = {
 
   // Runtime service controls (sudo-free). Surfaced in Doctor (start) and
   // Settings (start/stop).
+  systemRestart: () => inTauri ? invokeStrict<void>('system_restart') : Promise.resolve(),
   systemStart: () => inTauri ? invokeStrict<void>('system_start') : Promise.resolve(),
   systemStop:  () => inTauri ? invokeStrict<void>('system_stop')  : Promise.resolve(),
   // Whether services are up; drives the Settings Services status dot.

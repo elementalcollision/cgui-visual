@@ -42,6 +42,13 @@ export interface Image {
   layers: number;
 }
 
+/** `image ls` result: readable images plus a non-blocking warning when the
+ *  CLI (>= 1.6) skipped unreadable ones and exited non-zero. */
+export interface ImageListing {
+  images: Image[];
+  warning?: string | null;
+}
+
 export interface Volume {
   name: string;
   driver: string;

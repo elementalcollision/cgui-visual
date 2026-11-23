@@ -33,26 +33,33 @@ cgui-visual targets a specific niche: **devs on Apple Silicon who want a GUI for
 | **Platforms**            | macOS                          | macOS · Windows · Linux          | macOS               | macOS · Windows · Linux | macOS · Windows · Linux |
 | **Backing runtime**      | Apple `container`              | Docker Engine                    | OrbStack engine     | Podman              | Docker             |
 | **Surface**              | Native desktop GUI             | Native desktop GUI               | Native desktop GUI  | Native desktop GUI  | Terminal (TUI)     |
-| **Compose-style stacks** | TOML stacks · Compose import roadmap | `docker-compose.yml`       | `docker-compose.yml`| Compose plugin      | View-only          |
+| **Compose-style stacks** | TOML stacks · `docker-compose.yml` import | `docker-compose.yml`       | `docker-compose.yml`| Compose plugin      | View-only          |
 | **Image vuln scanning**  | Trivy (`brew install trivy`)   | Snyk (paid tier)                 | —                   | —                   | —                  |
 | **Bundle size on disk**  | ~10 MB                         | ~1 GB (incl. engine)             | ~600 MB             | ~400 MB             | ~10 MB             |
 
 **TL;DR by audience:**
 - **You're already using `cgui` (TUI)** → cgui-visual is the visual companion. Same stacks, same workflows, same `~/.config/cgui/`.
-- **Coming from Docker Desktop** → cgui-visual is one of the lightest exits, but you'll be on Apple's `container` runtime instead of Docker Engine. Compose-import is on the roadmap.
+- **Coming from Docker Desktop** → cgui-visual is one of the lightest exits, but you'll be on Apple's `container` runtime instead of Docker Engine. Import your `docker-compose.yml` as a stack.
 - **Considering OrbStack** → OrbStack is more polished and cross-runtime; cgui-visual is free, OSS, and laser-focused on Apple's runtime.
 - **You like terminal-first tooling** → use [`cgui`](https://github.com/elementalcollision/cgui) (TUI) directly; cgui-visual is for when you want a GUI alongside it.
 
 ## What it does
 
 - **Containers** — list / inspect / start / stop / restart / kill / delete with live CPU, memory, network, disk rates derived from `container stats` deltas
-- **Images** — list / inspect / Trivy scan / run (with name, ports, env, command form) / delete
+- **Images** — list / inspect / Trivy scan / run (with name, ports, env, command form) / tag / push / save / load / delete; unreadable images (container 1.6+) are skipped with a warning banner instead of failing the list
+- **Build** — Dockerfile builds with streamed output, plus builder VM start / stop / delete in Settings
 - **Volumes / Networks** — list with reference counts, JSON inspect, delete
-- **Stacks** — TOML compose-style at `~/.config/cgui/stacks/*.toml`; up/down with topological ordering; live TCP/HTTP/cmd healthchecks with `start_period_s` grace window
+- **Stacks** — TOML compose-style at `~/.config/cgui/stacks/*.toml`; up/down with topological ordering; live TCP/HTTP/cmd healthchecks with `start_period_s` grace window; import a `docker-compose.yml`
+- **Terminal and trends** — interactive shell into a container; CPU / memory / network / disk history
+- **Machines, registry, prune, disk usage** — machine management, registry logins, prune for containers / images / volumes / networks, and `system df`
 - **Logs** — streaming `container logs -f` with 5 000-line ring buffer, level filter, free-text search
 - **Pull** — streaming `container image pull` with progress
-- **Doctor** — local-environment health check
+- **Doctor** — local-environment health check, including minimum-version and CLI/server version-mismatch checks with one-click service start / restart
 - **Self-update** — Tauri-updater plugin against a GitHub-Pages-hosted manifest
+
+## Compatibility
+
+Requires Apple `container` 1.4.1 or later. Tested with 1.4.1 and 1.7.1 on macOS 26.7 and macOS 27.2.
 
 ## Layout
 

@@ -6,7 +6,7 @@ import type { Container, Image, ScanResponse, Severity, Stack, Tab, TrivyFinding
 import { Icon, Bar, Sparkline, iconBtn, pillBtn, fmtCreated } from './components';
 import { api } from './api';
 import { toast, withToast } from './toast';
-import { errMessage } from './loadState';
+import { errMessage, looksLikeServicesDown } from './loadState';
 
 function Backdrop({ onClose, children }: { onClose: () => void; children: ReactNode }) {
   return (
@@ -654,6 +654,17 @@ export function BuildModal({ t, onClose }: { t: ThemeTokens; onClose: () => void
   const [lines, setLines] = useState<string[]>([]);
   const [done, setDone] = useState<boolean | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
+  const [starting, setStarting] = useState(false);
+  // On 1.6+ `container build` is a CLI plugin and fails with "Plugins are
+  // unavailable ..." while the services are stopped.
+  const servicesDown = done === false && lines.some(looksLikeServicesDown);
+  const startServices = () => {
+    setStarting(true);
+    withToast('start services', api.systemStart())
+      .then(() => { setSubmitted(false); })
+      .catch(() => {})
+      .finally(() => setStarting(false));
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -670,7 +681,7 @@ export function BuildModal({ t, onClose }: { t: ThemeTokens; onClose: () => void
 
   // Follow the tail as lines stream in.
   useEffect(() => {
-    logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
+    logRef.current?.scrollTo?.({ top: logRef.current.scrollHeight });
   }, [lines]);
 
   const pickContext = async () => {
@@ -757,6 +768,11 @@ export function BuildModal({ t, onClose }: { t: ThemeTokens; onClose: () => void
               <div key={i} style={{ color: /error|fail/i.test(l) ? t.danger : t.fg1, padding: '1px 0', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{l}</div>
             ))}
             {done === null && <div style={{ color: t.fg3 }}>▍</div>}
+            {servicesDown && (
+              <div role="alert" style={{ marginTop: 10, fontFamily: 'inherit', color: t.warning }}>
+                Container services aren't running — builds need them.
+              </div>
+            )}
           </div>
         )}
 
@@ -767,6 +783,11 @@ export function BuildModal({ t, onClose }: { t: ThemeTokens; onClose: () => void
               : done ? 'Image is now in the Images tab' : `${lines.length} lines`}
           </span>
           <div style={{ display: 'flex', gap: 8 }}>
+            {servicesDown && (
+              <button style={{ ...pillBtn(t, t.success), opacity: starting ? 0.5 : 1 }} disabled={starting} onClick={startServices}>
+                <Icon name="play" size={12} color={t.success} />Start services
+              </button>
+            )}
             {submitted && done !== null && (
               <button style={pillBtn(t)} onClick={() => { setSubmitted(false); }}>Edit & rebuild</button>
             )}
@@ -1150,6 +1171,7 @@ export function UpdateModal({ t, onClose }: { t: ThemeTokens; onClose: () => voi
 // anything resembling arbitrary execution.
 const DOCTOR_ACTIONS: Record<string, () => Promise<void>> = {
   'system-start': () => api.systemStart(),
+  'system-restart': () => api.systemRestart(),
 };
 
 async function runDoctorFix(fix: DoctorFix): Promise<'opened' | 'copied' | 'ran'> {
@@ -2031,12 +2053,30 @@ function MachinesPanel({ t }: { t: ThemeTokens }) {
 function BuilderPanel({ t }: { t: ThemeTokens }) {
   const [builder, setBuilder] = useState<Container | null | undefined>(undefined);
   const [busy, setBusy] = useState(false);
-  const reload = () => api.builderStatus().then(setBuilder).catch(() => setBuilder(null));
+  const [servicesDown, setServicesDown] = useState(false);
+  const reload = () => api.builderStatus()
+    .then(b => { setServicesDown(false); setBuilder(b); })
+    .catch(e => {
+      // `container builder` is a CLI plugin on 1.6+: with services stopped
+      // it fails with "Plugins are unavailable ...".
+      setServicesDown(looksLikeServicesDown(errMessage(e)));
+      setBuilder(null);
+    });
   useEffect(() => { reload(); }, []);
   const act = (label: string, p: Promise<void>) => {
     setBusy(true);
     withToast(label, p).then(reload).catch(() => {}).finally(() => setBusy(false));
   };
+  if (servicesDown) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0' }}>
+        <span style={{ width: 8, height: 8, borderRadius: '50%', background: t.warning }} />
+        <div style={{ flex: 1, fontSize: 13, color: t.fg1 }}>Container services aren't running</div>
+        <button style={{ ...pillBtn(t, t.success), opacity: busy ? 0.5 : 1 }} disabled={busy}
+                onClick={() => act('start services', api.systemStart())}>Start services</button>
+      </div>
+    );
+  }
   const running = builder?.status === 'running';
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0' }}>

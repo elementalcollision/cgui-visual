@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { SettingsModal, TrivyModal, DoctorModal, OnboardingModal, DetailModal, parseInspect, fuzzyScore, parseImageInspect } from './modals';
+import { BuildModal, SettingsModal, TrivyModal, DoctorModal, OnboardingModal, DetailModal, parseInspect, fuzzyScore, parseImageInspect } from './modals';
 import { getTheme } from './theme';
 import { containers } from './fixtures';
 import { api } from './api';
@@ -290,5 +290,45 @@ describe('SettingsModal menu-bar toggle', () => {
     expect(toggle).toHaveAttribute('aria-pressed', 'false');
     await user.click(toggle);
     expect(setMenubarMode).toHaveBeenCalledWith(true);
+  });
+});
+
+describe('BuildModal when services are stopped (container >= 1.6)', () => {
+  it('shows Start services instead of a bare failure on the plugin-unavailable error', async () => {
+    const user = userEvent.setup();
+    let emitLine: (l: string) => void = () => {};
+    let emitDone: (ok: boolean) => void = () => {};
+    vi.spyOn(api, 'onBuildLine').mockImplementation(async cb => { emitLine = cb; return () => {}; });
+    vi.spyOn(api, 'onBuildDone').mockImplementation(async cb => { emitDone = cb; return () => {}; });
+    vi.spyOn(api, 'startBuild').mockResolvedValue(undefined);
+    const start = vi.spyOn(api, 'systemStart').mockResolvedValue(undefined);
+    render(<BuildModal t={t} onClose={() => {}} />);
+
+    await user.type(screen.getByPlaceholderText('/path/to/project'), '/tmp/proj');
+    await user.type(screen.getByPlaceholderText('myapp:latest'), 'app:1');
+    await user.click(screen.getByRole('button', { name: 'Build' }));
+    expect(screen.queryByRole('button', { name: /Start services/ })).not.toBeInTheDocument();
+
+    await act(async () => {
+      emitLine('Error: Plugins are unavailable. Start the container system services and retry:');
+      emitDone(false);
+    });
+    await user.click(await screen.findByRole('button', { name: /Start services/ }));
+    expect(start).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not offer Start services for an ordinary build failure', async () => {
+    const user = userEvent.setup();
+    let emitDone: (ok: boolean) => void = () => {};
+    vi.spyOn(api, 'onBuildLine').mockImplementation(async () => () => {});
+    vi.spyOn(api, 'onBuildDone').mockImplementation(async cb => { emitDone = cb; return () => {}; });
+    vi.spyOn(api, 'startBuild').mockResolvedValue(undefined);
+    render(<BuildModal t={t} onClose={() => {}} />);
+    await user.type(screen.getByPlaceholderText('/path/to/project'), '/tmp/proj');
+    await user.type(screen.getByPlaceholderText('myapp:latest'), 'app:1');
+    await user.click(screen.getByRole('button', { name: 'Build' }));
+    await act(async () => { emitDone(false); });
+    expect(await screen.findByText('Build failed')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Start services/ })).not.toBeInTheDocument();
   });
 });

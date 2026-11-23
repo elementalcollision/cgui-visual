@@ -28,7 +28,7 @@ describe('looksLikeServicesDown', () => {
 describe('list views when the runtime is down', () => {
   it('ImagesView shows "services aren\'t running" with a working Start services button', async () => {
     const user = userEvent.setup();
-    const list = vi.spyOn(api, 'listImages').mockRejectedValue(SERVICES_DOWN);
+    const list = vi.spyOn(api, 'listImagesChecked').mockRejectedValue(SERVICES_DOWN);
     const start = vi.spyOn(api, 'systemStart').mockResolvedValue(undefined);
     render(<ImagesView t={t} search="" onScan={() => {}} onRun={() => {}} onInspect={() => {}} />);
 
@@ -36,7 +36,7 @@ describe('list views when the runtime is down', () => {
     // Failure, not emptiness.
     expect(screen.queryByText(/No images/)).not.toBeInTheDocument();
 
-    list.mockResolvedValue(fixtures.images);
+    list.mockResolvedValue({ images: fixtures.images, warning: null });
     await user.click(screen.getByRole('button', { name: /Start services/ }));
     expect(start).toHaveBeenCalledTimes(1);
     // After starting, the view reloads and renders the list.
@@ -77,7 +77,7 @@ describe('list views when the runtime is down', () => {
 
 describe('empty states', () => {
   it('ImagesView says "No images" when the list is genuinely empty', async () => {
-    vi.spyOn(api, 'listImages').mockResolvedValue([]);
+    vi.spyOn(api, 'listImagesChecked').mockResolvedValue({ images: [], warning: null });
     render(<ImagesView t={t} search="" onScan={() => {}} onRun={() => {}} onInspect={() => {}} />);
     expect(await screen.findByText(/No images/)).toBeInTheDocument();
     expect(screen.queryByText("Container services aren't running")).not.toBeInTheDocument();
@@ -178,5 +178,28 @@ describe('TrivyModal scan states', () => {
     await user.click(await screen.findByRole('button', { name: 'Retry' }));
     expect(await screen.findByText(/CVE-2024-21626/)).toBeInTheDocument();
     expect(scan).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('partial image listing (container >= 1.6)', () => {
+  it('ImagesView lists readable images and shows a non-blocking warning banner', async () => {
+    vi.spyOn(api, 'listImagesChecked').mockResolvedValue({
+      images: fixtures.images,
+      warning: "2 images couldn't be read: Error: failed to read 2 image(s)",
+    });
+    render(<ImagesView t={t} search="" onScan={() => {}} onRun={() => {}} onInspect={() => {}} />);
+    expect(await screen.findByText('mlcommons/inference:llama2-70b')).toBeInTheDocument();
+    const banner = screen.getByTestId('image-warning');
+    expect(banner).toHaveTextContent(/2 images couldn't be read/);
+    // Not the blocking error state.
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Start services/ })).not.toBeInTheDocument();
+  });
+
+  it('ImagesView shows no banner when nothing was skipped', async () => {
+    vi.spyOn(api, 'listImagesChecked').mockResolvedValue({ images: fixtures.images, warning: null });
+    render(<ImagesView t={t} search="" onScan={() => {}} onRun={() => {}} onInspect={() => {}} />);
+    await screen.findByText('mlcommons/inference:llama2-70b');
+    expect(screen.queryByTestId('image-warning')).not.toBeInTheDocument();
   });
 });
