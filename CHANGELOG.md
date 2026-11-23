@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] — 2026-11-23
+
+Hardening and toolchain release.
+
+### Security
+
+- **Content Security Policy.** The app window now only runs its own
+  scripts and talks only to the app itself; previously any policy was
+  allowed. Fonts still load from Google Fonts.
+- **Values that look like flags are rejected.** Any ID, name, image
+  reference, path, signal or registry value that is empty or starts with `-`
+  is refused before it reaches the `container` CLI, so something like `--all`
+  can never be read as a flag. (For a path that really starts with `-`, use
+  `./-name`.)
+- **Private history database.** cgui's settings folder is now readable only
+  by you (0700) and the history database files are 0600; existing files are
+  tightened at startup. Logs are kept for 7 days and Trivy scans for 90 days
+  (the newest two per image are always kept).
+- **Environment values are masked** (`KEY=***`) in stack logs and in error
+  messages that echo a `container run` command. The command itself is
+  unchanged.
+- **System tools by absolute path:** `/usr/bin/curl`, `/usr/bin/osascript`
+  and `/usr/bin/which`.
+- **SQLite updated** via rusqlite 0.43, fixing RUSTSEC-2026-0459 (memory
+  disclosure via a crafted database and WAL file pair).
+- **Safer compose import.** The YAML parser is now `serde-saphyr`, written in
+  safe Rust with limits on aliases and nesting, so a small malicious file
+  can't expand into billions of nodes. It's stricter than before; for
+  example, duplicate keys are rejected.
+
+### Fixed
+
+- **Quoted commands work.** The Run dialog and compose `command:` /
+  `entrypoint:` strings now follow shell quoting, so
+  `sh -c "echo hi && sleep 5"` is three arguments, not six. An unterminated
+  quote is reported as an error.
+- **Logs no longer show every line twice** when you open a container's logs.
+  The live stream already replays the whole log; saved history is now only
+  shown when the live stream can't start.
+
+### Changed
+
+- Vitest 5.1, jsdom 31, jest-dom 8, TypeScript 7, base64 0.23.
+- Dependabot keeps Tauri crates and `@tauri-apps/*` packages in one group
+  and allows up to 10 open PRs.
+
 ## [0.6.1] — 2026-11-23
 
 Security and data-safety hotfix. **Every version from 0.2.0 to 0.6.0 is
@@ -414,7 +460,8 @@ Initial macOS-only release. Tauri + React + TypeScript GUI for Apple's
   binary. Apple's `container` CLI is similarly optional but required for
   any real data.
 
-[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/elementalcollision/cgui-visual/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/elementalcollision/cgui-visual/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.4...v0.6.0
 [0.5.4]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.3...v0.5.4
