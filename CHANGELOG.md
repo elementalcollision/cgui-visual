@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-11-23
+
+### Fixed
+
+- **The ERROR / WARN log filter works with common log formats.** It used to
+  recognise only bracketed tags like `[ERROR]`, so most logs were treated as
+  INFO and the filter showed nothing. It now also understands plain `ERROR` /
+  `WARN` words, `level=error` style fields, JSON `"level"` / `"severity"`
+  keys, Python `ERROR:` prefixes and klog-style `E1123 …` lines, with
+  coloured output stripped first. Lines are colour-coded by level again, and
+  prose like "no errors found" isn't mistaken for an error.
+- **A Logs view no longer leaves `container logs` running** for a container
+  that was stopped or deleted while the view was open. The stream now ends
+  with a note: "container removed" or "container stopped — log stream ended".
+- **No stray backticks in messages.** Settings hints, Doctor results, error
+  messages and notifications no longer show literal backtick characters.
+
 ## [0.7.1] — 2026-11-23
 
 ### Added
@@ -547,7 +564,8 @@ Initial macOS-only release. Tauri + React + TypeScript GUI for Apple's
   binary. Apple's `container` CLI is similarly optional but required for
   any real data.
 
-[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/elementalcollision/cgui-visual/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/elementalcollision/cgui-visual/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/elementalcollision/cgui-visual/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/elementalcollision/cgui-visual/compare/v0.6.1...v0.6.2
