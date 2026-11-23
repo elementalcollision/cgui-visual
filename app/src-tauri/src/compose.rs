@@ -13,7 +13,8 @@
 // pretending the converted stack still matches the source.
 
 use anyhow::{anyhow, Context, Result};
-use serde::Deserialize;
+use serde::de::IgnoredAny;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -35,7 +36,7 @@ pub struct ComposeService {
     /// We refuse to convert services whose only artifact is a build context;
     /// recorded so the error message can name them.
     #[serde(default)]
-    pub build: Option<serde_yaml::Value>,
+    pub build: Option<IgnoredAny>,
 
     #[serde(default)]
     pub ports: Vec<ComposePort>,
@@ -85,7 +86,7 @@ pub enum PublishedPort {
 }
 
 /// `environment:` accepts both list-of-strings (`["KEY=value"]`) and
-/// map-of-strings (`{ KEY: value }`). serde_yaml's untagged enum picks
+/// map-of-strings (`{ KEY: value }`). serde's untagged enum picks
 /// the right branch by structure.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
@@ -100,7 +101,7 @@ impl Default for ComposeEnv {
     }
 }
 
-/// Compose lets `KEY: 1234` unquoted; serde_yaml will see this as integer.
+/// Compose lets `KEY: 1234` unquoted; the YAML parser will see this as integer.
 /// Accept any scalar and coerce to its string form.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
@@ -146,7 +147,7 @@ pub enum ComposeVolume {
 #[serde(untagged)]
 pub enum ComposeNetworks {
     List(Vec<String>),
-    Map(BTreeMap<String, serde_yaml::Value>),
+    Map(BTreeMap<String, IgnoredAny>),
 }
 
 /// `depends_on:` short form is `[name1, name2]`; long form is
@@ -156,7 +157,7 @@ pub enum ComposeNetworks {
 #[serde(untagged)]
 pub enum ComposeDependsOn {
     List(Vec<String>),
-    Map(BTreeMap<String, serde_yaml::Value>),
+    Map(BTreeMap<String, IgnoredAny>),
 }
 
 /// `command:` and `entrypoint:` accept string or array. Normalize to argv.
@@ -178,6 +179,33 @@ pub struct ComposeHealthcheck {
     /// Compose uses this to disable inherited healthchecks; honor it.
     #[serde(default)]
     pub disable: Option<bool>,
+}
+
+/// Parse untrusted compose YAML.
+///
+/// Compose files are third-party input, so parsing runs under an explicit
+/// resource budget: alias/anchor replay (the "billion laughs" expansion
+/// attack), node count, nesting depth and event count are all capped well
+/// above anything a real compose file needs. A document that exceeds a limit
+/// is rejected with an error rather than expanded.
+pub fn parse_compose(text: &str) -> Result<ComposeFile> {
+    let options = serde_saphyr::options! {
+        budget: serde_saphyr::budget! {
+            max_events: 200_000,
+            max_nodes: 100_000,
+            max_aliases: 5_000,
+            max_anchors: 5_000,
+            max_recorded_anchor_events: 200_000,
+            max_total_scalar_bytes: 8 * 1024 * 1024,
+            max_depth: 32,
+            max_documents: 1,
+        },
+        alias_limits: serde_saphyr::alias_limits! {
+            max_total_replayed_events: 100_000,
+            max_replay_stack_depth: 16,
+        },
+    };
+    serde_saphyr::from_str_with_options(text, options).map_err(|e| anyhow!("{e}"))
 }
 
 /// Convert a parsed Compose document into a single cgui stack TOML.
@@ -236,8 +264,8 @@ pub fn convert(compose: ComposeFile, default_name: &str) -> Result<StackToml> {
 /// string ready to write to ~/.config/cgui/stacks/<name>.toml.
 pub fn import_file(path: &Path) -> Result<(StackToml, String)> {
     let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let compose: ComposeFile =
-        serde_yaml::from_str(&text).with_context(|| format!("parse YAML at {}", path.display()))?;
+    let compose =
+        parse_compose(&text).with_context(|| format!("parse YAML at {}", path.display()))?;
 
     // If `name:` is absent in the file, fall back to the containing dir name.
     // Compose itself uses the same convention for its `--project-name`.
@@ -421,81 +449,105 @@ fn parse_duration_to_secs(s: Option<&str>) -> Option<u64> {
 //
 // Inverse of `convert` — emits a Compose v3-flavoured document that the
 // import path round-trips back to the same stack. We build a fresh
-// `serde_yaml::Mapping` (rather than a typed struct) so the output stays
-// exactly the schema we want regardless of how StackToml evolves.
+// dedicated export structs (rather than serialising StackToml directly) so
+// the output stays exactly the schema we want regardless of how StackToml
+// evolves.
 //
 // Round-trip property: `import(export(stack))` must structurally equal
 // `stack` for any stack the parser accepts. Tests below lock this in.
 
-pub fn export(stack: &StackToml) -> Result<String> {
-    use serde_yaml::{Mapping, Value};
+// Typed, ordered export schema. Field order below is the emitted key order.
+#[derive(Serialize)]
+struct ExportDoc<'a> {
+    name: &'a str,
+    services: OrderedMap<'a, ExportService<'a>>,
+}
 
-    let mut services = Mapping::new();
-    for svc in &stack.services {
-        let mut s = Mapping::new();
-        if !svc.image.is_empty() {
-            s.insert("image".into(), svc.image.clone().into());
-        }
-        if !svc.env.is_empty() {
-            // Emit env as a map (Compose accepts both list and map; map
-            // is friendlier for diffs and preserves key order via BTreeMap).
-            let mut env = Mapping::new();
-            for (k, v) in &svc.env {
-                env.insert(k.clone().into(), v.clone().into());
-            }
-            s.insert("environment".into(), env.into());
-        }
-        if !svc.ports.is_empty() {
-            // Short-form strings — round-trip through the parser's Short variant.
-            let ports: Vec<Value> = svc.ports.iter().cloned().map(Into::into).collect();
-            s.insert("ports".into(), ports.into());
-        }
-        if !svc.volumes.is_empty() {
-            let vols: Vec<Value> = svc.volumes.iter().cloned().map(Into::into).collect();
-            s.insert("volumes".into(), vols.into());
-        }
-        if let Some(net) = &svc.network {
-            // Map form so we can support per-service networks if needed
-            // later; the parser's pick_network handles list and map.
-            let mut nets = Mapping::new();
-            nets.insert(net.clone().into(), Value::Null);
-            s.insert("networks".into(), nets.into());
-        }
-        if !svc.depends_on.is_empty() {
-            let deps: Vec<Value> = svc.depends_on.iter().cloned().map(Into::into).collect();
-            s.insert("depends_on".into(), deps.into());
-        }
-        if let Some(restart) = &svc.restart {
-            s.insert("restart".into(), restart.clone().into());
-        }
-        if !svc.cap_add.is_empty() {
-            let caps: Vec<Value> = svc.cap_add.iter().cloned().map(Into::into).collect();
-            s.insert("cap_add".into(), caps.into());
-        }
-        if !svc.cap_drop.is_empty() {
-            let caps: Vec<Value> = svc.cap_drop.iter().cloned().map(Into::into).collect();
-            s.insert("cap_drop".into(), caps.into());
-        }
-        if !svc.args.is_empty() {
-            // The parser collapses Compose's command + entrypoint into args,
-            // so we emit `command:` (the more common of the two). List form
-            // round-trips through ComposeArgv::List.
-            let args: Vec<Value> = svc.args.iter().cloned().map(Into::into).collect();
-            s.insert("command".into(), args.into());
-        }
-        if let Some(hc) = &svc.healthcheck {
-            if let Some(hcv) = export_healthcheck(hc) {
-                s.insert("healthcheck".into(), hcv);
-            }
-        }
-        services.insert(svc.name.clone().into(), s.into());
+/// Serialises `(key, value)` pairs as a YAML mapping in slice order
+/// (a `BTreeMap` would re-sort services alphabetically).
+struct OrderedMap<'a, V>(Vec<(&'a str, V)>);
+
+impl<V: Serialize> Serialize for OrderedMap<'_, V> {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        ser.collect_map(self.0.iter().map(|(k, v)| (k, v)))
     }
+}
 
-    let mut doc = Mapping::new();
-    doc.insert("name".into(), stack.name.clone().into());
-    doc.insert("services".into(), services.into());
+#[derive(Serialize)]
+struct ExportService<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image: Option<&'a str>,
+    // Env as a map (Compose accepts both list and map; map is friendlier
+    // for diffs and preserves key order via BTreeMap).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    environment: BTreeMap<&'a str, &'a str>,
+    // Short-form strings — round-trip through the parser's Short variant.
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    ports: &'a [String],
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    volumes: &'a [String],
+    // Map form so we can support per-service networks if needed later;
+    // the parser's pick_network handles list and map.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    networks: Option<BTreeMap<&'a str, ()>>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    depends_on: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    restart: Option<&'a str>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    cap_add: &'a [String],
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    cap_drop: &'a [String],
+    // The parser collapses Compose's command + entrypoint into args, so we
+    // emit `command:` (the more common of the two). List form round-trips
+    // through ComposeArgv::List.
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    command: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    healthcheck: Option<ExportHealthcheck>,
+}
 
-    serde_yaml::to_string(&Value::Mapping(doc))
+#[derive(Serialize)]
+struct ExportHealthcheck {
+    test: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interval: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_period: Option<String>,
+}
+
+pub fn export(stack: &StackToml) -> Result<String> {
+    let services = stack
+        .services
+        .iter()
+        .map(|svc| {
+            let s = ExportService {
+                image: (!svc.image.is_empty()).then_some(svc.image.as_str()),
+                environment: svc
+                    .env
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect(),
+                ports: &svc.ports,
+                volumes: &svc.volumes,
+                networks: svc.network.as_deref().map(|n| BTreeMap::from([(n, ())])),
+                depends_on: &svc.depends_on,
+                restart: svc.restart.as_deref(),
+                cap_add: &svc.cap_add,
+                cap_drop: &svc.cap_drop,
+                command: &svc.args,
+                healthcheck: svc.healthcheck.as_ref().map(export_healthcheck),
+            };
+            (svc.name.as_str(), s)
+        })
+        .collect();
+
+    let doc = ExportDoc {
+        name: &stack.name,
+        services: OrderedMap(services),
+    };
+    serde_saphyr::to_string(&doc)
+        .map_err(|e| anyhow!("{e}"))
         .with_context(|| format!("serialise stack '{}' as YAML", stack.name))
 }
 
@@ -503,17 +555,13 @@ pub fn export(stack: &StackToml) -> Result<String> {
 // `kind = "cmd"` becomes test = ["CMD", argv...] when we have argv,
 // otherwise "tcp" / "http" don't have a clean Compose representation
 // (they're cgui-specific) so we round-trip as a CMD-SHELL using a
-// concise diagnostic command. Returns None when there's nothing to emit.
-fn export_healthcheck(hc: &Healthcheck) -> Option<serde_yaml::Value> {
-    use serde_yaml::{Mapping, Value};
-    let mut m = Mapping::new();
-    match hc.kind.as_str() {
+// concise diagnostic command.
+fn export_healthcheck(hc: &Healthcheck) -> ExportHealthcheck {
+    let test = match hc.kind.as_str() {
         "cmd" if !hc.command.is_empty() => {
-            let mut test: Vec<Value> = vec!["CMD".into()];
-            for a in &hc.command {
-                test.push(a.clone().into());
-            }
-            m.insert("test".into(), test.into());
+            let mut test = vec!["CMD".to_string()];
+            test.extend(hc.command.iter().cloned());
+            test
         }
         _ => {
             // tcp / http / anything else — stash kind+target in a `test`
@@ -526,25 +574,13 @@ fn export_healthcheck(hc: &Healthcheck) -> Option<serde_yaml::Value> {
                 "http" => format!("# cgui http {target}"),
                 _ => format!("# cgui tcp {target}"),
             };
-            m.insert(
-                "test".into(),
-                vec!["CMD-SHELL".into(), Value::String(probe)].into(),
-            );
+            vec!["CMD-SHELL".to_string(), probe]
         }
-    }
-    if hc.interval_s != 30 {
-        m.insert("interval".into(), format!("{}s", hc.interval_s).into());
-    }
-    if hc.start_period_s > 0 {
-        m.insert(
-            "start_period".into(),
-            format!("{}s", hc.start_period_s).into(),
-        );
-    }
-    if m.is_empty() {
-        None
-    } else {
-        Some(m.into())
+    };
+    ExportHealthcheck {
+        test,
+        interval: (hc.interval_s != 30).then(|| format!("{}s", hc.interval_s)),
+        start_period: (hc.start_period_s > 0).then(|| format!("{}s", hc.start_period_s)),
     }
 }
 
@@ -559,10 +595,10 @@ mod export_tests {
     use super::*;
 
     fn round_trip(yaml: &str) {
-        let cf: ComposeFile = serde_yaml::from_str(yaml).expect("parse compose");
+        let cf: ComposeFile = parse_compose(yaml).expect("parse compose");
         let stack = convert(cf, "round").expect("convert");
         let exported = export(&stack).expect("export");
-        let cf2: ComposeFile = serde_yaml::from_str(&exported).expect("re-parse");
+        let cf2: ComposeFile = parse_compose(&exported).expect("re-parse");
         let stack2 = convert(cf2, "round").expect("re-convert");
         assert_eq!(stack.name, stack2.name, "name preserved");
         assert_eq!(
@@ -630,7 +666,7 @@ mod tests {
     use super::*;
 
     fn parse(yaml: &str) -> StackToml {
-        let cf: ComposeFile = serde_yaml::from_str(yaml).unwrap();
+        let cf: ComposeFile = parse_compose(yaml).unwrap();
         convert(cf, "fallback").unwrap()
     }
 
@@ -653,11 +689,11 @@ services:
     fn convert_rejects_path_traversal_project_names() {
         for bad in ["../../x", "/tmp/x", "a/b", ".."] {
             let yaml = format!("name: \"{bad}\"\nservices:\n  web: {{ image: nginx }}\n");
-            let cf: ComposeFile = serde_yaml::from_str(&yaml).unwrap();
+            let cf: ComposeFile = parse_compose(&yaml).unwrap();
             assert!(convert(cf, "fallback").is_err(), "should reject {bad}");
         }
         // Also an unusable fallback (directory) name.
-        let cf: ComposeFile = serde_yaml::from_str("services:\n  web: { image: nginx }\n").unwrap();
+        let cf: ComposeFile = parse_compose("services:\n  web: { image: nginx }\n").unwrap();
         assert!(convert(cf, "../up").is_err());
     }
 
@@ -675,7 +711,7 @@ services:
 
     #[test]
     fn build_only_service_errors_with_clear_message() {
-        let cf: ComposeFile = serde_yaml::from_str(
+        let cf: ComposeFile = parse_compose(
             r#"
 services:
   api:
@@ -932,5 +968,68 @@ services:
 "#,
         );
         assert_eq!(s.services[0].args, vec!["sh", "-c", "echo hi && sleep 5"]);
+    }
+
+    /// Build a classic "billion laughs" document: each level is a sequence of
+    /// ten aliases of the previous level, so full expansion is 10^levels nodes.
+    fn alias_bomb(levels: usize) -> String {
+        let mut y = String::from("x-l0: &l0 [lol, lol, lol, lol, lol, lol, lol, lol, lol, lol]\n");
+        for i in 1..=levels {
+            let refs = vec![format!("*l{}", i - 1); 10].join(", ");
+            y.push_str(&format!("x-l{i}: &l{i} [{refs}]\n"));
+        }
+        y.push_str("services:\n  web:\n    image: nginx\n    command: *l");
+        y.push_str(&levels.to_string());
+        y.push('\n');
+        y
+    }
+
+    #[test]
+    fn alias_bomb_is_rejected_without_expanding() {
+        // 10^9 expanded nodes if honoured. Must fail fast and bounded.
+        let yaml = alias_bomb(9);
+        assert!(yaml.len() < 2048, "bomb document stays tiny");
+        let started = std::time::Instant::now();
+        let err = parse_compose(&yaml).expect_err("alias bomb must be rejected");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "rejection must be fast, took {:?}",
+            started.elapsed()
+        );
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("alias") || msg.contains("budget") || msg.contains("replay"),
+            "error should name the limit that tripped: {msg}"
+        );
+    }
+
+    #[test]
+    fn modest_alias_use_still_parses() {
+        // Ordinary compose reuse: one anchored env block aliased twice.
+        let s = parse(
+            r#"
+x-env: &env
+  LOG_LEVEL: info
+services:
+  a:
+    image: x
+    environment: *env
+  b:
+    image: y
+    environment: *env
+"#,
+        );
+        assert_eq!(s.services.len(), 2);
+        assert_eq!(s.services[0].env.get("LOG_LEVEL").unwrap(), "info");
+        assert_eq!(s.services[1].env.get("LOG_LEVEL").unwrap(), "info");
+    }
+
+    #[test]
+    fn import_rejects_deeply_nested_document() {
+        let mut y = String::from("services:\n  a:\n    image: x\n    command: ");
+        y.push_str(&"[".repeat(200));
+        y.push_str(&"]".repeat(200));
+        y.push('\n');
+        assert!(parse_compose(&y).is_err());
     }
 }

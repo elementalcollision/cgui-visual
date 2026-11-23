@@ -1,7 +1,17 @@
-# Dependabot config. Weekly checks; group patch + minor bumps so we don't
-# get a deluge of noise PRs. Major bumps stay separate so they get the
-# attention they deserve. GitHub Actions checks monthly since action major
-# bumps are infrequent and rarely urgent.
+# Dependabot config. Weekly checks.
+#
+# - The Tauri stack (tauri, tauri-*, wry, tao on the Rust side; @tauri-apps/*
+#   on the npm side) must move together, so each ecosystem has a `tauri`
+#   group. Groups are matched in order, so `tauri` is declared first and
+#   claims those packages before `minor-and-patch` can.
+# - Other minor + patch bumps are batched per ecosystem to cut noise.
+# - Major bumps outside the Tauri group stay as individual PRs so they get
+#   proper attention.
+# - open-pull-requests-limit is generous so version-update PRs for majors
+#   can't starve the queue. (Security updates have their own, separate limit
+#   in Dependabot, but a larger limit keeps grouped PRs visible too.)
+# - GitHub Actions checks monthly since action major bumps are infrequent
+#   and rarely urgent.
 
 version: 2
 updates:
@@ -10,8 +20,11 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
     groups:
+      tauri:
+        patterns:
+          - "@tauri-apps/*"
       minor-and-patch:
         update-types: [minor, patch]
 
@@ -20,8 +33,14 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
     groups:
+      tauri:
+        patterns:
+          - "tauri"
+          - "tauri-*"
+          - "wry"
+          - "tao"
       minor-and-patch:
         update-types: [minor, patch]
 
