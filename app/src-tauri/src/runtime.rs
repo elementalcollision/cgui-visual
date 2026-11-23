@@ -217,18 +217,7 @@ async fn run(args: &[&str]) -> Result<Vec<u8>> {
 /// are inherently slower than fast inspect / list queries (image pull,
 /// `container run`, etc.). Same error envelope as `run`.
 pub(crate) async fn run_with_timeout(args: &[&str], timeout: Duration) -> Result<Vec<u8>> {
-    let fut = Command::new(bin()).args(args).kill_on_drop(true).output();
-    let out = tokio::time::timeout(timeout, fut)
-        .await
-        .map_err(|_| {
-            anyhow!(
-                "`{} {}` timed out after {}s",
-                bin(),
-                args.join(" "),
-                timeout.as_secs()
-            )
-        })?
-        .with_context(|| format!("failed to spawn `{} {}`", bin(), args.join(" ")))?;
+    let out = run_output(args, timeout).await?;
     if !out.status.success() {
         return Err(anyhow!(
             "`{} {}` exited {}: {}",
@@ -239,6 +228,24 @@ pub(crate) async fn run_with_timeout(args: &[&str], timeout: Duration) -> Result
         ));
     }
     Ok(out.stdout)
+}
+
+/// Spawn the runtime and collect its output regardless of exit status.
+/// Errors only on spawn failure or timeout; callers decide what a
+/// non-zero exit means.
+async fn run_output(args: &[&str], timeout: Duration) -> Result<std::process::Output> {
+    let fut = Command::new(bin()).args(args).kill_on_drop(true).output();
+    tokio::time::timeout(timeout, fut)
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "`{} {}` timed out after {}s",
+                bin(),
+                args.join(" "),
+                timeout.as_secs()
+            )
+        })?
+        .with_context(|| format!("failed to spawn `{} {}`", bin(), args.join(" ")))
 }
 
 // Raw ls + stats; the merge happens in state.rs because CPU% needs deltas
@@ -479,10 +486,75 @@ fn compose_project(cfg: &Value) -> Option<String> {
 
 // ─── Images / Volumes / Networks ──────────────────────────────────────
 
+/// Result of `image ls`: the readable images plus an optional non-blocking
+/// warning when the CLI skipped unreadable ones.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ImageListing {
+    pub images: Vec<Image>,
+    pub warning: Option<String>,
+}
+
 pub async fn list_images() -> Result<Vec<Image>> {
-    let bytes = run(&["image", "ls", "--format", "json"]).await?;
-    let raw: Vec<Value> = serde_json::from_slice(&bytes).context("parse `image ls` json")?;
-    Ok(raw.into_iter().map(parse_image).collect())
+    list_images_checked().await.map(|l| l.images)
+}
+
+/// `container image ls`. Since container 1.6 the CLI skips unreadable
+/// images with a warning, prints the readable ones as valid JSON, then
+/// exits 1 ("failed to read N image(s)"). Treat that as a partial
+/// success so one corrupt image doesn't blank the whole view.
+pub async fn list_images_checked() -> Result<ImageListing> {
+    let args = ["image", "ls", "--format", "json"];
+    let out = run_output(&args, RUN_TIMEOUT).await?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    parse_image_ls(out.status.success(), &out.stdout, &stderr, &out.status)
+        .map_err(|e| e.context(format!("`{} {}`", bin(), args.join(" "))))
+}
+
+/// Pure core of `list_images_checked`. A non-zero exit is accepted only
+/// when stdout is a JSON array (the 1.6+ partial-output behaviour);
+/// anything else (services down, garbage) stays an error.
+fn parse_image_ls(
+    success: bool,
+    stdout: &[u8],
+    stderr: &str,
+    status: &dyn std::fmt::Display,
+) -> Result<ImageListing> {
+    let parsed = serde_json::from_slice::<Vec<Value>>(stdout);
+    match (success, parsed) {
+        (true, parsed) => {
+            let raw = parsed.context("parse `image ls` json")?;
+            Ok(ImageListing {
+                images: raw.into_iter().map(parse_image).collect(),
+                warning: None,
+            })
+        }
+        (false, Ok(raw)) => {
+            let detail = stderr.trim();
+            let lead = match failed_read_count(detail) {
+                Some(1) => "1 image couldn't be read".to_string(),
+                Some(n) => format!("{n} images couldn't be read"),
+                None => "Some images couldn't be read".to_string(),
+            };
+            let warning = if detail.is_empty() {
+                lead
+            } else {
+                format!("{lead}: {detail}")
+            };
+            Ok(ImageListing {
+                images: raw.into_iter().map(parse_image).collect(),
+                warning: Some(warning),
+            })
+        }
+        (false, Err(_)) => Err(anyhow!("exited {status}: {}", stderr.trim())),
+    }
+}
+
+/// N from the CLI's "failed to read N image(s)" summary line.
+fn failed_read_count(stderr: &str) -> Option<usize> {
+    let marker = "failed to read ";
+    let rest = &stderr[stderr.find(marker)? + marker.len()..];
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
 }
 
 fn parse_image(v: Value) -> Image {
@@ -925,7 +997,12 @@ fn map_clean_unsupported(e: anyhow::Error) -> anyhow::Error {
     // Exit 64 alone is EX_USAGE, which argument-parse errors share; also
     // require the plugin-dispatch message so those aren't mislabelled.
     let msg = e.to_string();
-    if msg.contains("exit status: 64") && msg.contains("Plugin 'container-clean' not found") {
+    // 1.4 says `Plugin 'container-clean' not found`; 1.5+ says
+    // `unknown command 'clean'`.
+    if msg.contains("exit status: 64")
+        && (msg.contains("Plugin 'container-clean' not found")
+            || msg.contains("unknown command 'clean'"))
+    {
         anyhow!("`container clean` requires Apple container 1.4 or later")
     } else {
         e
@@ -1094,6 +1171,30 @@ pub async fn system_stop() -> Result<()> {
     run_with_timeout(&["system", "stop"], RUN_LONG_TIMEOUT)
         .await
         .map(|_| ())
+}
+
+/// Restart the runtime services (`system stop` then `system start`).
+/// Fixes a CLI/apiserver version mismatch after an upgrade, where the old
+/// server keeps running until it is stopped. A failed stop is tolerated
+/// (nothing to stop); the start result is what matters.
+pub async fn system_restart() -> Result<()> {
+    let _ = system_stop().await;
+    system_start().await
+}
+
+/// `client.version` / `server.version` from `container system status
+/// --format json` (present since 1.4.1). Either is None when absent.
+pub fn parse_system_versions(body: &str) -> (Option<String>, Option<String>) {
+    let Ok(v) = serde_json::from_str::<Value>(body) else {
+        return (None, None);
+    };
+    let field = |side: &str| {
+        v.get(side)
+            .and_then(|o| o.get("version"))
+            .and_then(Value::as_str)
+            .map(String::from)
+    };
+    (field("client"), field("server"))
 }
 
 /// True when `container system status` reports the services up. 1.4.1's
@@ -2131,5 +2232,85 @@ mod tests {
         assert_eq!(match_stat(&stats, "stack_web").unwrap().id, "stack_web");
         assert!(match_stat(&stats, "stack_").is_none());
         assert!(match_stat(&stats, "stack_web_extra").is_none());
+    }
+
+    const IMAGE_LS_ONE: &str = r#"[{"configuration":{"name":"docker.io/library/alpine:latest","descriptor":{"digest":"sha256:0123456789abcdef"}},"variants":[{"size":1073741824}]}]"#;
+
+    #[test]
+    fn image_ls_partial_output_returns_images_and_warning() {
+        let stderr =
+            "Warning: skipping image foo: bad manifest\nError: failed to read 2 image(s)\n";
+        let l = parse_image_ls(false, IMAGE_LS_ONE.as_bytes(), stderr, &"exit status: 1").unwrap();
+        assert_eq!(l.images.len(), 1);
+        assert_eq!(l.images[0].reference, "docker.io/library/alpine:latest");
+        let w = l.warning.unwrap();
+        assert!(w.starts_with("2 images couldn't be read: "), "{w}");
+        assert!(w.contains("bad manifest"));
+    }
+
+    #[test]
+    fn image_ls_partial_singular_and_unknown_count() {
+        let l = parse_image_ls(false, b"[]", "failed to read 1 image(s)", &"x").unwrap();
+        assert!(l.images.is_empty());
+        assert!(l.warning.unwrap().starts_with("1 image couldn't be read"));
+        let l = parse_image_ls(false, b"[]", "", &"x").unwrap();
+        assert_eq!(l.warning.as_deref(), Some("Some images couldn't be read"));
+    }
+
+    #[test]
+    fn image_ls_nonzero_with_garbage_is_an_error() {
+        let e = parse_image_ls(false, b"", SERVICES_DOWN, &"exit status: 1").unwrap_err();
+        assert!(is_services_down_error(&e.to_string()));
+        assert!(parse_image_ls(false, b"not json", "boom", &"x").is_err());
+    }
+
+    #[test]
+    fn image_ls_success_has_no_warning() {
+        let l = parse_image_ls(true, IMAGE_LS_ONE.as_bytes(), "", &"ok").unwrap();
+        assert_eq!(l.images.len(), 1);
+        assert!(l.warning.is_none());
+        assert!(parse_image_ls(true, b"nope", "", &"ok").is_err());
+    }
+
+    #[test]
+    fn services_down_matches_1_6_plugin_text() {
+        // Verbatim 1.6+/1.7 text for every subcommand incl. build/builder.
+        for sub in ["build", "builder status", "image ls"] {
+            let msg = format!(
+                "`container {sub}` exited exit status: 64: Error: Plugins are unavailable. Start the container system services and retry:\n\n    container system start"
+            );
+            assert!(is_services_down_error(&msg), "{sub}");
+        }
+        assert!(is_services_down_error("Plugins are unavailable."));
+    }
+
+    #[test]
+    fn map_clean_unsupported_handles_1_5_wording() {
+        let e =
+            anyhow!("`container clean abc` exited exit status: 64: Error: unknown command 'clean'");
+        assert_eq!(
+            map_clean_unsupported(e).to_string(),
+            "`container clean` requires Apple container 1.4 or later"
+        );
+        // Wording without exit 64 is not remapped.
+        let e = anyhow!("`container clean abc` exited exit status: 1: unknown command 'clean'");
+        assert!(map_clean_unsupported(e)
+            .to_string()
+            .contains("exit status: 1"));
+    }
+
+    #[test]
+    fn parse_system_versions_reads_client_and_server() {
+        let body =
+            r#"{"client":{"version":"1.7.1"},"server":{"version":"1.4.1"},"status":"running"}"#;
+        assert_eq!(
+            parse_system_versions(body),
+            (Some("1.7.1".into()), Some("1.4.1".into()))
+        );
+        assert_eq!(
+            parse_system_versions("{\"status\":\"running\"}"),
+            (None, None)
+        );
+        assert_eq!(parse_system_versions("table output"), (None, None));
     }
 }

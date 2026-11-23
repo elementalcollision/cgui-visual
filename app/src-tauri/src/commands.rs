@@ -68,6 +68,17 @@ pub async fn list_images() -> Result<Vec<Image>, String> {
     list_or_fixture(runtime::list_images, fixtures::images).await
 }
 
+/// `list_images` plus the partial-read warning (container >= 1.6 skips
+/// unreadable images and exits 1). Drives the Images view banner.
+#[tauri::command]
+pub async fn list_images_checked() -> Result<runtime::ImageListing, String> {
+    list_or_fixture(runtime::list_images_checked, || runtime::ImageListing {
+        images: fixtures::images(),
+        warning: None,
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn list_volumes() -> Result<Vec<Volume>, String> {
     list_or_fixture(runtime::list_volumes, fixtures::volumes).await
@@ -266,6 +277,12 @@ pub async fn builder_delete() -> Result<(), String> {
 #[tauri::command]
 pub async fn system_start() -> Result<(), String> {
     runtime::system_start().await.map_err(err_str)
+}
+
+// Stop then start the services; fixes a stale apiserver after an upgrade.
+#[tauri::command]
+pub async fn system_restart() -> Result<(), String> {
+    runtime::system_restart().await.map_err(err_str)
 }
 
 #[tauri::command]

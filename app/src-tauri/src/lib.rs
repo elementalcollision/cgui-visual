@@ -495,6 +495,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::list_containers,
             commands::list_images,
+            commands::list_images_checked,
             commands::list_volumes,
             commands::list_networks,
             commands::list_stacks,
@@ -543,6 +544,7 @@ pub fn run() {
             commands::builder_delete,
             commands::system_start,
             commands::system_stop,
+            commands::system_restart,
             commands::system_status,
             commands::start_build,
             commands::machine_list,
