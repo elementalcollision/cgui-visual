@@ -8,6 +8,8 @@ import { api, type Prefs } from './api';
 import { FramelessChrome, Sidebar, TopBar, StatusBar } from './components';
 import { ContainersView, ImagesView, VolumesView, NetworksView, StacksView, LogsView } from './views';
 import { ToastTray, withToast } from './toast';
+import { askConfirm } from './dialogs';
+import { TextPromptHost } from './TextPromptHost';
 import { errMessage } from './loadState';
 
 // All modal code is split into a separate chunk and only fetched on first
@@ -64,8 +66,8 @@ export default function App() {
     };
     const h = handlers[tab];
     if (!h) return null;
-    return () => {
-      if (!confirm(h.msg)) return;
+    return async () => {
+      if (!(await askConfirm(h.msg, { title: `Prune ${tab}`, okLabel: 'Prune' }))) return;
       withToast(`prune ${tab}`, h.call())
         .then(() => setPruneTick(n => n + 1))
         .catch(() => {});
@@ -210,9 +212,17 @@ export default function App() {
             toast(`You're on the latest version (${__APP_VERSION__})`, 'info');
             return;
           }
-          if (!confirm(`cgui-visual ${update.version} is available. Install now?\n\n${update.body ?? ''}`)) {
-            return;
-          }
+          // Native dialog (window.confirm is unusable in the packaged app —
+          // see dialogs.ts). Nothing is downloaded unless the user picks
+          // "Install and Relaunch".
+          const notes = (update.body ?? '').trim();
+          const accepted = await askConfirm(
+            `cgui-visual ${update.version} is available (you have ${update.currentVersion ?? __APP_VERSION__}).` +
+              (notes ? `\n\n${notes.length > 1200 ? `${notes.slice(0, 1200)}…` : notes}` : '') +
+              '\n\nThe app will download the update, install it and relaunch.',
+            { title: 'Update available', okLabel: 'Install and Relaunch', cancelLabel: 'Later', kind: 'info' },
+          );
+          if (!accepted) return;
           toast(`Downloading ${update.version}…`, 'info');
           await update.downloadAndInstall();
           const { relaunch } = await import('@tauri-apps/plugin-process');
@@ -490,6 +500,7 @@ export default function App() {
           </Suspense>
         )}
         <ToastTray t={t} />
+        <TextPromptHost t={t} />
       </div>
     </div>
   );
