@@ -38,6 +38,24 @@ pub async fn inspect(id: &str) -> Result<String> {
     inspect_args(&["inspect", id]).await
 }
 
+/// Current run identity of one container, straight from `inspect`:
+/// `(running, started_at)`. Used to confirm that a log read really belongs
+/// to the run it was planned for (a container can restart between the poll
+/// that planned the read and the read itself). Errors when the container no
+/// longer exists.
+pub async fn run_info(id: &str) -> Result<(bool, Option<i64>)> {
+    reject_flag_like("container id", id)?;
+    let bytes = run(&["inspect", id]).await?;
+    let v: Value = serde_json::from_slice(&bytes)?;
+    let first = v
+        .as_array()
+        .and_then(|a| a.first())
+        .cloned()
+        .ok_or_else(|| anyhow!("container {id} not found"))?;
+    let c = parse_container(first);
+    Ok((c.status.eq_ignore_ascii_case("running"), c.started_unix))
+}
+
 pub(super) async fn inspect_args(args: &[&str]) -> Result<String> {
     let bytes = run(args).await?;
     match serde_json::from_slice::<Value>(&bytes) {
