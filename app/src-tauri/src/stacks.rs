@@ -448,15 +448,22 @@ fn restart_warnings(stack: &StackToml) -> Vec<String> {
         .collect()
 }
 
+/// The `$ container run ...` line shown in the stack-up log. Environment
+/// values are masked (`-e KEY=***`); the real argv is untouched.
+fn run_log_line(argv: &[String]) -> String {
+    format!("$ container {}", runtime::mask_env_args(argv).join(" "))
+}
+
 pub async fn stack_up(name: &str) -> Result<Vec<String>> {
     let stack = load_one(name)?;
     validate_stack_names(&stack)?;
     let mut log: Vec<String> = Vec::new();
     log.extend(restart_warnings(&stack));
     for svc in topo_order(&stack) {
+        runtime::reject_flag_like("image reference", &svc.image)?;
         let argv = run_args(&stack.name, svc);
         let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
-        log.push(format!("$ container {}", argv.join(" ")));
+        log.push(run_log_line(&argv));
         match runtime_run(&argv_ref).await {
             Ok(line) => log.push(line),
             Err(e) => {
@@ -669,7 +676,7 @@ async fn probe_tcp(target: Option<&str>) -> String {
 async fn probe_http(target: Option<&str>, expect: &[u16]) -> String {
     let Some(t) = target else { return "—".into() };
     let url = http_url_for(t);
-    let fut = Command::new("curl")
+    let fut = Command::new("/usr/bin/curl")
         .kill_on_drop(true)
         .args([
             "-s",
@@ -847,6 +854,25 @@ mod tests {
         assert!(argv.contains(&"-e".to_string()));
         assert!(argv.contains(&"POSTGRES_USER=x".to_string()));
         assert!(argv.contains(&"pgvector:pg16".to_string()));
+    }
+
+    #[test]
+    fn run_log_line_masks_env_values_only_in_the_log() {
+        let svc = ServiceToml {
+            name: "db".into(),
+            image: "postgres:16".into(),
+            env: [("POSTGRES_PASSWORD".to_string(), "s3cret".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let argv = run_args("myapp", &svc);
+        let line = run_log_line(&argv);
+        assert!(line.contains("-e POSTGRES_PASSWORD=***"), "{line}");
+        assert!(!line.contains("s3cret"), "{line}");
+        assert!(line.contains("--name myapp_db"), "{line}");
+        // The argv that is actually executed keeps the real value.
+        assert!(argv.contains(&"POSTGRES_PASSWORD=s3cret".to_string()));
     }
 
     #[test]

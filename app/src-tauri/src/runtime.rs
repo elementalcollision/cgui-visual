@@ -64,6 +64,31 @@ pub fn validate_entity_name(kind: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Defence in depth for values handed to the CLI as *positional*
+/// arguments (ids, names, image references, paths). We never go through a
+/// shell, but a value such as `--all` supplied as an id would still be read
+/// by the CLI as a flag. Reject empty values and anything starting with `-`.
+/// Users with a file literally named `-foo` can pass `./-foo`.
+///
+/// Called at the `runtime.rs` function boundary (and from the few
+/// `commands.rs` / `pty.rs` spawners) so every caller is covered.
+pub fn reject_flag_like(kind: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(anyhow!("{kind} must not be empty"));
+    }
+    if value.starts_with('-') {
+        let hint = if kind.ends_with("path") || kind == "build context" {
+            " (prefix it with `./` to use a path that starts with `-`)"
+        } else {
+            ""
+        };
+        return Err(anyhow!(
+            "{kind} `{value}` must not start with `-` (it would be read as a command-line flag){hint}"
+        ));
+    }
+    Ok(())
+}
+
 /// Prepend the standard macOS install locations to our process's PATH
 /// so spawned children can resolve `container` / `docker` / `podman` /
 /// `trivy` regardless of how the app was launched.
@@ -201,6 +226,35 @@ pub async fn probe_bin(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Render an argv for logs and error text with environment values hidden:
+/// `-e KEY=value` / `--env KEY=value` / `--env=KEY=value` become `KEY=***`.
+/// Display only; the argv actually executed is never modified.
+pub fn mask_env_args<S: AsRef<str>>(args: &[S]) -> Vec<String> {
+    fn mask(kv: &str) -> String {
+        match kv.split_once('=') {
+            Some((k, _)) => format!("{k}=***"),
+            None => kv.to_string(), // `-e KEY` (inherit) carries no value
+        }
+    }
+    let mut out = Vec::with_capacity(args.len());
+    let mut mask_next = false;
+    for a in args {
+        let a = a.as_ref();
+        if mask_next {
+            out.push(mask(a));
+            mask_next = false;
+        } else if a == "-e" || a == "--env" {
+            out.push(a.to_string());
+            mask_next = true;
+        } else if let Some(kv) = a.strip_prefix("--env=") {
+            out.push(format!("--env={}", mask(kv)));
+        } else {
+            out.push(a.to_string());
+        }
+    }
+    out
+}
+
 async fn run(args: &[&str]) -> Result<Vec<u8>> {
     run_with_timeout(args, RUN_TIMEOUT).await
 }
@@ -214,7 +268,7 @@ pub(crate) async fn run_with_timeout(args: &[&str], timeout: Duration) -> Result
         return Err(anyhow!(
             "`{} {}` exited {}: {}",
             bin(),
-            args.join(" "),
+            mask_env_args(args).join(" "),
             out.status,
             String::from_utf8_lossy(&out.stderr).trim()
         ));
@@ -233,11 +287,17 @@ async fn run_output(args: &[&str], timeout: Duration) -> Result<std::process::Ou
             anyhow!(
                 "`{} {}` timed out after {}s",
                 bin(),
-                args.join(" "),
+                mask_env_args(args).join(" "),
                 timeout.as_secs()
             )
         })?
-        .with_context(|| format!("failed to spawn `{} {}`", bin(), args.join(" ")))
+        .with_context(|| {
+            format!(
+                "failed to spawn `{} {}`",
+                bin(),
+                mask_env_args(args).join(" ")
+            )
+        })
 }
 
 // Raw ls + stats; the merge happens in state.rs because CPU% needs deltas
@@ -756,18 +816,22 @@ fn parse_network(v: Value, refs: &std::collections::HashMap<String, u32>) -> Net
 // ─── Inspect / actions ────────────────────────────────────────────────
 
 pub async fn inspect(id: &str) -> Result<String> {
+    reject_flag_like("container id", id)?;
     inspect_args(&["inspect", id]).await
 }
 
 pub async fn inspect_volume(name: &str) -> Result<String> {
+    reject_flag_like("volume name", name)?;
     inspect_args(&["volume", "inspect", name]).await
 }
 
 pub async fn inspect_network(id: &str) -> Result<String> {
+    reject_flag_like("network name", id)?;
     inspect_args(&["network", "inspect", id]).await
 }
 
 pub async fn inspect_image(reference: &str) -> Result<String> {
+    reject_flag_like("image reference", reference)?;
     inspect_args(&["image", "inspect", reference]).await
 }
 
@@ -781,11 +845,13 @@ async fn inspect_args(args: &[&str]) -> Result<String> {
 }
 
 pub async fn start(id: &str) -> Result<()> {
+    reject_flag_like("container id", id)?;
     run_with_timeout(&["start", id], LIFECYCLE_TIMEOUT)
         .await
         .map(|_| ())
 }
 pub async fn stop(id: &str) -> Result<()> {
+    reject_flag_like("container id", id)?;
     run_with_timeout(&["stop", id], LIFECYCLE_TIMEOUT)
         .await
         .map(|_| ())
@@ -793,6 +859,10 @@ pub async fn stop(id: &str) -> Result<()> {
 /// Kill with an optional signal (`container kill -s <signal> <id>`).
 /// `None` keeps the CLI's default (SIGKILL).
 pub async fn kill(id: &str, signal: Option<&str>) -> Result<()> {
+    reject_flag_like("container id", id)?;
+    if let Some(sig) = signal.filter(|s| !s.is_empty()) {
+        reject_flag_like("signal", sig)?;
+    }
     match signal.filter(|s| !s.is_empty()) {
         Some(sig) => run_with_timeout(&["kill", "-s", sig, id], LIFECYCLE_TIMEOUT)
             .await
@@ -803,11 +873,13 @@ pub async fn kill(id: &str, signal: Option<&str>) -> Result<()> {
     }
 }
 pub async fn delete(id: &str) -> Result<()> {
+    reject_flag_like("container id", id)?;
     run_with_timeout(&["delete", id], LIFECYCLE_TIMEOUT)
         .await
         .map(|_| ())
 }
 pub async fn restart(id: &str) -> Result<()> {
+    reject_flag_like("container id", id)?;
     if let Err(e) = run_with_timeout(&["stop", id], LIFECYCLE_TIMEOUT).await {
         // Only "already stopped" is expected here; anything else (services
         // down, timeout, unknown id) must reach the user instead of being
@@ -891,6 +963,9 @@ pub async fn clean_containers(ids: &[String]) -> Result<()> {
     if ids.is_empty() {
         return Ok(());
     }
+    for id in ids {
+        reject_flag_like("container id", id)?;
+    }
     let argv = clean_argv(ids);
     let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
     run_with_timeout(&argv_ref, RUN_LONG_TIMEOUT)
@@ -936,7 +1011,7 @@ pub struct RunArgs {
     #[serde(default)]
     pub env: Vec<String>, // "KEY=value" each
     #[serde(default)]
-    pub command: Option<String>, // free-form; split on spaces
+    pub command: Option<String>, // free-form; shell-style splitting (split_command)
     #[serde(default)]
     pub cpus: Option<u32>,
     #[serde(default)]
@@ -959,7 +1034,88 @@ pub struct RunArgs {
     pub rosetta: bool,
 }
 
-pub fn run_image_argv(args: &RunArgs) -> Vec<String> {
+/// Split a command line into words the way a POSIX shell would, minus
+/// every expansion (no variables, globs, substitution or operators):
+///
+/// * unquoted whitespace separates words;
+/// * `'...'` is literal;
+/// * inside `"..."` a backslash escapes only `"`, `\`, `$` and `` ` ``
+///   (before any other character it is kept as-is), as in POSIX;
+/// * outside quotes a backslash makes the next character literal, and
+///   backslash-newline is a line continuation;
+/// * `""` / `''` produce an empty word.
+///
+/// An unterminated quote (or a trailing backslash) is an error so the user
+/// sees what is wrong instead of silently running a different command.
+pub fn split_command(input: &str) -> Result<Vec<String>> {
+    let mut words: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut in_word = false;
+    let mut chars = input.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            c if c.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut cur));
+                    in_word = false;
+                }
+            }
+            '\'' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('\'') => break,
+                        Some(ch) => cur.push(ch),
+                        None => {
+                            return Err(anyhow!("unterminated single quote (') in: {input}"));
+                        }
+                    }
+                }
+            }
+            '"' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('"') => break,
+                        Some('\\') => match chars.next() {
+                            Some(e @ ('"' | '\\' | '$' | '`')) => cur.push(e),
+                            Some('\n') => {}
+                            Some(other) => {
+                                cur.push('\\');
+                                cur.push(other);
+                            }
+                            None => {
+                                return Err(anyhow!("unterminated double quote (\") in: {input}"));
+                            }
+                        },
+                        Some(ch) => cur.push(ch),
+                        None => {
+                            return Err(anyhow!("unterminated double quote (\") in: {input}"));
+                        }
+                    }
+                }
+            }
+            '\\' => match chars.next() {
+                Some('\n') => {}
+                Some(e) => {
+                    in_word = true;
+                    cur.push(e);
+                }
+                None => return Err(anyhow!("dangling backslash at the end of: {input}")),
+            },
+            other => {
+                in_word = true;
+                cur.push(other);
+            }
+        }
+    }
+    if in_word {
+        words.push(cur);
+    }
+    Ok(words)
+}
+
+pub fn run_image_argv(args: &RunArgs) -> Result<Vec<String>> {
     let mut argv: Vec<String> = vec!["run".into(), "-d".into()];
     let mut opt = |flag: &str, val: Option<&str>| {
         if let Some(v) = val.filter(|s| !s.is_empty()) {
@@ -999,18 +1155,17 @@ pub fn run_image_argv(args: &RunArgs) -> Vec<String> {
     }
     argv.push(args.image.clone());
     if let Some(cmd) = args.command.as_deref().filter(|s| !s.is_empty()) {
-        for tok in cmd.split_whitespace() {
-            argv.push(tok.into());
-        }
+        argv.extend(split_command(cmd).context("could not parse the command")?);
     }
-    argv
+    Ok(argv)
 }
 
 pub async fn run_image(args: RunArgs) -> Result<String> {
+    reject_flag_like("image reference", &args.image)?;
     if let Some(name) = args.name.as_deref().filter(|s| !s.is_empty()) {
         validate_entity_name("container", name)?;
     }
-    let argv = run_image_argv(&args);
+    let argv = run_image_argv(&args)?;
     let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
     // First-run image pulls + VM provisioning blow past the default
     // inspect-sized timeout; use the long envelope so the modal isn't
@@ -1020,10 +1175,13 @@ pub async fn run_image(args: RunArgs) -> Result<String> {
 }
 
 pub async fn delete_image(reference: &str) -> Result<()> {
+    reject_flag_like("image reference", reference)?;
     run(&["image", "delete", reference]).await.map(|_| ())
 }
 
 pub async fn tag_image(source: &str, target: &str) -> Result<()> {
+    reject_flag_like("source image reference", source)?;
+    reject_flag_like("target image reference", target)?;
     run(&["image", "tag", source, target]).await.map(|_| ())
 }
 
@@ -1182,6 +1340,8 @@ pub fn build_argv(args: &BuildArgs) -> Vec<String> {
 // streams via spawn + drain_lines in commands.rs instead (progress UI).
 
 pub async fn save_image(reference: &str, output: &str) -> Result<()> {
+    reject_flag_like("image reference", reference)?;
+    reject_flag_like("output path", output)?;
     run_with_timeout(
         &["image", "save", "-o", output, reference],
         RUN_LONG_TIMEOUT,
@@ -1191,6 +1351,7 @@ pub async fn save_image(reference: &str, output: &str) -> Result<()> {
 }
 
 pub async fn load_image(input: &str) -> Result<String> {
+    reject_flag_like("input path", input)?;
     let bytes = run_with_timeout(&["image", "load", "-i", input], RUN_LONG_TIMEOUT).await?;
     Ok(String::from_utf8_lossy(&bytes).trim().to_string())
 }
@@ -1199,12 +1360,16 @@ pub async fn load_image(input: &str) -> Result<String> {
 
 /// `container copy <src> <dst>` — either side may be `<id>:<path>`.
 pub async fn copy_path(src: &str, dst: &str) -> Result<()> {
+    reject_flag_like("source path", src)?;
+    reject_flag_like("destination path", dst)?;
     run_with_timeout(&["copy", src, dst], RUN_LONG_TIMEOUT)
         .await
         .map(|_| ())
 }
 
 pub async fn export_container(id: &str, output: &str) -> Result<()> {
+    reject_flag_like("container id", id)?;
+    reject_flag_like("output path", output)?;
     run_with_timeout(&["export", "-o", output, id], RUN_LONG_TIMEOUT)
         .await
         .map(|_| ())
@@ -1245,6 +1410,7 @@ pub async fn machine_create(
     no_boot: bool,
 ) -> Result<()> {
     validate_entity_name("machine", name)?;
+    reject_flag_like("image reference", image)?;
     let mut argv: Vec<String> = vec![
         "machine".into(),
         "create".into(),
@@ -1270,18 +1436,21 @@ pub async fn machine_create(
 }
 
 pub async fn machine_stop(name: &str) -> Result<()> {
+    reject_flag_like("machine name", name)?;
     run_with_timeout(&["machine", "stop", name], RUN_LONG_TIMEOUT)
         .await
         .map(|_| ())
 }
 
 pub async fn machine_delete(name: &str) -> Result<()> {
+    reject_flag_like("machine name", name)?;
     run_with_timeout(&["machine", "delete", name], RUN_LONG_TIMEOUT)
         .await
         .map(|_| ())
 }
 
 pub async fn machine_set_default(name: &str) -> Result<()> {
+    reject_flag_like("machine name", name)?;
     run(&["machine", "set-default", name]).await.map(|_| ())
 }
 
@@ -1318,6 +1487,8 @@ pub async fn registry_list() -> Result<Vec<RegistryLogin>> {
 /// crash logs could capture. The CLI stores it in the user's keychain;
 /// we never persist it.
 pub async fn registry_login(server: &str, username: &str, password: &str) -> Result<()> {
+    reject_flag_like("registry server", server)?;
+    reject_flag_like("registry username", username)?;
     let mut child = Command::new(bin())
         .args([
             "registry",
@@ -1358,6 +1529,7 @@ pub async fn registry_login(server: &str, username: &str, password: &str) -> Res
 }
 
 pub async fn registry_logout(server: &str) -> Result<()> {
+    reject_flag_like("registry server", server)?;
     run(&["registry", "logout", server]).await.map(|_| ())
 }
 
@@ -1408,9 +1580,11 @@ pub async fn system_df() -> Result<DiskUsage> {
     serde_json::from_slice(&bytes).context("parse `system df` json")
 }
 pub async fn delete_volume(name: &str) -> Result<()> {
+    reject_flag_like("volume name", name)?;
     run(&["volume", "delete", name]).await.map(|_| ())
 }
 pub async fn delete_network(id: &str) -> Result<()> {
+    reject_flag_like("network name", id)?;
     run(&["network", "delete", id]).await.map(|_| ())
 }
 
@@ -1418,6 +1592,7 @@ pub async fn delete_network(id: &str) -> Result<()> {
 // macOS-only because the host project (Apple's `container` runtime) is
 // macOS-only.
 pub fn exec_in_terminal(id: &str) -> Result<()> {
+    reject_flag_like("container id", id)?;
     let runtime_bin = bin();
     let cmd_line = format!(
         "{} exec -it {} /bin/sh",
@@ -1428,11 +1603,11 @@ pub fn exec_in_terminal(id: &str) -> Result<()> {
         r#"tell application "Terminal" to do script "{}""#,
         cmd_line.replace('\\', "\\\\").replace('"', "\\\"")
     );
-    std::process::Command::new("osascript")
+    std::process::Command::new("/usr/bin/osascript")
         .args(["-e", &script])
         .spawn()
         .with_context(|| "failed to spawn osascript")?;
-    let _ = std::process::Command::new("osascript")
+    let _ = std::process::Command::new("/usr/bin/osascript")
         .args(["-e", r#"tell application "Terminal" to activate"#])
         .status();
     Ok(())
@@ -1461,7 +1636,7 @@ pub fn spawn(args: &[&str]) -> Result<Child> {
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .with_context(|| format!("spawn `{} {}`", bin(), args.join(" ")))
+        .with_context(|| format!("spawn `{} {}`", bin(), mask_env_args(args).join(" ")))
 }
 
 // Drain stdout+stderr line-by-line, invoking `on_line` for each. Returns when
@@ -1569,6 +1744,204 @@ mod tests {
         assert_eq!(shell_quote("path/to/bin"), "path/to/bin");
         assert_eq!(shell_quote("has space"), "'has space'");
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    fn words(s: &str) -> Vec<String> {
+        split_command(s).unwrap()
+    }
+
+    #[test]
+    fn split_command_plain_whitespace() {
+        assert_eq!(
+            words("node server.js --port 3000"),
+            ["node", "server.js", "--port", "3000"]
+        );
+        assert_eq!(words("  a \t b\n c  "), ["a", "b", "c"]);
+        assert!(words("").is_empty());
+        assert!(words("   ").is_empty());
+    }
+
+    #[test]
+    fn split_command_sh_c_with_quoted_script() {
+        // The F18 case: previously split into `"echo`, `hi`, `&&`, ...
+        assert_eq!(
+            words(r#"sh -c "echo hi && sleep 5""#),
+            ["sh", "-c", "echo hi && sleep 5"]
+        );
+        assert_eq!(
+            words("sh -c 'echo hi && sleep 5'"),
+            ["sh", "-c", "echo hi && sleep 5"]
+        );
+    }
+
+    #[test]
+    fn split_command_quote_rules() {
+        // single quotes are literal, including backslashes and double quotes
+        assert_eq!(words(r#"echo 'a "b" \n $x'"#), ["echo", r#"a "b" \n $x"#]);
+        // double quotes: \" and \\ escape, other backslashes stay
+        assert_eq!(
+            words(r#"echo "say \"hi\" \\ \n""#),
+            ["echo", r#"say "hi" \ \n"#]
+        );
+        // adjacent quoted/unquoted pieces join into one word
+        assert_eq!(words(r#"a"b c"'d e'f"#), ["ab cd ef"]);
+        // empty quotes make an empty word
+        assert_eq!(words(r#"echo "" ''"#), ["echo", "", ""]);
+        // backslash outside quotes escapes a space, a quote or a backslash
+        assert_eq!(words(r"echo a\ b \'c \\"), ["echo", "a b", "'c", "\\"]);
+        // line continuation disappears
+        assert_eq!(words("a \\\nb"), ["a", "b"]);
+        // a single quote inside double quotes is just a character
+        assert_eq!(words(r#"echo "it's""#), ["echo", "it's"]);
+    }
+
+    #[test]
+    fn split_command_unterminated_input_is_an_error() {
+        for bad in [
+            r#"sh -c "echo hi"#,
+            "sh -c 'echo hi",
+            "echo \\",
+            r#"echo "abc\"#,
+        ] {
+            let e = split_command(bad).unwrap_err().to_string();
+            assert!(
+                e.contains("unterminated") || e.contains("dangling"),
+                "{bad}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_image_argv_keeps_quoted_command_as_single_args() {
+        let args = RunArgs {
+            image: "alpine".into(),
+            command: Some(r#"sh -c "echo hi && sleep 5""#.into()),
+            ..Default::default()
+        };
+        let argv = run_image_argv(&args).unwrap();
+        assert_eq!(
+            &argv[argv.len() - 4..],
+            ["alpine", "sh", "-c", "echo hi && sleep 5"]
+        );
+        let bad = RunArgs {
+            image: "alpine".into(),
+            command: Some("sh -c \"oops".into()),
+            ..Default::default()
+        };
+        let e = format!("{:#}", run_image_argv(&bad).unwrap_err());
+        assert!(e.contains("unterminated"), "{e}");
+    }
+
+    #[test]
+    fn mask_env_args_hides_values_but_keeps_everything_else() {
+        let argv = [
+            "run",
+            "-d",
+            "--name",
+            "s_web",
+            "-e",
+            "DB_PASS=hunter2=x",
+            "-e",
+            "INHERIT",
+            "--env",
+            "A=1",
+            "--env=B=2",
+            "-p",
+            "80:80",
+            "img",
+            "sh",
+            "-e",
+            "not-env",
+        ];
+        let masked = mask_env_args(&argv);
+        assert_eq!(
+            masked,
+            [
+                "run",
+                "-d",
+                "--name",
+                "s_web",
+                "-e",
+                "DB_PASS=***",
+                "-e",
+                "INHERIT",
+                "--env",
+                "A=***",
+                "--env=B=***",
+                "-p",
+                "80:80",
+                "img",
+                "sh",
+                "-e",
+                "not-env",
+            ]
+        );
+        assert!(!masked.join(" ").contains("hunter2"));
+    }
+
+    #[test]
+    fn reject_flag_like_rejects_empty_and_dash_prefixed() {
+        assert!(reject_flag_like("container id", "").is_err());
+        assert!(reject_flag_like("container id", "--all").is_err());
+        assert!(reject_flag_like("container id", "-f").is_err());
+        assert!(reject_flag_like("container id", "web").is_ok());
+        assert!(reject_flag_like("image reference", "docker.io/library/alpine:3").is_ok());
+        // A dash anywhere but the front is fine.
+        assert!(reject_flag_like("container id", "my-app").is_ok());
+        assert!(reject_flag_like("path", "./-name").is_ok());
+        let e = reject_flag_like("output path", "-x")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("./"), "path errors should hint at ./: {e}");
+        let e = reject_flag_like("container id", "-x")
+            .unwrap_err()
+            .to_string();
+        assert!(!e.contains("./"), "non-path errors need no hint: {e}");
+    }
+
+    // Every runtime.rs entry point taking a positional value must reject a
+    // flag-like one *before* spawning anything (these run with no CLI).
+    #[tokio::test]
+    async fn runtime_entry_points_reject_flag_like_values() {
+        let bad = "--all";
+        assert!(inspect(bad).await.is_err());
+        assert!(inspect_volume(bad).await.is_err());
+        assert!(inspect_network(bad).await.is_err());
+        assert!(inspect_image(bad).await.is_err());
+        assert!(start(bad).await.is_err());
+        assert!(stop(bad).await.is_err());
+        assert!(kill(bad, None).await.is_err());
+        assert!(kill("web", Some("-9")).await.is_err());
+        assert!(delete(bad).await.is_err());
+        assert!(restart(bad).await.is_err());
+        assert!(clean_containers(&["ok1".into(), bad.into()]).await.is_err());
+        assert!(delete_image(bad).await.is_err());
+        assert!(tag_image(bad, "x:1").await.is_err());
+        assert!(tag_image("x:1", bad).await.is_err());
+        assert!(save_image(bad, "/tmp/o.tar").await.is_err());
+        assert!(save_image("x:1", "-o").await.is_err());
+        assert!(load_image(bad).await.is_err());
+        assert!(copy_path(bad, "/tmp/x").await.is_err());
+        assert!(copy_path("web:/etc/hosts", bad).await.is_err());
+        assert!(export_container(bad, "/tmp/o.tar").await.is_err());
+        assert!(export_container("web", bad).await.is_err());
+        assert!(machine_create("ok-machine", bad, None, None, true)
+            .await
+            .is_err());
+        assert!(machine_stop(bad).await.is_err());
+        assert!(machine_delete(bad).await.is_err());
+        assert!(machine_set_default(bad).await.is_err());
+        assert!(registry_login(bad, "u", "p").await.is_err());
+        assert!(registry_login("ghcr.io", bad, "p").await.is_err());
+        assert!(registry_logout(bad).await.is_err());
+        assert!(delete_volume(bad).await.is_err());
+        assert!(delete_network(bad).await.is_err());
+        assert!(exec_in_terminal(bad).is_err());
+        let args = RunArgs {
+            image: bad.into(),
+            ..Default::default()
+        };
+        assert!(run_image(args).await.is_err());
     }
 
     // Exercise the streaming line pump end-to-end against a controlled
@@ -1795,7 +2168,7 @@ mod tests {
             rm: true,
             rosetta: false,
         };
-        let argv = run_image_argv(&args);
+        let argv = run_image_argv(&args).unwrap();
         let s = argv.join(" ");
         assert!(s.starts_with("run -d "));
         for frag in [
@@ -1827,7 +2200,7 @@ mod tests {
             image: "redis:7".into(),
             ..Default::default()
         };
-        assert_eq!(run_image_argv(&args), vec!["run", "-d", "redis:7"]);
+        assert_eq!(run_image_argv(&args).unwrap(), vec!["run", "-d", "redis:7"]);
     }
 
     #[test]

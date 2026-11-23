@@ -171,7 +171,7 @@ fn strip_v_prefix(s: &str) -> String {
 
 async fn fetch_release(repo: &str) -> Option<GhRelease> {
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
-    let fut = Command::new("curl")
+    let fut = Command::new("/usr/bin/curl")
         .kill_on_drop(true)
         .args([
             "-sf",
