@@ -3,6 +3,7 @@ pub mod compose;
 mod doctor;
 mod fixtures;
 pub mod history;
+pub mod logpersist;
 mod menubar_hint;
 pub mod model;
 mod prefs;

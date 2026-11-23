@@ -623,6 +623,18 @@ fn write_log_batch(
     tx.commit()
 }
 
+/// Whether any log line is stored for `container_id`. `None` when the DB
+/// isn't initialised (nothing can be persisted).
+pub fn has_logs(container_id: &str) -> Option<bool> {
+    let conn = DB.get()?.lock().ok()?;
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM container_logs WHERE container_id = ?)",
+        params![container_id],
+        |r| r.get::<_, bool>(0),
+    )
+    .ok()
+}
+
 /// Load the most recent `limit` lines for one container, optionally
 /// filtered by a substring `query`. Returned in ascending-by-ts order
 /// so the LogsView can append them to its render buffer as if they
