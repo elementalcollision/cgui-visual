@@ -1780,7 +1780,7 @@ export function SettingsModal({
           <SettingsToggle
             t={t}
             label="Menu-bar mode"
-            hint="Closing the main window keeps cgui running in the menu bar. The tray icon shows the running container count."
+            hint="Closing the main window hides it instead of quitting: cgui keeps running in the menu bar (the Dock icon is hidden while the window is hidden) and the tray icon shows the running container count. Use the tray's Show cgui to bring the window back, or Quit cgui to exit. When off, closing the window quits cgui. Takes effect immediately."
             value={menubarMode}
             onChange={setMenubarMode}
           />

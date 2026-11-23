@@ -14,8 +14,9 @@ pub mod trivy;
 pub mod updates;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem, SubmenuBuilder},
@@ -50,12 +51,106 @@ fn parse_shortcut(
         .map_err(|e| format!("invalid accelerator '{accelerator}': {e:?}").into())
 }
 
-fn focus_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+// ─── Menubar mode / window visibility ───────────────────────────────────
+
+// Mirror of `Prefs::menubar_mode`, kept in memory so the window-close
+// handler and tray actions never touch disk. Seeded in setup and updated by
+// `set_menubar_mode` whenever the frontend saves prefs, so toggling the
+// setting takes effect immediately without a restart.
+static MENUBAR_MODE: AtomicBool = AtomicBool::new(false);
+
+// Set when the window is shown so the polling loop refreshes right away
+// instead of waiting out the slow hidden-window interval.
+static WAKE_TICK: AtomicBool = AtomicBool::new(false);
+
+// Polling cadence: fast while the window is on screen, slow while hidden in
+// the tray. Polling never stops entirely: the tray count and exit
+// notifications keep working with the window closed.
+const TICK_VISIBLE: Duration = Duration::from_secs(2);
+const TICK_HIDDEN: Duration = Duration::from_secs(10);
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum CloseAction {
+    // Let the close proceed. With the only window gone Tauri exits the app
+    // (the long-standing behaviour when menubar mode is off).
+    Quit,
+    // Cancel the close and hide the window; the app lives on in the tray.
+    HideToTray,
+}
+
+fn close_action(menubar_mode: bool) -> CloseAction {
+    if menubar_mode {
+        CloseAction::HideToTray
+    } else {
+        CloseAction::Quit
+    }
+}
+
+fn tick_interval(window_visible: bool) -> Duration {
+    if window_visible {
+        TICK_VISIBLE
+    } else {
+        TICK_HIDDEN
+    }
+}
+
+// The Dock icon is only dropped (Accessory policy) when menubar mode is on
+// and the window is hidden. Otherwise cgui is an ordinary Dock app.
+fn wants_dock_icon(menubar_mode: bool, window_visible: bool) -> bool {
+    !menubar_mode || window_visible
+}
+
+#[cfg(target_os = "macos")]
+fn apply_dock_policy<R: tauri::Runtime>(app: &tauri::AppHandle<R>, window_visible: bool) {
+    let policy = if wants_dock_icon(MENUBAR_MODE.load(Ordering::Relaxed), window_visible) {
+        tauri::ActivationPolicy::Regular
+    } else {
+        tauri::ActivationPolicy::Accessory
+    };
+    let _ = app.set_activation_policy(policy);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apply_dock_policy<R: tauri::Runtime>(_app: &tauri::AppHandle<R>, _window_visible: bool) {}
+
+fn main_window_visible<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    app.get_webview_window("main")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false)
+}
+
+fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    // Restore the Dock icon before showing so the window comes up as a
+    // normal, focusable app window.
+    apply_dock_policy(app, true);
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
     }
+    WAKE_TICK.store(true, Ordering::Relaxed);
+}
+
+fn hide_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.hide();
+    }
+    apply_dock_policy(app, false);
+}
+
+// Called from setup and from `save_prefs` so the pref applies live.
+pub(crate) fn set_menubar_mode<R: tauri::Runtime>(app: &tauri::AppHandle<R>, on: bool) {
+    MENUBAR_MODE.store(on, Ordering::Relaxed);
+    apply_dock_policy(app, main_window_visible(app));
+}
+
+// Runs once from RunEvent::Exit (tray Quit, Cmd-Q, last window closed).
+// Children outlive us otherwise: the PTY children and `container logs -f`.
+fn on_exit() {
+    pty::close_all();
+    // TODO(log-streams): call `commands::stop_all_log_streams()` here once
+    // the log-stream registry lands, so `container logs -f` children are
+    // killed on exit too.
 }
 
 fn register_summon_hotkey<R: tauri::Runtime>(
@@ -79,7 +174,7 @@ fn register_summon_hotkey<R: tauri::Runtime>(
     gs.on_shortcut(sc, move |_app, _shortcut, event| {
         // Only react on key-press; tauri emits both Pressed and Released.
         if event.state == ShortcutState::Pressed {
-            focus_main_window(&app_handle);
+            show_main_window(&app_handle);
         }
     })?;
 
@@ -131,6 +226,19 @@ pub fn run() {
         // dir as the prefs JSON via Tauri's default scope).
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .manage(Arc::new(state::History::new()))
+        // Menubar mode: with it on, closing the main window hides it and
+        // leaves the app running in the tray. With it off the close
+        // proceeds and, as the only window, ends the app (Tauri default).
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main"
+                    && close_action(MENUBAR_MODE.load(Ordering::Relaxed)) == CloseAction::HideToTray
+                {
+                    api.prevent_close();
+                    hide_main_window(window.app_handle());
+                }
+            }
+        })
         .setup(|app| {
             // Patch PATH first so every subsequent runtime probe / child
             // spawn (container, docker, podman, trivy) can find binaries
@@ -142,6 +250,7 @@ pub fn run() {
             // Load prefs once: seed runtime + register optional global hotkey.
             let initial_prefs = prefs::Prefs::load();
             runtime::set_bin(&initial_prefs.runtime);
+            MENUBAR_MODE.store(initial_prefs.menubar_mode, Ordering::Relaxed);
 
             // Open the long-form history sidecar (B6). Failures only mean
             // the trends tab will be empty; the live UI keeps working.
@@ -255,18 +364,8 @@ pub fn run() {
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.unminimize();
-                            let _ = w.set_focus();
-                        }
-                    }
-                    "hide" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.hide();
-                        }
-                    }
+                    "show" => show_main_window(app),
+                    "hide" => hide_main_window(app),
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -283,11 +382,9 @@ pub fn run() {
                             let visible = w.is_visible().unwrap_or(false);
                             let focused = w.is_focused().unwrap_or(false);
                             if visible && focused {
-                                let _ = w.hide();
+                                hide_main_window(app);
                             } else {
-                                let _ = w.show();
-                                let _ = w.unminimize();
-                                let _ = w.set_focus();
+                                show_main_window(app);
                             }
                         }
                     }
@@ -302,10 +399,17 @@ pub fn run() {
             // not present in the latest poll is dropped at the bottom.
             let mut prev_state: HashMap<String, (String, Option<i32>)> = HashMap::new();
             tauri::async_runtime::spawn(async move {
-                let mut tick = tokio::time::interval(Duration::from_secs(2));
-                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                // Wake every second to check whether a poll is due: the
+                // interval depends on window visibility, and showing the
+                // window requests an immediate refresh (WAKE_TICK).
+                let mut last = Instant::now() - TICK_HIDDEN;
                 loop {
-                    tick.tick().await;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    let due = last.elapsed() >= tick_interval(main_window_visible(&handle));
+                    if !(WAKE_TICK.swap(false, Ordering::Relaxed) || due) {
+                        continue;
+                    }
+                    last = Instant::now();
                     if !runtime::available().await {
                         if let Some(t) = handle.tray_by_id("main") {
                             let _ = t.set_title(Some(fmt_tray_title(None)));
@@ -458,6 +562,45 @@ pub fn run() {
             commands::restore_stack_from_path,
             hotkey_cmd::set_global_hotkey,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| match event {
+            tauri::RunEvent::Exit => on_exit(),
+            // Dock icon clicked while no window is visible (not reachable
+            // in menubar mode, where the Dock icon is hidden, but cheap).
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } => show_main_window(app),
+            _ => {
+                let _ = app;
+            }
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn close_action_follows_menubar_mode() {
+        assert_eq!(close_action(true), CloseAction::HideToTray);
+        assert_eq!(close_action(false), CloseAction::Quit);
+    }
+
+    #[test]
+    fn tick_slows_while_hidden_but_never_stops() {
+        assert_eq!(tick_interval(true), Duration::from_secs(2));
+        assert_eq!(tick_interval(false), Duration::from_secs(10));
+        assert!(tick_interval(false) > tick_interval(true));
+    }
+
+    #[test]
+    fn dock_icon_only_hidden_in_menubar_mode_with_window_hidden() {
+        assert!(wants_dock_icon(false, true));
+        assert!(wants_dock_icon(false, false));
+        assert!(wants_dock_icon(true, true));
+        assert!(!wants_dock_icon(true, false));
+    }
 }

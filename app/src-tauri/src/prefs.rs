@@ -13,8 +13,8 @@ pub struct Prefs {
     pub runtime: String,
     pub last_tab: String,
     /// When true, closing the main window hides it instead of quitting so
-    /// the menu-bar tray stays alive. (UI affordance only — the close
-    /// button still respects this in setup.)
+    /// the menu-bar tray stays alive and the Dock icon is hidden while the
+    /// window is hidden. Applied live by `save_prefs` (see lib.rs).
     pub menubar_mode: bool,
     /// Global hotkey that summons + focuses the main window. Empty string
     /// disables. Format follows tauri-plugin-global-shortcut, e.g.
