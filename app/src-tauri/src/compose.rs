@@ -190,6 +190,8 @@ pub fn convert(compose: ComposeFile, default_name: &str) -> Result<StackToml> {
             "compose file has no `name:` and no fallback could be derived"
         ));
     }
+    crate::stacks::validate_stack_name(&stack_name)
+        .context("compose project name can not be used as a stack name")?;
 
     let mut services: Vec<ServiceToml> = Vec::with_capacity(compose.services.len());
 
@@ -644,6 +646,18 @@ services:
         assert_eq!(s.services.len(), 1);
         assert_eq!(s.services[0].name, "web");
         assert_eq!(s.services[0].image, "nginx:1.27");
+    }
+
+    #[test]
+    fn convert_rejects_path_traversal_project_names() {
+        for bad in ["../../x", "/tmp/x", "a/b", ".."] {
+            let yaml = format!("name: \"{bad}\"\nservices:\n  web: {{ image: nginx }}\n");
+            let cf: ComposeFile = serde_yaml::from_str(&yaml).unwrap();
+            assert!(convert(cf, "fallback").is_err(), "should reject {bad}");
+        }
+        // Also an unusable fallback (directory) name.
+        let cf: ComposeFile = serde_yaml::from_str("services:\n  web: { image: nginx }\n").unwrap();
+        assert!(convert(cf, "../up").is_err());
     }
 
     #[test]

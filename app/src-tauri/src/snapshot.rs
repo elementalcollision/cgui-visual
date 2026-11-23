@@ -49,8 +49,7 @@ pub struct SnapshotStack {
 /// JSON string suitable for piping into a Blob download. Returns Err
 /// when the stack file can't be located or read.
 pub fn create(name: &str, note: &str) -> Result<String> {
-    let dir = crate::stacks::stacks_dir().context("could not resolve $XDG_CONFIG_HOME or $HOME")?;
-    let path = dir.join(format!("{name}.toml"));
+    let path = crate::stacks::stack_path(name)?;
     let toml_body =
         std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
 
@@ -74,6 +73,11 @@ pub fn create(name: &str, note: &str) -> Result<String> {
 /// name unless `overwrite` is true; returns the destination path on
 /// success so the UI can surface it in a toast.
 pub fn restore(json: &str, overwrite: bool) -> Result<String> {
+    let dir = crate::stacks::stacks_dir().context("could not resolve $XDG_CONFIG_HOME or $HOME")?;
+    restore_in(&dir, json, overwrite)
+}
+
+fn restore_in(dir: &std::path::Path, json: &str, overwrite: bool) -> Result<String> {
     let env: Envelope =
         serde_json::from_str(json).context("snapshot file is not a cgui-snapshot envelope")?;
     if env.kind != MAGIC {
@@ -89,9 +93,9 @@ pub fn restore(json: &str, overwrite: bool) -> Result<String> {
         return Err(anyhow!("snapshot has empty stack name"));
     }
 
-    let dir = crate::stacks::stacks_dir().context("could not resolve $XDG_CONFIG_HOME or $HOME")?;
-    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let dest = dir.join(format!("{}.toml", env.stack.name));
+    // Validate before touching the filesystem: the name comes from the file.
+    let dest = crate::stacks::stack_path_in(dir, &env.stack.name)?;
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     if dest.exists() && !overwrite {
         return Err(anyhow!(
             "stack '{}' already exists at {}; pass overwrite=true to replace",
@@ -141,6 +145,43 @@ mod tests {
         let bad = r#"{"kind":"cgui-snapshot","version":1,"createdAt":"x","cguiVersion":"y","stack":{"name":"","toml":""}}"#;
         let err = restore(bad, true).unwrap_err().to_string();
         assert!(err.contains("empty stack name"));
+    }
+
+    fn envelope_json(name: &str) -> String {
+        serde_json::json!({
+            "kind": MAGIC, "version": VERSION, "createdAt": "x", "cguiVersion": "y",
+            "stack": {"name": name, "toml": "pwned"}
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn restore_rejects_path_traversal_names_and_writes_nothing() {
+        let base = std::env::temp_dir().join(format!("cgui-snap-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("stacks");
+        for bad in ["../evil", "../../x", "/tmp/cgui-abs-evil", "a/b", ".."] {
+            let err = restore_in(&dir, &envelope_json(bad), true).unwrap_err();
+            assert!(
+                err.to_string().contains("invalid stack name"),
+                "{bad}: {err}"
+            );
+        }
+        // Nothing created: not even the stacks dir, and nothing escaped it.
+        assert!(!dir.exists());
+        assert!(!base.join("evil.toml").exists());
+        assert!(!std::path::Path::new("/tmp/cgui-abs-evil.toml").exists());
+    }
+
+    #[test]
+    fn restore_writes_valid_name_inside_dir() {
+        let base = std::env::temp_dir().join(format!("cgui-snap-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("stacks");
+        let dest = restore_in(&dir, &envelope_json("demo-1"), false).unwrap();
+        assert_eq!(std::path::Path::new(&dest), dir.join("demo-1.toml"));
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "pwned");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

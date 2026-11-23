@@ -93,6 +93,42 @@ pub fn stacks_dir() -> Option<PathBuf> {
     Some(base.join("cgui").join("stacks"))
 }
 
+/// Validate a stack name before it is ever used to build a file path.
+/// Letters, digits, `_`, `.`, `-`; must start with a letter or digit;
+/// 1-63 chars. This also rules out `/`, `\`, `..` and absolute paths.
+pub fn validate_stack_name(name: &str) -> Result<()> {
+    let len = name.chars().count();
+    let mut chars = name.chars();
+    let ok = (1..=63).contains(&len)
+        && chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+    if !ok {
+        return Err(anyhow!(
+            "invalid stack name `{name}`: use 1-63 letters, digits, `_`, `.` or `-`, starting with a letter or digit"
+        ));
+    }
+    Ok(())
+}
+
+/// `<dir>/<name>.toml`, after validating `name` and asserting the result
+/// sits directly inside `dir`.
+pub fn stack_path_in(dir: &std::path::Path, name: &str) -> Result<PathBuf> {
+    validate_stack_name(name)?;
+    let path = dir.join(format!("{name}.toml"));
+    if path.parent() != Some(dir) {
+        return Err(anyhow!(
+            "stack name `{name}` resolves outside the stacks folder"
+        ));
+    }
+    Ok(path)
+}
+
+/// Path of the TOML file for stack `name` in the stacks folder.
+pub fn stack_path(name: &str) -> Result<PathBuf> {
+    let dir = stacks_dir().context("could not resolve $XDG_CONFIG_HOME or $HOME")?;
+    stack_path_in(&dir, name)
+}
+
 fn load_all_toml() -> Vec<(StackToml, PathBuf)> {
     let Some(dir) = stacks_dir() else {
         return vec![];
@@ -270,12 +306,8 @@ fn run_args(stack: &str, svc: &ServiceToml) -> Vec<String> {
     // stack (matches the docker-compose convention cgui reads).
     argv.push("--label".into());
     argv.push(format!("com.docker.compose.project={stack}"));
-    if let Some(rp) = svc.restart.as_deref() {
-        if matches!(rp, "always" | "on-failure") {
-            argv.push("--restart".into());
-            argv.push(rp.into());
-        }
-    }
+    // `restart` is intentionally not emitted: Apple's `container run` has
+    // no restart-policy flag. The field is still parsed and stored.
     if let Some(net) = svc.network.as_deref() {
         argv.push("--network".into());
         argv.push(net.into());
@@ -324,10 +356,29 @@ fn validate_stack_names(stack: &StackToml) -> Result<()> {
     Ok(())
 }
 
+/// One warning per service that sets a restart policy, since Apple's
+/// container CLI cannot honour it.
+fn restart_warnings(stack: &StackToml) -> Vec<String> {
+    stack
+        .services
+        .iter()
+        .filter_map(|svc| {
+            let rp = svc.restart.as_deref()?.trim();
+            (!rp.is_empty() && rp != "no").then(|| {
+                format!(
+                    "warning: service `{}`: restart policy `{rp}` ignored \u{2014} Apple's container CLI has no restart policies",
+                    svc.name
+                )
+            })
+        })
+        .collect()
+}
+
 pub async fn stack_up(name: &str) -> Result<Vec<String>> {
     let stack = load_one(name)?;
     validate_stack_names(&stack)?;
     let mut log: Vec<String> = Vec::new();
+    log.extend(restart_warnings(&stack));
     for svc in topo_order(&stack) {
         let argv = run_args(&stack.name, svc);
         let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
@@ -363,23 +414,17 @@ pub async fn stack_down(name: &str) -> Result<Vec<String>> {
     Ok(log)
 }
 
-// Thin wrapper so we can call the same `runtime::run`-style behavior
-// without exposing it from runtime.rs.
+// Routes through runtime's shared timeout-and-kill path (and the active
+// runtime binary). `run` gets the long timeout (image pull + VM boot);
+// stop/delete get the lifecycle timeout.
 async fn runtime_run(args: &[&str]) -> Result<String> {
-    let out = Command::new("container")
-        .args(args)
-        .output()
-        .await
-        .with_context(|| format!("spawn container {}", args.join(" ")))?;
-    if !out.status.success() {
-        return Err(anyhow!(
-            "container {} exited {}: {}",
-            args.join(" "),
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    let timeout = if args.first() == Some(&"run") {
+        runtime::run_long_timeout()
+    } else {
+        runtime::lifecycle_timeout()
+    };
+    let bytes = runtime::run_with_timeout(args, timeout).await?;
+    Ok(String::from_utf8_lossy(&bytes).trim().to_string())
 }
 
 // ─── Healthchecks ─────────────────────────────────────────────────────
@@ -474,6 +519,7 @@ async fn probe_http(target: Option<&str>, expect: &[u16]) -> String {
     let Some(t) = target else { return "—".into() };
     let url = http_url_for(t);
     let fut = Command::new("curl")
+        .kill_on_drop(true)
         .args([
             "-s",
             "-S",
@@ -554,7 +600,10 @@ async fn probe_cmd(stack: &str, svc: &str, command: &[String]) -> String {
         argv.push(a.clone());
     }
     let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
-    let fut = Command::new("container").args(&argv_ref).output();
+    let fut = Command::new(runtime::current_bin())
+        .kill_on_drop(true)
+        .args(&argv_ref)
+        .output();
     match tokio::time::timeout(Duration::from_secs(3), fut).await {
         Ok(Ok(o)) if o.status.success() => "healthy".into(),
         Ok(Ok(_)) => "unhealthy".into(),
@@ -647,6 +696,78 @@ mod tests {
         assert!(argv.contains(&"-e".to_string()));
         assert!(argv.contains(&"POSTGRES_USER=x".to_string()));
         assert!(argv.contains(&"pgvector:pg16".to_string()));
+    }
+
+    #[test]
+    fn run_args_never_emits_restart_flag() {
+        for rp in ["always", "on-failure", "unless-stopped", "no"] {
+            let svc = ServiceToml {
+                name: "web".into(),
+                image: "nginx".into(),
+                restart: Some(rp.into()),
+                ..Default::default()
+            };
+            let argv = run_args("s", &svc);
+            assert!(
+                !argv.iter().any(|a| a.contains("restart")),
+                "{rp}: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn restart_warnings_one_per_service_with_policy() {
+        let mk = |n: &str, r: Option<&str>| ServiceToml {
+            name: n.into(),
+            image: "i".into(),
+            restart: r.map(String::from),
+            ..Default::default()
+        };
+        let st = StackToml {
+            name: "s".into(),
+            services: vec![
+                mk("web", Some("always")),
+                mk("db", None),
+                mk("job", Some("no")),
+            ],
+        };
+        let w = restart_warnings(&st);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("service `web`") && w[0].contains("`always` ignored"));
+    }
+
+    #[test]
+    fn validate_stack_name_rejects_unsafe_names() {
+        for bad in [
+            "../evil",
+            "/abs/path",
+            "a/b",
+            "a\\b",
+            "..",
+            ".",
+            "",
+            ".hidden",
+            "-x",
+            "has space",
+        ] {
+            assert!(validate_stack_name(bad).is_err(), "should reject {bad:?}");
+        }
+        assert!(validate_stack_name(&"a".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn validate_stack_name_accepts_normal_names() {
+        for ok in ["a", "myapp", "my-app_2", "v1.2", "9lives", &"a".repeat(63)] {
+            assert!(validate_stack_name(ok).is_ok(), "should accept {ok:?}");
+        }
+    }
+
+    #[test]
+    fn stack_path_in_stays_inside_dir() {
+        let dir = std::path::Path::new("/cfg/cgui/stacks");
+        assert_eq!(stack_path_in(dir, "demo").unwrap(), dir.join("demo.toml"));
+        assert!(stack_path_in(dir, "../evil").is_err());
+        assert!(stack_path_in(dir, "/tmp/x").is_err());
     }
 
     #[test]
