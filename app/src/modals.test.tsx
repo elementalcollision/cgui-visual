@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { TrivyModal, DoctorModal, OnboardingModal, DetailModal, parseInspect, fuzzyScore, parseImageInspect } from './modals';
+import { SettingsModal, TrivyModal, DoctorModal, OnboardingModal, DetailModal, parseInspect, fuzzyScore, parseImageInspect } from './modals';
 import { getTheme } from './theme';
 import { containers } from './fixtures';
 import { api } from './api';
@@ -259,5 +259,36 @@ describe('OnboardingModal', () => {
     // findBy waits for the async setState after api.runtimeAvailable resolves.
     await screen.findByRole('button', { name: /Re-check/i });
     expect(onAvailable).toHaveBeenCalled();
+  });
+});
+
+describe('SettingsModal menu-bar toggle', () => {
+  function renderSettings(menubarMode: boolean, setMenubarMode: (b: boolean) => void) {
+    render(
+      <SettingsModal
+        t={t} onClose={() => {}} runtime="container" setRuntime={() => {}}
+        dark setDark={() => {}}
+        menubarMode={menubarMode} setMenubarMode={setMenubarMode}
+        globalHotkey="" setGlobalHotkey={() => {}}
+        notifyOnExit setNotifyOnExit={() => {}}
+      />,
+    );
+    const label = screen.getByText('Menu-bar mode');
+    return label.parentElement!.parentElement!.querySelector('button')!;
+  }
+
+  it('describes hide-on-close and quit-when-off behaviour', () => {
+    renderSettings(false, () => {});
+    expect(screen.getByText(/hides it instead of quitting/i)).toBeInTheDocument();
+    expect(screen.getByText(/When off, closing the window quits cgui/i)).toBeInTheDocument();
+  });
+
+  it('toggling calls setMenubarMode with the inverted value', async () => {
+    const user = userEvent.setup();
+    const setMenubarMode = vi.fn();
+    const toggle = renderSettings(false, setMenubarMode);
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    await user.click(toggle);
+    expect(setMenubarMode).toHaveBeenCalledWith(true);
   });
 });
