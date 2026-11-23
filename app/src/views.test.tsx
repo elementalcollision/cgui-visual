@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, waitFor, act } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { stripAnsi, LogsView } from './views';
 import { api } from './api';
 import { getTheme } from './theme';
@@ -84,6 +85,48 @@ describe('LogsView stream lifecycle', () => {
     expect(await screen.findByText('live line')).toBeInTheDocument();
     expect(api.loadLogs).not.toHaveBeenCalled();
     expect(screen.queryByText('persisted line')).not.toBeInTheDocument();
+  });
+
+  it('header switches from follow to the end reason when the stream ends', async () => {
+    const { handlers, started } = setup();
+    render(<LogsView t={t} target="a" />);
+    await waitFor(() => expect(started).toHaveLength(1));
+    expect(screen.getByTestId('log-stream-state')).toHaveTextContent('follow');
+    act(() => { handlers.get(started[0])?.('live line'); });
+    act(() => { handlers.get(started[0])?.('[container removed — log stream ended]'); });
+    expect(screen.getByTestId('log-stream-state')).toHaveTextContent('container removed');
+    expect(screen.getByText('[container removed — log stream ended]')).toBeInTheDocument();
+  });
+
+  it('records the end marker even while paused', async () => {
+    const { handlers, started } = setup();
+    render(<LogsView t={t} target="a" />);
+    await waitFor(() => expect(started).toHaveLength(1));
+    await userEvent.click(screen.getByRole('button', { name: 'Pause' }));
+    expect(screen.getByTestId('log-stream-state')).toHaveTextContent('paused');
+    act(() => { handlers.get(started[0])?.('dropped while paused'); });
+    act(() => { handlers.get(started[0])?.('[container stopped — log stream ended]'); });
+    expect(screen.getByTestId('log-stream-state')).toHaveTextContent('container stopped');
+    expect(screen.queryByText('dropped while paused')).not.toBeInTheDocument();
+  });
+
+  it('a new target resets the header to follow', async () => {
+    const { handlers, started } = setup();
+    const { rerender } = render(<LogsView t={t} target="a" />);
+    await waitFor(() => expect(started).toHaveLength(1));
+    act(() => { handlers.get(started[0])?.('[follow ended]'); });
+    expect(screen.getByTestId('log-stream-state')).toHaveTextContent('ended');
+    rerender(<LogsView t={t} target="b" />);
+    await waitFor(() => expect(started).toHaveLength(2));
+    expect(screen.getByTestId('log-stream-state')).toHaveTextContent('follow');
+  });
+
+  it('shows not live when the stream cannot start', async () => {
+    setup();
+    vi.mocked(api.startLogStream).mockRejectedValue('container with ID a not found');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    render(<LogsView t={t} target="a" />);
+    await waitFor(() => expect(screen.getByTestId('log-stream-state')).toHaveTextContent('not live'));
   });
 
   it('falls back to persisted history when the live stream cannot start', async () => {
