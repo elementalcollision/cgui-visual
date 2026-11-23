@@ -57,8 +57,8 @@ pub async fn run() -> Vec<DoctorCheck> {
     }
 
     // 4. system status (Apple-container-specific). `--format json` gives
-    // `parse_system_running` a `status` field to key off on 1.4+, and
-    // older CLIs accept the flag too (see runtime::parse_system_running).
+    // `parse_system_running` its top-level `status` field (1.4.1+, the
+    // minimum supported version).
     match Command::new(RUNTIME_BIN)
         .kill_on_drop(true)
         .args(["system", "status", "--format", "json"])

@@ -199,9 +199,9 @@ export const trivy: TrivyResult = {
 
 export const updates: Update[] = [
   {
-    component: 'container', installed: '0.13.0', latest: '0.14.2', published: '2026-04-28',
+    component: 'container', installed: '1.4.1', latest: '1.7.1', published: '2026-11-12',
     notes: [
-      "## What's new in container 0.14.2",
+      "## What's new in container 1.7.1",
       '',
       '### Performance',
       '- Reduced cold-start latency by 18% on Apple Silicon hosts.',
@@ -217,9 +217,9 @@ export const updates: Update[] = [
     ].join('\n'),
   },
   {
-    component: 'cgui', installed: '0.13.0', latest: '0.14.2', published: '2026-05-01',
+    component: 'cgui', installed: '0.5.4', latest: '0.6.0', published: '2026-11-20',
     notes: [
-      '## cgui 0.14.2',
+      '## cgui 0.6.0',
       '',
       '- Per-tab refresh cadence (skip 2s tick on Logs + follow).',
       '- `y` copies pull/build/log buffer to pbcopy.',
@@ -233,7 +233,7 @@ export const updates: Update[] = [
 export const doctor: DoctorCheck[] = [
   { ok: true,  text: 'active profile: container → container' },
   { ok: true,  text: '`container` resolves to /usr/local/bin/container' },
-  { ok: true,  text: '`container --version` → container CLI version 0.13.0' },
+  { ok: true,  text: '`container --version` → container CLI version 1.4.1' },
   { ok: true,  text: 'container system status: running' },
   { ok: false, text: 'no profiles.toml at ~/.config/cgui/profiles.toml (using built-in default)', warn: true },
   { ok: true,  text: 'state.json at ~/.config/cgui/state.json parses cleanly' },

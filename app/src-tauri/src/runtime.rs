@@ -124,27 +124,19 @@ pub struct StatRow {
     pub id: String,
     // Apple's `container stats` reports cumulative CPU time in microseconds.
     // CPU% is computed in state.rs via deltas across polls.
-    #[serde(rename = "cpuUsageUsec", alias = "cpu_usage_usec")]
+    #[serde(rename = "cpuUsageUsec")]
     pub cpu_usage_usec: u64,
-    #[serde(
-        rename = "memoryUsageBytes",
-        alias = "memory_usage_bytes",
-        alias = "memoryUsage"
-    )]
+    #[serde(rename = "memoryUsageBytes")]
     pub memory_usage_bytes: u64,
-    #[serde(
-        rename = "memoryLimitBytes",
-        alias = "memory_limit_bytes",
-        alias = "memoryLimit"
-    )]
+    #[serde(rename = "memoryLimitBytes")]
     pub memory_limit_bytes: u64,
-    #[serde(rename = "networkRxBytes", alias = "network_rx_bytes", default)]
+    #[serde(rename = "networkRxBytes", default)]
     pub network_rx_bytes: u64,
-    #[serde(rename = "networkTxBytes", alias = "network_tx_bytes", default)]
+    #[serde(rename = "networkTxBytes", default)]
     pub network_tx_bytes: u64,
-    #[serde(rename = "blockReadBytes", alias = "block_read_bytes", default)]
+    #[serde(rename = "blockReadBytes", default)]
     pub block_read_bytes: u64,
-    #[serde(rename = "blockWriteBytes", alias = "block_write_bytes", default)]
+    #[serde(rename = "blockWriteBytes", default)]
     pub block_write_bytes: u64,
 }
 
@@ -293,14 +285,11 @@ fn parse_container(v: Value) -> Container {
         .and_then(Value::as_str)
         .unwrap_or("?")
         .to_string();
-    // 0.x reported `status` as a plain string; 1.0 nests it as
-    // `{"state": "running", "startedDate": "...", "networks": [...]}`.
+    // `status` is `{"state": "running", "startedDate": "...", "networks": [...]}`.
     let status = v
         .get("status")
-        .and_then(|s| {
-            s.as_str()
-                .or_else(|| s.get("state").and_then(Value::as_str))
-        })
+        .and_then(|s| s.get("state"))
+        .and_then(Value::as_str)
         .unwrap_or("unknown")
         .to_string();
     let memory_bytes = cfg
@@ -328,48 +317,41 @@ fn parse_container(v: Value) -> Container {
     // Display-only short id; `Container.id` stays the full CLI id.
     let short_id = short_container_id(&id);
 
-    // 0.x reported `startedDate` (or `createdDate`) as a top-level float
-    // in NSDate reference epoch (seconds since 2001-01-01 UTC). 1.0 moved
-    // it to `status.startedDate` as an RFC3339 string, with the creation
-    // time at `configuration.creationDate`.
-    let started_apple = v
-        .get("startedDate")
-        .or_else(|| v.get("createdDate"))
-        .or_else(|| cfg.get("createdAt"))
-        .and_then(Value::as_f64);
+    // `status.startedDate` (RFC3339) is present while running; the creation
+    // time is `configuration.creationDate`.
+    let started_at = v
+        .get("status")
+        .and_then(|s| s.get("startedDate"))
+        .and_then(Value::as_str)
+        .and_then(|t| DateTime::parse_from_rfc3339(t).ok());
+    let started_unix = started_at.map(|t| t.timestamp());
     let started_iso = v
         .get("status")
         .and_then(|s| s.get("startedDate"))
-        .or_else(|| cfg.get("createdAt"))
         .or_else(|| cfg.get("creationDate"))
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let started_unix = started_apple.map(apple_epoch_to_unix);
 
     let normalized = normalize_status(&status);
     let uptime = if normalized == "running" {
         match started_unix {
             Some(t) => format_uptime_from_unix(t),
-            None if !started_iso.is_empty() => format_uptime_from_iso(&started_iso),
-            _ => "—".into(),
+            None => "—".into(),
         }
     } else {
         "—".into()
     };
 
-    // Hostname lived at `networks[0].hostname` in 0.x; 1.0 nests it
-    // under `networks[0].options.hostname`.
+    // Hostname lives at `networks[0].options.hostname`.
     let name = cfg
         .get("hostname")
         .and_then(Value::as_str)
         .or_else(|| {
-            let n0 = cfg.get("networks").and_then(|n| n.get(0));
-            n0.and_then(|n| n.get("hostname"))
-                .or_else(|| {
-                    n0.and_then(|n| n.get("options"))
-                        .and_then(|o| o.get("hostname"))
-                })
+            cfg.get("networks")
+                .and_then(|n| n.get(0))
+                .and_then(|n| n.get("options"))
+                .and_then(|o| o.get("hostname"))
                 .and_then(Value::as_str)
         })
         .unwrap_or(&id)
@@ -377,7 +359,6 @@ fn parse_container(v: Value) -> Container {
 
     let cmd = cfg
         .get("initProcess")
-        .or_else(|| cfg.get("processConfig"))
         .map(|p| {
             let exe = p.get("executable").and_then(Value::as_str).unwrap_or("");
             let args = p
@@ -424,23 +405,8 @@ fn parse_container(v: Value) -> Container {
     }
 }
 
-// Apple NSDate reference epoch is 2001-01-01 00:00:00 UTC.
-const APPLE_EPOCH_OFFSET: f64 = 978_307_200.0;
-
-fn apple_epoch_to_unix(apple_ts: f64) -> i64 {
-    (apple_ts + APPLE_EPOCH_OFFSET) as i64
-}
-
 fn format_uptime_from_unix(unix_secs: i64) -> String {
     let secs = (Utc::now().timestamp() - unix_secs).max(0);
-    format_duration(secs)
-}
-
-fn format_uptime_from_iso(s: &str) -> String {
-    let Ok(t) = DateTime::parse_from_rfc3339(s) else {
-        return "—".into();
-    };
-    let secs = (Utc::now() - t.with_timezone(&Utc)).num_seconds().max(0);
     format_duration(secs)
 }
 
@@ -558,35 +524,26 @@ fn failed_read_count(stderr: &str) -> Option<usize> {
 }
 
 fn parse_image(v: Value) -> Image {
-    // 1.0 nests the metadata under `configuration` (`name`, `creationDate`,
-    // `descriptor`) with per-platform byte sizes in `variants[].size`;
-    // 0.x had `reference`, `createdAt`, `descriptor`, and a human-formatted
-    // `fullSize` string at the top level.
+    // Metadata is nested under `configuration` (`name`, `creationDate`,
+    // `descriptor`) with per-platform byte sizes in `variants[].size`.
     let cfg = v.get("configuration");
     let reference = cfg
         .and_then(|c| c.get("name"))
-        .or_else(|| v.get("reference"))
         .and_then(Value::as_str)
         .unwrap_or("?")
         .to_string();
-    let size = match cfg {
-        Some(_) => {
-            let bytes: u64 = v
-                .get("variants")
-                .and_then(Value::as_array)
-                .map(|vs| {
-                    vs.iter()
-                        .filter_map(|p| p.get("size").and_then(Value::as_u64))
-                        .sum()
-                })
-                .unwrap_or(0);
-            bytes_to_gib(bytes)
-        }
-        None => parse_size_to_gib(v.get("fullSize").and_then(Value::as_str).unwrap_or("0")),
-    };
+    let bytes: u64 = v
+        .get("variants")
+        .and_then(Value::as_array)
+        .map(|vs| {
+            vs.iter()
+                .filter_map(|p| p.get("size").and_then(Value::as_u64))
+                .sum()
+        })
+        .unwrap_or(0);
+    let size = bytes_to_gib(bytes);
     let digest = cfg
-        .unwrap_or(&v)
-        .get("descriptor")
+        .and_then(|c| c.get("descriptor"))
         .and_then(|d| d.get("digest"))
         .and_then(Value::as_str)
         .unwrap_or("")
@@ -603,7 +560,6 @@ fn parse_image(v: Value) -> Image {
         size_unit: "GiB".into(),
         created: cfg
             .and_then(|c| c.get("creationDate"))
-            .or_else(|| v.get("createdAt"))
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string(),
@@ -620,25 +576,6 @@ fn parse_image(v: Value) -> Image {
         // `image ls` doesn't expose layer count directly; surface 0 for
         // now (a follow-up can call `image inspect` per row to get it).
         layers: 0,
-    }
-}
-
-// "1.4 GB" / "142 MB" / "8192 bytes" → GiB.
-fn parse_size_to_gib(s: &str) -> f64 {
-    let s = s.trim();
-    let (num_str, unit) = s.split_at(
-        s.find(|c: char| !(c.is_ascii_digit() || c == '.'))
-            .unwrap_or(s.len()),
-    );
-    let n: f64 = num_str.parse().unwrap_or(0.0);
-    let u = unit.trim().to_ascii_uppercase();
-    match u.as_str() {
-        "B" | "BYTES" => n / (1024.0 * 1024.0 * 1024.0),
-        "KB" | "KIB" => n / (1024.0 * 1024.0),
-        "MB" | "MIB" => n / 1024.0,
-        "GB" | "GIB" => n,
-        "TB" | "TIB" => n * 1024.0,
-        _ => n / (1024.0 * 1024.0 * 1024.0),
     }
 }
 
@@ -660,10 +597,8 @@ pub async fn list_volumes() -> Result<Vec<Volume>> {
 }
 
 fn parse_volume(v: Value, refs: &std::collections::HashMap<String, u32>) -> Volume {
-    // 1.0 nests `name`/`driver`/`source`/`sizeInBytes` under
-    // `configuration`; 0.x had them at the top level. Field names are
-    // unchanged, so resolve the container object once and read through it.
-    let cfg = v.get("configuration").unwrap_or(&v);
+    // `name`/`driver`/`source`/`sizeInBytes` live under `configuration`.
+    let cfg = v.get("configuration").unwrap_or(&Value::Null);
     let name = cfg
         .get("name")
         .and_then(Value::as_str)
@@ -698,9 +633,8 @@ fn parse_volume(v: Value, refs: &std::collections::HashMap<String, u32>) -> Volu
 }
 
 // Scan container ls output for volume mounts and return a name → count map.
-// Apple's container reports each mount as `{"source": "<name>", "type":
-// "volume", ...}` inside `configuration.mounts`. Bind mounts (`type:
-// "bind"`) are skipped.
+// Each volume mount is `{"type": {"volume": {"name": "<name>", ...}}, ...}`
+// inside `configuration.mounts`; other mount kinds are skipped.
 fn volume_ref_counts(ls_bytes: &[u8]) -> std::collections::HashMap<String, u32> {
     use std::collections::HashMap;
     let raw: Vec<Value> = serde_json::from_slice(ls_bytes).unwrap_or_default();
@@ -712,25 +646,16 @@ fn volume_ref_counts(ls_bytes: &[u8]) -> std::collections::HashMap<String, u32> 
             .and_then(Value::as_array);
         let Some(mounts) = mounts else { continue };
         for m in mounts {
-            // 0.x: `"type": "volume"` with the volume name in `source`.
-            // 1.0: `"type": {"volume": {"name": "...", ...}}` and `source`
-            // holds the backing image path instead of the name.
-            match m.get("type") {
-                Some(Value::String(kind)) if kind == "volume" => {
-                    if let Some(src) = m.get("source").and_then(Value::as_str) {
-                        *out.entry(src.to_string()).or_insert(0) += 1;
-                    }
-                }
-                Some(Value::Object(kind)) => {
-                    if let Some(name) = kind
-                        .get("volume")
-                        .and_then(|vol| vol.get("name"))
-                        .and_then(Value::as_str)
-                    {
-                        *out.entry(name.to_string()).or_insert(0) += 1;
-                    }
-                }
-                _ => {}
+            // Mounts are `"type": {"volume": {"name": "...", ...}}`; other
+            // kinds (`tmpfs`, `virtiofs`, ...) are skipped. `source` holds
+            // the backing image path, not the volume name.
+            if let Some(name) = m
+                .get("type")
+                .and_then(|t| t.get("volume"))
+                .and_then(|vol| vol.get("name"))
+                .and_then(Value::as_str)
+            {
+                *out.entry(name.to_string()).or_insert(0) += 1;
             }
         }
     }
@@ -756,30 +681,23 @@ pub async fn list_networks() -> Result<Vec<Network>> {
 // Scan container ls output for attached networks and return a
 // name → running-container count map.
 //
-// `status.networks[]` (present on every 1.x container, `[]` when
-// stopped) is the source of truth: each entry is `{"network": "<name>",
-// "hostname": ..., "ipv4Address": ..., ...}` for a container that is
-// actually attached right now. `configuration.networks[]` lists the
-// networks a container *would* attach to on start, so a stopped
-// container still carries entries there — counting those would count
-// stopped containers as "attached" and double-count once they start.
-// We therefore only fall back to `configuration.networks` when `status`
-// has no `networks` key at all (an older CLI shape that predates the
-// per-container network list existing anywhere).
+// `status.networks[]` is the source of truth: each entry is `{"network":
+// "<name>", "hostname": ..., "ipv4Address": ..., ...}` for a container that
+// is actually attached right now (`[]` when stopped). `configuration.networks[]`
+// lists the networks a container *would* attach to on start, so counting it
+// would count stopped containers as attached.
 fn network_ref_counts(ls_bytes: &[u8]) -> std::collections::HashMap<String, u32> {
     use std::collections::HashMap;
     let raw: Vec<Value> = serde_json::from_slice(ls_bytes).unwrap_or_default();
     let mut out: HashMap<String, u32> = HashMap::new();
     for c in raw {
-        let status_networks = c.get("status").and_then(|s| s.get("networks"));
-        let nets = match status_networks {
-            Some(nets) => nets.as_array(),
-            None => c
-                .get("configuration")
-                .and_then(|cfg| cfg.get("networks"))
-                .and_then(Value::as_array),
+        let Some(nets) = c
+            .get("status")
+            .and_then(|s| s.get("networks"))
+            .and_then(Value::as_array)
+        else {
+            continue;
         };
-        let Some(nets) = nets else { continue };
         for n in nets {
             if let Some(name) = n.get("network").and_then(Value::as_str) {
                 *out.entry(name.to_string()).or_insert(0) += 1;
@@ -790,13 +708,7 @@ fn network_ref_counts(ls_bytes: &[u8]) -> std::collections::HashMap<String, u32>
 }
 
 fn parse_network(v: Value, refs: &std::collections::HashMap<String, u32>) -> Network {
-    // 0.x called the nested block `config`; 1.0 renamed it
-    // `configuration` and added `ipv4Gateway` to `status`.
-    let cfg = v
-        .get("configuration")
-        .or_else(|| v.get("config"))
-        .cloned()
-        .unwrap_or(Value::Null);
+    let cfg = v.get("configuration").cloned().unwrap_or(Value::Null);
     let name = cfg
         .get("name")
         .or_else(|| v.get("id"))
@@ -1197,23 +1109,19 @@ pub fn parse_system_versions(body: &str) -> (Option<String>, Option<String>) {
     (field("client"), field("server"))
 }
 
-/// True when `container system status` reports the services up. 1.4.1's
-/// `--format json` emits a top-level `{"status": "running", ...}` (down
-/// states are `"unregistered"` or `"not running"`); try that first.
-/// Older CLIs (1.0–1.3) accept `--format json` too but may not emit a
-/// `status` field at all, so fall back to the pre-1.4 table-token check:
-/// a key/value table with a `status   running` row, vs. the stopped
-/// output's prose line ("apiserver is not running ..."). A naive
-/// substring search for "running" misfires on "not running", so match
-/// the status row precisely (exactly the two tokens `status running`).
+/// True when `container system status --format json` reports the services
+/// up: a top-level `{"status": "running", ...}` (down states are
+/// `"unregistered"` or `"not running"`). Anything else, including
+/// unparseable output, is "not running".
 pub fn parse_system_running(body: &str) -> bool {
-    if let Ok(v) = serde_json::from_str::<Value>(body) {
-        if let Some(status) = v.get("status").and_then(Value::as_str) {
-            return status == "running";
-        }
-    }
-    body.lines()
-        .any(|l| l.split_whitespace().collect::<Vec<_>>() == ["status", "running"])
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("status")
+                .and_then(Value::as_str)
+                .map(|s| s == "running")
+        })
+        .unwrap_or(false)
 }
 
 /// Returns whether the runtime services are up. Never errors — a
@@ -1597,6 +1505,10 @@ where
 }
 
 #[cfg(test)]
+#[path = "runtime_fixtures_test.rs"]
+mod fixtures_test;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -1634,15 +1546,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_size_to_gib_handles_units() {
-        assert!((parse_size_to_gib("1 GB") - 1.0).abs() < 1e-6);
-        assert!((parse_size_to_gib("512 MB") - 0.5).abs() < 1e-6);
-        assert!((parse_size_to_gib("70.5 MB") - (70.5 / 1024.0)).abs() < 1e-6);
-        assert!((parse_size_to_gib("2 TB") - 2048.0).abs() < 1e-6);
-        assert_eq!(parse_size_to_gib(""), 0.0);
-    }
-
-    #[test]
     fn normalize_status_buckets_variants() {
         assert_eq!(normalize_status("running"), "running");
         assert_eq!(normalize_status("Up"), "running");
@@ -1658,12 +1561,6 @@ mod tests {
         assert_eq!(format_duration(125), "2m");
         assert_eq!(format_duration(3725), "1h 02m");
         assert_eq!(format_duration(90061), "1d 01h");
-    }
-
-    #[test]
-    fn apple_epoch_offset_matches_2001() {
-        // 2001-01-01T00:00:00Z = unix 978307200
-        assert_eq!(apple_epoch_to_unix(0.0), 978_307_200);
     }
 
     #[test]
@@ -1769,20 +1666,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_image_0_x_shape_still_works() {
-        let v = json!({
-            "reference": "docker.io/library/redis:7",
-            "fullSize": "142 MB",
-            "createdAt": "2026-01-01T00:00:00Z",
-            "descriptor": { "digest": "sha256:abcdef0123456789" }
-        });
-        let img = parse_image(v);
-        assert_eq!(img.reference, "docker.io/library/redis:7");
-        assert_eq!(img.created, "2026-01-01T00:00:00Z");
-        assert!((img.size - (142.0 / 1024.0)).abs() < 1e-6);
-    }
-
-    #[test]
     fn parse_volume_1_0_shape() {
         let v = json!({
             "id": "cgui-test-vol",
@@ -1873,30 +1756,19 @@ mod tests {
     }
 
     #[test]
-    fn network_ref_counts_falls_back_to_configuration_when_status_has_no_networks_key() {
-        // Pre-1.0 shape: no `status.networks` key exists at all, so we
-        // fall back to `configuration.networks`.
-        let ls = json!([
-            { "configuration": { "networks": [{ "network": "legacy-net" }] }, "status": { "state": "running" } }
-        ]);
-        let counts = network_ref_counts(serde_json::to_vec(&ls).unwrap().as_slice());
-        assert_eq!(counts.get("legacy-net"), Some(&1));
-    }
-
-    #[test]
-    fn volume_ref_counts_handles_both_mount_shapes() {
+    fn volume_ref_counts_counts_volume_mounts_only() {
         let ls = json!([
             { "configuration": { "mounts": [
-                // 1.0: type object with the volume name nested inside.
+                // type object with the volume name nested inside.
                 { "destination": "/data", "source": "/path/volume.img",
                   "type": { "volume": { "name": "vol-a", "format": "ext4" } } },
-                // 1.0: non-volume mount types are skipped.
+                // non-volume mount types are skipped.
                 { "destination": "/run", "source": "", "type": { "tmpfs": {} } }
             ] } },
             { "configuration": { "mounts": [
-                // 0.x: type string with the volume name in source.
-                { "destination": "/data", "source": "vol-a", "type": "volume" },
-                { "destination": "/host", "source": "/host", "type": "bind" }
+                { "destination": "/data", "source": "/other/volume.img",
+                  "type": { "volume": { "name": "vol-a", "format": "ext4" } } },
+                { "destination": "/host", "source": "/host", "type": { "virtiofs": {} } }
             ] } }
         ]);
         let counts = volume_ref_counts(serde_json::to_vec(&ls).unwrap().as_slice());
@@ -2058,27 +1930,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_system_running_matches_status_row_only() {
-        // 1.0 running output: a key/value table with a status row.
-        let up = "FIELD              VALUE\nstatus             running\nappRoot            /x\n";
-        assert!(parse_system_running(up));
-        // Stopped output: prose containing the substring "running" inside
-        // "not running" — must NOT be read as up.
-        let down = "apiserver is not running and not registered with launchd";
-        assert!(!parse_system_running(down));
-        assert!(!parse_system_running(""));
-    }
-
-    #[test]
     fn parse_system_running_reads_1_4_json() {
         // 1.4.1 `--format json` running body (trimmed to the relevant field).
         assert!(parse_system_running(r#"{"status":"running","host":{}}"#));
         // 1.4.1 down states.
         assert!(!parse_system_running(r#"{"status":"unregistered"}"#));
         assert!(!parse_system_running(r#"{"status":"not running"}"#));
-        // Valid JSON with no `status` field at all falls back to the
-        // table-token check, which also finds nothing to match.
+        // No `status` field, or non-JSON (e.g. the 0.x/1.0-1.3 table), is down.
         assert!(!parse_system_running(r#"{"host":{"cpus":8}}"#));
+        assert!(!parse_system_running("status             running\n"));
+        assert!(!parse_system_running(""));
     }
 
     #[test]
@@ -2116,35 +1977,6 @@ mod tests {
             assert!(s.contains(frag), "missing {frag} in {s}");
         }
         assert!(s.ends_with(" /proj"));
-    }
-
-    #[test]
-    fn parse_container_apple_shape() {
-        // Hand-crafted from real `container ls --all --format json` output.
-        let v = json!({
-            "status": "running",
-            "startedDate": 0.0, // Apple epoch — translates to unix 978307200
-            "configuration": {
-                "id": "abcdef1234567890",
-                "image": { "reference": "docker.io/library/alpine:latest" },
-                "resources": { "memoryInBytes": 1073741824u64 },
-                "publishedPorts": [{ "hostPort": 8080, "containerPort": 80, "proto": "tcp" }],
-                "networks": [{ "hostname": "myapp" }],
-                "initProcess": { "executable": "sh", "arguments": ["-c", "true"] },
-                "labels": { "com.docker.compose.project": "demo" }
-            }
-        });
-        let c = parse_container(v);
-        assert_eq!(c.id, "abcdef1234567890");
-        assert_eq!(c.short_id, "abcdef12");
-        assert_eq!(c.name, "myapp");
-        assert_eq!(c.image, "docker.io/library/alpine:latest");
-        assert_eq!(c.status, "running");
-        assert_eq!(c.ports, vec!["8080:80"]);
-        assert_eq!(c.cmd, vec!["sh", "-c", "true"]);
-        assert_eq!(c.stack.as_deref(), Some("demo"));
-        // Memory limit reported in GiB.
-        assert!((c.mem.limit - 1.0).abs() < 1e-6);
     }
 
     #[test]
