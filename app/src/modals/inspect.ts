@@ -7,6 +7,8 @@ export interface ParsedInspect {
   env: { key: string; value: string }[];
   mounts: { source: string; destination: string; type: string; readOnly?: boolean }[];
   network: { name: string; ip: string; mac?: string; aliases?: string[] }[];
+  /** `container` is the row label: Docker's `8080/tcp` key, or for Apple
+   *  the published mapping `8080:80/tcp`. `host` is the host-side binding. */
   ports: { container: string; host: string }[];
   health?: { status: string; failingStreak?: number; log: { exitCode: number; output: string }[] };
 }
@@ -31,24 +33,43 @@ export function parseInspect(text: string): ParsedInspect | null {
   const hostConfig = root.HostConfig ?? root.hostConfig ?? {};
   const stateBlock = root.State ?? root.state ?? {};
 
+  // Apple `container inspect` keeps the container's settings under
+  // `configuration` (env, mounts, published ports, networks) and the live
+  // state under `status`.
+  const appleCfg = root.configuration && typeof root.configuration === 'object' ? root.configuration : {};
+
   // ── Env: ["KEY=value", ...] split once on first '='. Keys without '='
   //         become bare keys with empty value rather than getting dropped.
-  const envList: string[] = config.Env ?? config.env ?? [];
+  //         Apple: `configuration.initProcess.environment`.
+  const rawEnv = config.Env ?? config.env ?? appleCfg.initProcess?.environment;
+  const envList: string[] = Array.isArray(rawEnv) ? rawEnv.filter((x: unknown) => typeof x === 'string') : [];
   const env = envList.map((line: string) => {
     const i = line.indexOf('=');
     return i === -1 ? { key: line, value: '' } : { key: line.slice(0, i), value: line.slice(i + 1) };
   });
 
-  // ── Mounts: docker shape is {Source,Destination,Type,RW}; apple variant
-  //         exposes camelCase. Read-only is RW=false (docker) or
-  //         readOnly=true (apple).
-  const rawMounts: any[] = root.Mounts ?? root.mounts ?? [];
-  const mounts = rawMounts.map((m: any) => ({
-    source: m.Source ?? m.source ?? '',
-    destination: m.Destination ?? m.destination ?? '',
-    type: m.Type ?? m.type ?? '',
-    readOnly: typeof m.RW === 'boolean' ? !m.RW : (m.readOnly === true ? true : undefined),
-  }));
+  // ── Mounts: docker shape is {Source,Destination,Type,RW}. Apple's
+  //         `configuration.mounts[]` is {source, destination, options, type}
+  //         where `type` is a one-key object: `{virtiofs: {}}` for a bind
+  //         mount, `{volume: {name, …}}` for a named volume (whose `source`
+  //         is the backing volume.img, so show the name instead), or
+  //         `{tmpfs: {}}`. Read-only is RW=false (docker), readOnly=true, or
+  //         "ro" in Apple's `options`.
+  const rawMounts = root.Mounts ?? root.mounts ?? appleCfg.mounts;
+  const mounts = (Array.isArray(rawMounts) ? rawMounts : []).map((m: any) => {
+    const t = m?.Type ?? m?.type;
+    const appleKind = t && typeof t === 'object' ? Object.keys(t)[0] : undefined;
+    const volumeName = appleKind === 'volume' ? t.volume?.name : undefined;
+    const readOnly = typeof m?.RW === 'boolean'
+      ? !m.RW
+      : (m?.readOnly === true || (Array.isArray(m?.options) && m.options.includes('ro')) ? true : undefined);
+    return {
+      source: (typeof volumeName === 'string' && volumeName) || (m?.Source ?? m?.source ?? ''),
+      destination: m?.Destination ?? m?.destination ?? '',
+      type: appleKind === undefined ? (typeof t === 'string' ? t : '') : appleKind === 'virtiofs' ? 'bind' : appleKind,
+      readOnly,
+    };
+  });
 
   // ── Network: docker NetworkSettings.Networks is { netName: { IPAddress } };
   //         older payloads have just IPAddress at top level.
@@ -57,7 +78,7 @@ export function parseInspect(text: string): ParsedInspect | null {
   // Apple `container inspect`: `configuration.networks[]` holds the per-network
   // options (DNS `aliases`, hostname, mtu; aliases need container 1.6+) and
   // `status.networks[]` the live address once running.
-  const appleCfgNets: any[] = Array.isArray(root.configuration?.networks) ? root.configuration.networks : [];
+  const appleCfgNets: any[] = Array.isArray(appleCfg.networks) ? appleCfg.networks : [];
   const appleStatusNets: any[] = Array.isArray(root.status?.networks) ? root.status.networks : [];
   const cleanAliases = (a: unknown): string[] | undefined =>
     Array.isArray(a) && a.length ? a.filter((x): x is string => typeof x === 'string') : undefined;
@@ -106,6 +127,25 @@ export function parseInspect(text: string): ParsedInspect | null {
       }
     } else {
       ports.push({ container: containerPort, host: '— (exposed)' });
+    }
+  }
+  // Apple: `configuration.publishedPorts[]` is
+  //   {hostAddress, hostPort, containerPort, proto, count}
+  // where count > 1 publishes a range of consecutive ports. The row label
+  // reads like the list view's `8080:80` (host:container, the `-p` order)
+  // plus the protocol; the value is the host address it's bound on.
+  const applePorts = appleCfg.publishedPorts;
+  if (Array.isArray(applePorts)) {
+    for (const p of applePorts) {
+      const hp = p?.hostPort, cp = p?.containerPort;
+      if (!Number.isInteger(hp) || !Number.isInteger(cp)) continue;
+      const n = Number.isInteger(p.count) && p.count > 1 ? p.count : 1;
+      const span = (start: number) => (n > 1 ? `${start}-${start + n - 1}` : `${start}`);
+      const proto = typeof p.proto === 'string' && p.proto ? p.proto : 'tcp';
+      ports.push({
+        container: `${span(hp)}:${span(cp)}/${proto}`,
+        host: typeof p.hostAddress === 'string' ? p.hostAddress : '',
+      });
     }
   }
 

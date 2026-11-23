@@ -238,7 +238,7 @@ export const doctor: DoctorCheck[] = [
   { ok: false, text: 'no profiles.toml at ~/.config/cgui/profiles.toml (using built-in default)', warn: true },
   { ok: true,  text: 'state.json at ~/.config/cgui/state.json parses cleanly' },
   { ok: false, text: 'trivy not on PATH (image scan disabled — brew install trivy)', warn: true },
-  { ok: true,  text: 'runtime API reachable on /var/run/container.sock' },
+  { ok: true,  text: 'background log capture: 2 containers followed' },
 ];
 
 export const inspectJson: string = JSON.stringify({
