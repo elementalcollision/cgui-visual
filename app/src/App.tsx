@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 // macOS-only app — we ship native traffic lights via Tauri's default
 // `decorations: true`. Frameless chrome and platform detection were removed
 // when the project's scope was locked to Apple's container runtime.
@@ -8,6 +8,7 @@ import { api, type Prefs } from './api';
 import { FramelessChrome, Sidebar, TopBar, StatusBar } from './components';
 import { ContainersView, ImagesView, VolumesView, NetworksView, StacksView, LogsView } from './views';
 import { ToastTray, withToast } from './toast';
+import { errMessage } from './loadState';
 
 // All modal code is split into a separate chunk and only fetched on first
 // modal open. Saves ~30 KB from the initial bundle without affecting
@@ -169,9 +170,12 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     const refresh = () => {
-      api.listImages().then(v => { if (!cancelled) setPaletteImages(v); });
-      api.listStacks().then(v => { if (!cancelled) setPaletteStacks(v); });
-      api.listUpdates().then(v => { if (!cancelled) setUpdateCount(v.length); });
+      // Background refresh: failures are swallowed on purpose (the views
+      // show their own error state; this must not toast every 30 s). The
+      // previous palette data / badge count is kept.
+      api.listImages().then(v => { if (!cancelled) setPaletteImages(v); }).catch(() => {});
+      api.listStacks().then(v => { if (!cancelled) setPaletteStacks(v.stacks); }).catch(() => {});
+      api.listUpdates().then(v => { if (!cancelled) setUpdateCount(v.length); }).catch(() => {});
     };
     refresh();
     if (modal?.type === 'commandPalette') refresh();
@@ -223,19 +227,41 @@ export default function App() {
   }, []);
 
   const [containers, setContainers] = useState<Container[]>([]);
+  // Last container-poll failure (CLI message), shown by ContainersView in
+  // place of the list. State rather than a toast: the 2 s tick would spam.
+  const [containersError, setContainersError] = useState<string | null>(null);
+  const [containersLoaded, setContainersLoaded] = useState(false);
+  const loadContainers = useCallback(() => api.listContainers().then(cs => {
+    setContainers(cs);
+    setContainersError(null);
+    setContainersLoaded(true);
+    if (cs.length) setSelected(prev => prev || cs[0].id);
+  }).catch(e => {
+    setContainers(prev => (prev.length ? [] : prev));
+    setContainersError(errMessage(e));
+  }), []);
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
-    api.listContainers().then(cs => {
+    let unlistenErr: (() => void) | null = null;
+    loadContainers();
+    api.onContainersTick(cs => {
       if (cancelled) return;
       setContainers(cs);
-      if (cs.length) setSelected(prev => prev || cs[0].id);
-    });
-    api.onContainersTick(cs => { if (!cancelled) setContainers(cs); }).then(fn => {
+      setContainersError(null);
+      setContainersLoaded(true);
+    }).then(fn => {
       if (cancelled) fn(); else unlisten = fn;
     });
-    return () => { cancelled = true; unlisten?.(); };
-  }, []);
+    api.onContainersError(msg => {
+      if (cancelled) return;
+      setContainers(prev => (prev.length ? [] : prev));
+      setContainersError(msg);
+    }).then(fn => {
+      if (cancelled) fn(); else unlistenErr = fn;
+    });
+    return () => { cancelled = true; unlisten?.(); unlistenErr?.(); };
+  }, [loadContainers]);
 
   useEffect(() => {
     // Tabs in display order — kept here so ⌘1..⌘6 mirrors the Sidebar.
@@ -423,6 +449,9 @@ export default function App() {
                   onInspect={(c: Container) => setModal({ type: 'detail', payload: c })}
                   onLogs={(c: Container) => { setLogTarget(c.id); setTab('logs'); }}
                   containers={containers}
+                  loadError={containersError}
+                  loaded={containersLoaded}
+                  onRetry={loadContainers}
                 />
               )}
               {tab === 'images'   && <ImagesView   t={t} search={search} reloadKey={pruneTick}
