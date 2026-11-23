@@ -8,6 +8,9 @@ use crate::model::{DoctorCheck, DoctorFix};
 
 const RUNTIME_BIN: &str = "container";
 
+/// Oldest Apple container release cgui supports.
+const MIN_CONTAINER_VERSION: &str = "1.4.1";
+
 pub async fn run() -> Vec<DoctorCheck> {
     let mut out: Vec<DoctorCheck> = Vec::new();
 
@@ -46,13 +49,16 @@ pub async fn run() -> Vec<DoctorCheck> {
         Ok(o) if o.status.success() => {
             let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
             out.push(ok(format!("`{RUNTIME_BIN} --version` → {v}")));
+            if let Some(c) = min_version_check(crate::updates::extract_version(&v).as_deref()) {
+                out.push(c);
+            }
         }
         _ => out.push(err(format!("`{RUNTIME_BIN} --version` failed"))),
     }
 
     // 4. system status (Apple-container-specific). `--format json` gives
-    // `parse_system_running` a `status` field to key off on 1.4+, and
-    // older CLIs accept the flag too (see runtime::parse_system_running).
+    // `parse_system_running` its top-level `status` field (1.4.1+, the
+    // minimum supported version).
     match Command::new(RUNTIME_BIN)
         .kill_on_drop(true)
         .args(["system", "status", "--format", "json"])
@@ -66,6 +72,10 @@ pub async fn run() -> Vec<DoctorCheck> {
             // the Start-services fix exactly when it's needed.
             if crate::runtime::parse_system_running(&body) {
                 out.push(ok("container system status: running".into()));
+                let (client, server) = crate::runtime::parse_system_versions(&body);
+                if let Some(c) = version_mismatch_check(client.as_deref(), server.as_deref()) {
+                    out.push(c);
+                }
             } else {
                 let mut c = warn("container system status not running".into());
                 c.fix = Some(DoctorFix::Run {
@@ -146,6 +156,46 @@ pub async fn run() -> Vec<DoctorCheck> {
     out
 }
 
+/// Error check when the CLI is older than the supported minimum. None when
+/// it's fine (or the version couldn't be parsed; the `--version` row
+/// already shows the raw output).
+fn min_version_check(cli: Option<&str>) -> Option<DoctorCheck> {
+    let cli = cli?;
+    if crate::updates::version_cmp(cli, MIN_CONTAINER_VERSION) != Some(std::cmp::Ordering::Less) {
+        return None;
+    }
+    let mut c = err(format!(
+        "cgui needs Apple container {MIN_CONTAINER_VERSION} or later (found {cli})"
+    ));
+    c.fix = Some(DoctorFix::Url {
+        label: "Open Apple container releases".into(),
+        url: "https://github.com/apple/container/releases".into(),
+    });
+    Some(c)
+}
+
+/// Warning check when the CLI and the running apiserver differ (a stale
+/// server keeps running after a pkg upgrade until the services restart).
+/// None when they match or either version is unknown.
+fn version_mismatch_check(client: Option<&str>, server: Option<&str>) -> Option<DoctorCheck> {
+    let (client, server) = (client?, server?);
+    let differ = match crate::updates::version_cmp(client, server) {
+        Some(ord) => ord != std::cmp::Ordering::Equal,
+        None => client != server,
+    };
+    if !differ {
+        return None;
+    }
+    let mut c = warn(format!(
+        "container CLI {client} is talking to a {server} server — restart the services"
+    ));
+    c.fix = Some(DoctorFix::Run {
+        label: "Restart services".into(),
+        action: "system-restart".into(),
+    });
+    Some(c)
+}
+
 fn ok(text: String) -> DoctorCheck {
     DoctorCheck {
         ok: true,
@@ -176,4 +226,45 @@ fn config_path(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
     Some(base.join("cgui").join(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mismatch_warns_with_restart_fix() {
+        let c = version_mismatch_check(Some("1.7.1"), Some("1.4.1")).unwrap();
+        assert!(!c.ok);
+        assert_eq!(c.warn, Some(true));
+        assert_eq!(
+            c.text,
+            "container CLI 1.7.1 is talking to a 1.4.1 server — restart the services"
+        );
+        match c.fix {
+            Some(DoctorFix::Run { action, .. }) => assert_eq!(action, "system-restart"),
+            other => panic!("unexpected fix: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn matching_or_unknown_versions_do_not_warn() {
+        assert!(version_mismatch_check(Some("1.7.1"), Some("1.7.1")).is_none());
+        assert!(version_mismatch_check(Some("1.7.1"), Some("v1.7.1")).is_none());
+        assert!(version_mismatch_check(Some("1.7.1"), None).is_none());
+        assert!(version_mismatch_check(None, Some("1.7.1")).is_none());
+    }
+
+    #[test]
+    fn min_version_errors_below_1_4_1_only() {
+        let c = min_version_check(Some("1.4.0")).unwrap();
+        assert_eq!(c.warn, Some(false));
+        assert!(c
+            .text
+            .starts_with("cgui needs Apple container 1.4.1 or later"));
+        assert!(min_version_check(Some("0.12.3")).is_some());
+        assert!(min_version_check(Some("1.4.1")).is_none());
+        assert!(min_version_check(Some("1.10.0")).is_none());
+        assert!(min_version_check(None).is_none());
+    }
 }

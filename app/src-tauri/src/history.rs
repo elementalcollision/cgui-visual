@@ -19,8 +19,10 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use rusqlite::{params, Connection};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{mpsc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::model::Container;
 
@@ -340,49 +342,178 @@ pub struct LogLine {
     pub line: String,
 }
 
-/// Persist a single log line. Best-effort — silently no-ops when the
-/// DB isn't initialised. Trims oldest rows for this container in the
-/// same transaction whenever the row count would otherwise grow past
-/// LOGS_PER_CONTAINER × 1.05 (the 5% slack avoids running the DELETE
-/// on every single insert at the cap).
+/// Flush a batch once it holds this many lines…
+const LOG_BATCH_MAX: usize = 200;
+/// …or once the oldest queued line has waited this long.
+const LOG_BATCH_WINDOW: Duration = Duration::from_millis(100);
+/// Rows over the cap tolerated before a trim runs (5% slack so a
+/// container sitting at the cap isn't trimmed on every flush).
+const LOGS_TRIM_SLACK: i64 = LOGS_PER_CONTAINER / 20;
+
+enum LogMsg {
+    Line {
+        container_id: String,
+        ts: i64,
+        line: String,
+    },
+    /// Flush everything queued so far, then ack.
+    Flush(mpsc::Sender<()>),
+}
+
+static LOG_TX: OnceLock<mpsc::Sender<LogMsg>> = OnceLock::new();
+
+fn log_sender() -> Option<&'static mpsc::Sender<LogMsg>> {
+    if let Some(tx) = LOG_TX.get() {
+        return Some(tx);
+    }
+    let (tx, rx) = mpsc::channel();
+    // Losing the init race just drops our (unused) channel pair.
+    if LOG_TX.set(tx).is_err() {
+        return LOG_TX.get();
+    }
+    let spawned = std::thread::Builder::new()
+        .name("cgui-log-writer".into())
+        .spawn(move || log_writer_loop(rx));
+    if let Err(e) = spawned {
+        eprintln!("logs writer thread: {e}");
+    }
+    LOG_TX.get()
+}
+
+/// Queue a log line for persistence. Best-effort and non-blocking —
+/// silently no-ops when the DB isn't initialised. A single writer
+/// thread batches lines (≤ LOG_BATCH_MAX or LOG_BATCH_WINDOW) into one
+/// transaction, so a chatty container no longer takes the global DB
+/// mutex per line and can't starve the 2 s metrics `record`.
 pub fn record_log(container_id: &str, line: &str) {
-    let Some(db) = DB.get() else { return };
-    let ts = Utc::now().timestamp();
-    if let Ok(conn) = db.lock() {
-        let res = conn.execute(
-            "INSERT INTO container_logs (container_id, ts, line) VALUES (?, ?, ?)",
-            params![container_id, ts, line],
-        );
-        if let Err(e) = res {
-            eprintln!("logs record: {e}");
+    if DB.get().is_none() {
+        return;
+    }
+    if let Some(tx) = log_sender() {
+        let _ = tx.send(LogMsg::Line {
+            container_id: container_id.to_string(),
+            ts: Utc::now().timestamp(),
+            line: line.to_string(),
+        });
+    }
+}
+
+/// Block (up to 2 s) until every line queued before this call is on
+/// disk. Intended for app exit; harmless to call at any time.
+pub fn flush_logs() {
+    let Some(tx) = LOG_TX.get() else { return };
+    let (ack_tx, ack_rx) = mpsc::channel();
+    if tx.send(LogMsg::Flush(ack_tx)).is_ok() {
+        let _ = ack_rx.recv_timeout(Duration::from_secs(2));
+    }
+}
+
+fn log_writer_loop(rx: mpsc::Receiver<LogMsg>) {
+    // Approximate per-container row counts, seeded lazily from the DB.
+    let mut counts: HashMap<String, i64> = HashMap::new();
+    let mut batch: Vec<(String, i64, String)> = Vec::new();
+    let mut acks: Vec<mpsc::Sender<()>> = Vec::new();
+    loop {
+        // Wait for the first message, then gather more until the window
+        // closes or the batch is full.
+        let first = match rx.recv() {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        let mut disconnected = false;
+        let deadline = Instant::now() + LOG_BATCH_WINDOW;
+        let mut next = Some(first);
+        while let Some(msg) = next.take() {
+            match msg {
+                LogMsg::Line {
+                    container_id,
+                    ts,
+                    line,
+                } => batch.push((container_id, ts, line)),
+                LogMsg::Flush(ack) => {
+                    acks.push(ack);
+                    break;
+                }
+            }
+            if batch.len() >= LOG_BATCH_MAX {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(remaining) {
+                Ok(m) => next = Some(m),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => disconnected = true,
+            }
+        }
+        if !batch.is_empty() {
+            if let Some(db) = DB.get() {
+                if let Ok(mut conn) = db.lock() {
+                    if let Err(e) = write_log_batch(&mut conn, &batch, &mut counts) {
+                        eprintln!("logs record: {e}");
+                    }
+                }
+            }
+            batch.clear();
+        }
+        for ack in acks.drain(..) {
+            let _ = ack.send(());
+        }
+        if disconnected {
             return;
         }
-        // Cheap trim: only fire when the count meaningfully exceeds the
-        // cap. Cuts the per-line cost from O(insert+count+maybe-delete)
-        // down to ~O(insert) for the steady state.
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM container_logs WHERE container_id = ?",
-                params![container_id],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        let slack = LOGS_PER_CONTAINER + LOGS_PER_CONTAINER / 20;
-        if count > slack {
-            let to_keep = LOGS_PER_CONTAINER;
-            let _ = conn.execute(
-                "DELETE FROM container_logs
-                 WHERE container_id = ?
-                   AND id NOT IN (
-                       SELECT id FROM container_logs
-                       WHERE container_id = ?
-                       ORDER BY id DESC
-                       LIMIT ?
-                   )",
-                params![container_id, container_id, to_keep],
-            );
+    }
+}
+
+/// Insert `batch` in one transaction, then trim any container whose
+/// (approximate, in-memory) row count exceeds cap + slack. Counts are
+/// seeded with one COUNT(*) the first time a container is seen, so the
+/// steady state is a plain batched INSERT with no per-line query.
+fn write_log_batch(
+    conn: &mut Connection,
+    batch: &[(String, i64, String)],
+    counts: &mut HashMap<String, i64>,
+) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    let mut touched: Vec<&str> = Vec::new();
+    {
+        let mut ins = tx.prepare_cached(
+            "INSERT INTO container_logs (container_id, ts, line) VALUES (?, ?, ?)",
+        )?;
+        for (cid, ts, line) in batch {
+            if !counts.contains_key(cid) {
+                let n: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM container_logs WHERE container_id = ?",
+                    params![cid],
+                    |r| r.get(0),
+                )?;
+                counts.insert(cid.clone(), n);
+            }
+            ins.execute(params![cid, ts, line])?;
+            if let Some(c) = counts.get_mut(cid) {
+                *c += 1;
+            }
+            if !touched.contains(&cid.as_str()) {
+                touched.push(cid);
+            }
         }
     }
+    for cid in touched {
+        if counts.get(cid).copied().unwrap_or(0) > LOGS_PER_CONTAINER + LOGS_TRIM_SLACK {
+            tx.execute(
+                "DELETE FROM container_logs
+                 WHERE container_id = ?1
+                   AND id NOT IN (
+                       SELECT id FROM container_logs
+                       WHERE container_id = ?1
+                       ORDER BY id DESC
+                       LIMIT ?2
+                   )",
+                params![cid, LOGS_PER_CONTAINER],
+            )?;
+            counts.insert(cid.to_string(), LOGS_PER_CONTAINER);
+        }
+    }
+    tx.commit()
 }
 
 /// Load the most recent `limit` lines for one container, optionally
@@ -532,6 +663,76 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    fn logs_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE container_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                container_id TEXT NOT NULL, ts INTEGER NOT NULL, line TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn lines_for(conn: &Connection, cid: &str) -> Vec<String> {
+        let mut st = conn
+            .prepare("SELECT line FROM container_logs WHERE container_id = ? ORDER BY id")
+            .unwrap();
+        st.query_map([cid], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    fn batch_of(cid: &str, from: usize, n: usize) -> Vec<(String, i64, String)> {
+        (from..from + n)
+            .map(|i| (cid.to_string(), 1, format!("l{i}")))
+            .collect()
+    }
+
+    #[test]
+    fn log_batch_inserts_in_order_and_counts() {
+        let mut conn = logs_conn();
+        let mut counts = HashMap::new();
+        let mut b = batch_of("a", 0, 3);
+        b.extend(batch_of("b", 0, 2));
+        write_log_batch(&mut conn, &b, &mut counts).unwrap();
+        assert_eq!(lines_for(&conn, "a"), vec!["l0", "l1", "l2"]);
+        assert_eq!(lines_for(&conn, "b"), vec!["l0", "l1"]);
+        assert_eq!(counts["a"], 3);
+        assert_eq!(counts["b"], 2);
+    }
+
+    #[test]
+    fn log_batch_seeds_count_from_existing_rows() {
+        let mut conn = logs_conn();
+        write_log_batch(&mut conn, &batch_of("a", 0, 5), &mut HashMap::new()).unwrap();
+        // Fresh in-memory counter (e.g. after restart) re-seeds from the DB.
+        let mut counts = HashMap::new();
+        write_log_batch(&mut conn, &batch_of("a", 5, 2), &mut counts).unwrap();
+        assert_eq!(counts["a"], 7);
+    }
+
+    #[test]
+    fn log_batch_trims_only_past_slack_and_only_that_container() {
+        let mut conn = logs_conn();
+        let mut counts = HashMap::new();
+        write_log_batch(&mut conn, &batch_of("other", 0, 10), &mut counts).unwrap();
+        // Exactly cap + slack: no trim yet.
+        let at_limit = (LOGS_PER_CONTAINER + LOGS_TRIM_SLACK) as usize;
+        write_log_batch(&mut conn, &batch_of("a", 0, at_limit), &mut counts).unwrap();
+        assert_eq!(counts["a"], LOGS_PER_CONTAINER + LOGS_TRIM_SLACK);
+        // One more line crosses the threshold: trimmed back to the cap,
+        // keeping the newest rows.
+        write_log_batch(&mut conn, &batch_of("a", at_limit, 1), &mut counts).unwrap();
+        assert_eq!(counts["a"], LOGS_PER_CONTAINER);
+        let kept = lines_for(&conn, "a");
+        assert_eq!(kept.len() as i64, LOGS_PER_CONTAINER);
+        assert_eq!(kept.last().unwrap(), &format!("l{at_limit}"));
+        assert_eq!(lines_for(&conn, "other").len(), 10);
     }
 
     #[test]

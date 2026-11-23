@@ -185,9 +185,101 @@ pub fn close(session_id: &str) -> Result<()> {
         .as_mut()
         .ok_or_else(|| anyhow!("registry not initialised"))?;
     if let Some(s) = map.remove(session_id) {
-        if let Ok(mut child) = s.child.lock() {
-            let _ = child.kill();
-        }
+        // Reap on a background thread so close() never blocks on wait().
+        kill_and_reap_async(s);
     }
     Ok(())
+}
+
+/// Kill the session's child and wait() on it so it doesn't linger as a
+/// zombie. Dropping the Session afterwards closes the pty pair.
+fn kill_and_reap(s: Session) {
+    let mut child = match s.child.into_inner() {
+        Ok(c) => c,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn kill_and_reap_async(s: Session) -> thread::JoinHandle<()> {
+    thread::spawn(move || kill_and_reap(s))
+}
+
+/// Close every open session. Called on app exit so terminal children don't
+/// outlive cgui. Blocks briefly: kill() is SIGKILL so wait() returns fast.
+pub fn close_all() {
+    let sessions: Vec<Session> = match registry().as_mut() {
+        Some(map) => map.drain().map(|(_, s)| s).collect(),
+        None => return,
+    };
+    for s in sessions {
+        kill_and_reap(s);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Build a Session around a real pty child running `sleep`, bypassing
+    // open() which needs a Tauri AppHandle.
+    fn sleeper_session() -> (Session, u32) {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("openpty");
+        let mut cmd = CommandBuilder::new("sleep");
+        cmd.arg("30");
+        let child = pair.slave.spawn_command(cmd).expect("spawn sleep");
+        let pid = child.process_id().expect("pid");
+        let writer = pair.master.take_writer().expect("writer");
+        (
+            Session {
+                master: pair.master,
+                writer: Mutex::new(writer),
+                child: Mutex::new(child),
+            },
+            pid,
+        )
+    }
+
+    // `kill -0` succeeds for live processes AND zombies; it fails only once
+    // the process is fully reaped.
+    fn pid_exists(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn close_kills_and_reaps_child() {
+        let (s, pid) = sleeper_session();
+        assert!(pid_exists(pid));
+        kill_and_reap_async(s).join().unwrap();
+        assert!(!pid_exists(pid), "child {pid} left as zombie");
+    }
+
+    #[test]
+    fn close_all_reaps_every_registered_session() {
+        let (a, pa) = sleeper_session();
+        let (b, pb) = sleeper_session();
+        {
+            let mut g = registry();
+            let m = g.as_mut().unwrap();
+            m.insert("test-close-all-a".into(), a);
+            m.insert("test-close-all-b".into(), b);
+        }
+        close_all();
+        assert!(!pid_exists(pa) && !pid_exists(pb));
+        assert!(registry().as_ref().unwrap().is_empty());
+    }
 }

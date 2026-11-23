@@ -2,10 +2,11 @@
 
 import React, { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ThemeTokens } from './theme';
-import type { Container, Image, Severity, Stack, Tab, TrivyFinding, TrivyResult, Update, DoctorCheck, DoctorFix, HistoryPoint, VulnHistory, Runtime, DiskUsage, DiskUsageRow } from './types';
+import type { Container, Image, ScanResponse, Severity, Stack, Tab, TrivyFinding, Update, DoctorCheck, DoctorFix, HistoryPoint, VulnHistory, Runtime, DiskUsage, DiskUsageRow } from './types';
 import { Icon, Bar, Sparkline, iconBtn, pillBtn, fmtCreated } from './components';
 import { api } from './api';
 import { toast, withToast } from './toast';
+import { errMessage, looksLikeServicesDown } from './loadState';
 
 function Backdrop({ onClose, children }: { onClose: () => void; children: ReactNode }) {
   return (
@@ -400,7 +401,10 @@ export function DetailModal({ item, t, onClose, onExec }: {
 }) {
   const [json, setJson] = useState<string>('Loading…');
   const [tab, setTab] = useState<InspectTab>('trends');
-  useEffect(() => { api.inspectContainer(item.id).then(setJson); }, [item.id]);
+  useEffect(() => {
+    api.inspectContainer(item.id).then(setJson)
+      .catch(e => setJson(`Failed to load inspect data: ${errMessage(e)}`));
+  }, [item.id]);
   const c = item;
   // Parse once per JSON change. Errors are tolerated — the Raw tab still
   // shows whatever came back, even when it isn't valid JSON.
@@ -650,6 +654,17 @@ export function BuildModal({ t, onClose }: { t: ThemeTokens; onClose: () => void
   const [lines, setLines] = useState<string[]>([]);
   const [done, setDone] = useState<boolean | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
+  const [starting, setStarting] = useState(false);
+  // On 1.6+ `container build` is a CLI plugin and fails with "Plugins are
+  // unavailable ..." while the services are stopped.
+  const servicesDown = done === false && lines.some(looksLikeServicesDown);
+  const startServices = () => {
+    setStarting(true);
+    withToast('start services', api.systemStart())
+      .then(() => { setSubmitted(false); })
+      .catch(() => {})
+      .finally(() => setStarting(false));
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -666,7 +681,7 @@ export function BuildModal({ t, onClose }: { t: ThemeTokens; onClose: () => void
 
   // Follow the tail as lines stream in.
   useEffect(() => {
-    logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
+    logRef.current?.scrollTo?.({ top: logRef.current.scrollHeight });
   }, [lines]);
 
   const pickContext = async () => {
@@ -753,6 +768,11 @@ export function BuildModal({ t, onClose }: { t: ThemeTokens; onClose: () => void
               <div key={i} style={{ color: /error|fail/i.test(l) ? t.danger : t.fg1, padding: '1px 0', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{l}</div>
             ))}
             {done === null && <div style={{ color: t.fg3 }}>▍</div>}
+            {servicesDown && (
+              <div role="alert" style={{ marginTop: 10, fontFamily: 'inherit', color: t.warning }}>
+                Container services aren't running — builds need them.
+              </div>
+            )}
           </div>
         )}
 
@@ -763,6 +783,11 @@ export function BuildModal({ t, onClose }: { t: ThemeTokens; onClose: () => void
               : done ? 'Image is now in the Images tab' : `${lines.length} lines`}
           </span>
           <div style={{ display: 'flex', gap: 8 }}>
+            {servicesDown && (
+              <button style={{ ...pillBtn(t, t.success), opacity: starting ? 0.5 : 1 }} disabled={starting} onClick={startServices}>
+                <Icon name="play" size={12} color={t.success} />Start services
+              </button>
+            )}
             {submitted && done !== null && (
               <button style={pillBtn(t)} onClick={() => { setSubmitted(false); }}>Edit & rebuild</button>
             )}
@@ -788,7 +813,9 @@ function nvdUrl(cve: string): string {
 }
 
 export function TrivyModal({ t, image, onClose }: { t: ThemeTokens; image?: string; onClose: () => void }) {
-  const [data, setData] = useState<TrivyResult | null>(null);
+  const [resp, setResp] = useState<ScanResponse | null>(null);
+  // Bumped by "Retry" on a failed scan to re-run the effect below.
+  const [attempt, setAttempt] = useState(0);
   const [filter, setFilter] = useState<Severity | null>(null);
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<TrivyFinding | null>(null);
@@ -797,17 +824,54 @@ export function TrivyModal({ t, image, onClose }: { t: ThemeTokens; image?: stri
   const [vulnHistory, setVulnHistory] = useState<VulnHistory | null>(null);
   useEffect(() => {
     let cancelled = false;
-    setData(null);
+    setResp(null);
     setVulnHistory(null);
-    api.scanImage(image || '').then(d => {
+    api.scanImage(image || '').then(r => {
       if (cancelled) return;
-      setData(d);
-      // Refresh trend after the backend has persisted this scan.
-      api.vulnHistory(d.image).then(h => { if (!cancelled) setVulnHistory(h); });
+      setResp(r);
+      // Refresh trend after the backend has persisted this scan (only
+      // completed scans are persisted).
+      if (r.status === 'ok') {
+        api.vulnHistory(r.result.image).then(h => { if (!cancelled) setVulnHistory(h); });
+      }
+    }).catch(e => {
+      if (!cancelled) setResp({ status: 'failed', message: errMessage(e) });
     });
     return () => { cancelled = true; };
-  }, [image]);
-  if (!data) return null;
+  }, [image, attempt]);
+  if (!resp) return null;
+  if (resp.status !== 'ok') {
+    // Neither of these is a clean result: never render counts/findings.
+    const notInstalled = resp.status === 'notInstalled';
+    return (
+      <Backdrop onClose={onClose}>
+        <div role="alert" style={{ width: 560, background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden' }}>
+          <div style={{ padding: '16px 22px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 12 }}>
+            <Icon name="shield" size={18} color={t.danger} />
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 15, fontWeight: 600, color: t.fg1 }}>{notInstalled ? 'Trivy is not installed' : 'Scan failed'}</div>
+              <div style={{ fontSize: 12, color: t.fg3, fontFamily: t.mono }}>{image}</div>
+            </div>
+            <button onClick={onClose} style={iconBtn()}><Icon name="x" size={16} color={t.fg2} /></button>
+          </div>
+          <div style={{ padding: '18px 22px', fontSize: 13, color: t.fg2, lineHeight: 1.5 }}>
+            {notInstalled ? (
+              <>The image was <b>not</b> scanned, so there is no result. Install Trivy to enable scanning:
+                <pre style={{ margin: '10px 0 0', fontFamily: t.mono, fontSize: 12, color: t.fg1 }}>brew install trivy</pre></>
+            ) : (
+              <>The image was <b>not</b> scanned, so this is not a clean result.
+                <pre style={{ margin: '10px 0 0', whiteSpace: 'pre-wrap', fontFamily: t.mono, fontSize: 11, color: t.fg2, background: t.surfaceAlt, border: `1px solid ${t.border}`, borderRadius: 6, padding: '8px 10px' }}>{resp.message}</pre></>
+            )}
+          </div>
+          <div style={{ padding: '12px 22px', borderTop: `1px solid ${t.border}`, display: 'flex', justifyContent: 'flex-end', gap: 8, background: t.surfaceAlt }}>
+            <button style={pillBtn(t)} onClick={() => setAttempt(n => n + 1)}>{notInstalled ? 'Check again' : 'Retry'}</button>
+            <button style={pillBtn(t)} onClick={onClose}>Close</button>
+          </div>
+        </div>
+      </Backdrop>
+    );
+  }
+  const data = resp.result;
   const sevColor: Record<Severity, string> = { CRITICAL: t.danger, HIGH: '#E5704A', MEDIUM: t.warning, LOW: t.fg3 };
   const findings = data.findings.filter(f =>
     (!filter || f.sev === filter) &&
@@ -843,6 +907,11 @@ export function TrivyModal({ t, image, onClose }: { t: ThemeTokens; image?: stri
             modal's max-height + scrollbars. */}
         <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
           <div style={{ flex: 1, overflow: 'auto', borderRight: selected ? `1px solid ${t.border}` : 'none' }}>
+            {data.findings.length === 0 && (
+              <div role="status" style={{ padding: '40px 22px', textAlign: 'center', color: t.success, fontSize: 13 }}>
+                Scan completed: no vulnerabilities found.
+              </div>
+            )}
             {findings.map((f, i) => {
               const active = selected?.cve === f.cve && selected?.pkg === f.pkg;
               return (
@@ -1013,8 +1082,22 @@ function VulnTrendStrip({ t, sevColor, history }: {
 
 export function UpdateModal({ t, onClose }: { t: ThemeTokens; onClose: () => void }) {
   const [items, setItems] = useState<Update[]>([]);
+  const [error, setError] = useState<string | null>(null);
   const [idx, setIdx] = useState(0);
-  useEffect(() => { api.listUpdates().then(setItems); }, []);
+  useEffect(() => {
+    api.listUpdates().then(setItems).catch(e => setError(errMessage(e)));
+  }, []);
+  if (error) {
+    return (
+      <Backdrop onClose={onClose}>
+        <div role="alert" style={{ width: 520, background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, padding: '18px 22px' }}>
+          <div style={{ fontSize: 15, fontWeight: 600, color: t.fg1 }}>Couldn't check for updates</div>
+          <div style={{ marginTop: 8, fontSize: 12, color: t.fg2, fontFamily: t.mono }}>{error}</div>
+          <div style={{ marginTop: 14, textAlign: 'right' }}><button style={pillBtn(t)} onClick={onClose}>Close</button></div>
+        </div>
+      </Backdrop>
+    );
+  }
   if (!items.length) return null;
   const u = items[idx];
 
@@ -1088,6 +1171,7 @@ export function UpdateModal({ t, onClose }: { t: ThemeTokens; onClose: () => voi
 // anything resembling arbitrary execution.
 const DOCTOR_ACTIONS: Record<string, () => Promise<void>> = {
   'system-start': () => api.systemStart(),
+  'system-restart': () => api.systemRestart(),
 };
 
 async function runDoctorFix(fix: DoctorFix): Promise<'opened' | 'copied' | 'ran'> {
@@ -1780,7 +1864,7 @@ export function SettingsModal({
           <SettingsToggle
             t={t}
             label="Menu-bar mode"
-            hint="Closing the main window keeps cgui running in the menu bar. The tray icon shows the running container count."
+            hint="Closing the main window hides it instead of quitting: cgui keeps running in the menu bar (the Dock icon is hidden while the window is hidden) and the tray icon shows the running container count. Use the tray's Show cgui to bring the window back, or Quit cgui to exit. If your menu bar hides the icon, open cgui again from Spotlight or Finder to bring the window back. When off, closing the window quits cgui. Takes effect immediately."
             value={menubarMode}
             onChange={setMenubarMode}
           />
@@ -1969,12 +2053,30 @@ function MachinesPanel({ t }: { t: ThemeTokens }) {
 function BuilderPanel({ t }: { t: ThemeTokens }) {
   const [builder, setBuilder] = useState<Container | null | undefined>(undefined);
   const [busy, setBusy] = useState(false);
-  const reload = () => api.builderStatus().then(setBuilder).catch(() => setBuilder(null));
+  const [servicesDown, setServicesDown] = useState(false);
+  const reload = () => api.builderStatus()
+    .then(b => { setServicesDown(false); setBuilder(b); })
+    .catch(e => {
+      // `container builder` is a CLI plugin on 1.6+: with services stopped
+      // it fails with "Plugins are unavailable ...".
+      setServicesDown(looksLikeServicesDown(errMessage(e)));
+      setBuilder(null);
+    });
   useEffect(() => { reload(); }, []);
   const act = (label: string, p: Promise<void>) => {
     setBusy(true);
     withToast(label, p).then(reload).catch(() => {}).finally(() => setBusy(false));
   };
+  if (servicesDown) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0' }}>
+        <span style={{ width: 8, height: 8, borderRadius: '50%', background: t.warning }} />
+        <div style={{ flex: 1, fontSize: 13, color: t.fg1 }}>Container services aren't running</div>
+        <button style={{ ...pillBtn(t, t.success), opacity: busy ? 0.5 : 1 }} disabled={busy}
+                onClick={() => act('start services', api.systemStart())}>Start services</button>
+      </div>
+    );
+  }
   const running = builder?.status === 'running';
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0' }}>

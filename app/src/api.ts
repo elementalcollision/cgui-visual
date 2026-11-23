@@ -4,8 +4,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
-  Container, Image, Volume, Network, Stack,
-  TrivyResult, Update, DoctorCheck, HistoryPoint, VulnHistory, DiskUsage,
+  Container, Image, ImageListing, Volume, Network, StackListing,
+  ScanResponse, Update, DoctorCheck, HistoryPoint, VulnHistory, DiskUsage,
 } from './types';
 import * as fixtures from './fixtures';
 
@@ -36,6 +36,14 @@ async function call<T>(cmd: string, fallback: T, args?: Record<string, unknown>)
   }
 }
 
+// For list/inspect commands whose failures the UI must show (never as
+// empty data): outside Tauri (`vite dev`) return the fixture; inside
+// Tauri propagate the rejection so views can render an error state.
+async function callOrDevFallback<T>(cmd: string, fallback: T, args?: Record<string, unknown>): Promise<T> {
+  if (!inTauri) return fallback;
+  return invoke<T>(cmd, args);
+}
+
 // For commands where we want to surface errors to the user (actions like
 // stop/delete), don't swallow.
 async function invokeStrict<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -45,15 +53,20 @@ async function invokeStrict<T>(cmd: string, args?: Record<string, unknown>): Pro
 
 export const api = {
   // Lists / inspect
-  listContainers: () => call<Container[]>('list_containers', fixtures.containers),
-  listImages:     () => call<Image[]>('list_images', fixtures.images),
-  listVolumes:    () => call<Volume[]>('list_volumes', fixtures.volumes),
-  listNetworks:   () => call<Network[]>('list_networks', fixtures.networks),
-  listStacks:     () => call<Stack[]>('list_stacks', fixtures.stacks),
-  inspectContainer: (id: string) => call<string>('inspect_container', fixtures.inspectJson, { id }),
+  // These reject on CLI failure (services stopped, etc.) so views can show
+  // an explicit error state rather than "nothing exists".
+  listContainers: () => callOrDevFallback<Container[]>('list_containers', fixtures.containers),
+  listImages:     () => callOrDevFallback<Image[]>('list_images', fixtures.images),
+  listImagesChecked: () => inTauri
+    ? invoke<ImageListing>('list_images_checked')
+    : Promise.resolve<ImageListing>({ images: fixtures.images, warning: null }),
+  listVolumes:    () => callOrDevFallback<Volume[]>('list_volumes', fixtures.volumes),
+  listNetworks:   () => callOrDevFallback<Network[]>('list_networks', fixtures.networks),
+  listStacks:     () => callOrDevFallback<StackListing>('list_stacks', { stacks: fixtures.stacks, invalid: [] }),
+  inspectContainer: (id: string) => callOrDevFallback<string>('inspect_container', fixtures.inspectJson, { id }),
   doctor:         () => call<DoctorCheck[]>('doctor', fixtures.doctor),
-  scanImage:      (image: string) => call<TrivyResult>('scan_image', fixtures.trivy, { image }),
-  listUpdates:    () => call<Update[]>('list_updates', fixtures.updates),
+  scanImage:      (image: string) => callOrDevFallback<ScanResponse>('scan_image', { status: 'ok', result: fixtures.trivy }, { image }),
+  listUpdates:    () => callOrDevFallback<Update[]>('list_updates', fixtures.updates),
 
   // Container actions — strict; UI surfaces errors via console + (later) toasts.
   startContainer:   (id: string) => inTauri ? invokeStrict<void>('start_container',   { id }) : Promise.resolve(),
@@ -67,8 +80,13 @@ export const api = {
   cleanContainers: (ids: string[]) => inTauri ? invokeStrict<void>('clean_containers', { ids }) : Promise.resolve(),
 
   // Streams: backend spawns a child process, frontend subscribes to events.
-  startLogStream: (id: string, opts?: { boot?: boolean; tail?: number }) =>
-    inTauri ? invokeStrict<void>('start_log_stream', { id, boot: opts?.boot, tail: opts?.tail }) : Promise.resolve(),
+  // `streamId` is chosen by the caller (see newStreamId) so it can subscribe
+  // to `logs:tick:<streamId>` before the child starts; the backend keeps a
+  // registry keyed by it and `stopLogStream` kills the child.
+  startLogStream: (streamId: string, id: string, opts?: { boot?: boolean; tail?: number }) =>
+    inTauri ? invokeStrict<void>('start_log_stream', { streamId, id, boot: opts?.boot, tail: opts?.tail }) : Promise.resolve(),
+  stopLogStream: (streamId: string) =>
+    inTauri ? invokeStrict<void>('stop_log_stream', { streamId }) : Promise.resolve(),
   startPull:      (reference: string) => inTauri ? invokeStrict<void>('start_pull', { reference }) : Promise.resolve(),
 
   // Deletes (strict — caller should confirm first and surface errors via toast).
@@ -221,7 +239,13 @@ export const api = {
     if (!inTauri) return () => {};
     return listen<Container[]>('containers:tick', e => cb(e.payload));
   },
-  onLogLine: async (cb: (line: string) => void): Promise<UnlistenFn> => {
+  // Emitted on each poll tick while the container poll is failing (payload:
+  // the CLI's error text). No-op outside Tauri.
+  onContainersError: async (cb: (message: string) => void): Promise<UnlistenFn> => {
+    if (!inTauri) return () => {};
+    return listen<string>('containers:tickError', e => cb(e.payload));
+  },
+  onLogLine: async (streamId: string, cb: (line: string) => void): Promise<UnlistenFn> => {
     if (!inTauri) {
       // Replay fixture lines on a timer so the LogsView still has movement.
       let i = 0;
@@ -231,7 +255,7 @@ export const api = {
       }, 80);
       return () => window.clearInterval(id);
     }
-    return listen<string>('logs:tick', e => cb(e.payload));
+    return listen<string>(`logs:tick:${streamId}`, e => cb(e.payload));
   },
   onPullLine: async (cb: (line: string) => void): Promise<UnlistenFn> => {
     if (!inTauri) {
@@ -281,7 +305,8 @@ export const api = {
 
   // Build experience (phase 3). The builder is a dedicated VM; status
   // returns null when no builder instance exists yet.
-  builderStatus: () => call<Container | null>('builder_status', null),
+  // Rejects on CLI failure so the Builder panel can offer Start services.
+  builderStatus: () => callOrDevFallback<Container | null>('builder_status', null),
   builderStart: (cpus?: number, memory?: string) =>
     inTauri ? invokeStrict<void>('builder_start', { cpus, memory }) : Promise.resolve(),
   builderStop: () => inTauri ? invokeStrict<void>('builder_stop') : Promise.resolve(),
@@ -289,6 +314,7 @@ export const api = {
 
   // Runtime service controls (sudo-free). Surfaced in Doctor (start) and
   // Settings (start/stop).
+  systemRestart: () => inTauri ? invokeStrict<void>('system_restart') : Promise.resolve(),
   systemStart: () => inTauri ? invokeStrict<void>('system_start') : Promise.resolve(),
   systemStop:  () => inTauri ? invokeStrict<void>('system_stop')  : Promise.resolve(),
   // Whether services are up; drives the Settings Services status dot.
@@ -342,3 +368,10 @@ export const api = {
     return listen<number>('containers:tickAt', e => cb(e.payload));
   },
 };
+
+/** Fresh id for one log stream (alphanumerics/dashes only: it ends up in an event name). */
+export function newStreamId(): string {
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `s${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+}

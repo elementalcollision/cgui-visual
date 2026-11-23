@@ -7,6 +7,7 @@
 // ~/.config/cgui-gui/updates-cache.json.
 
 use serde::Deserialize;
+use std::cmp::Ordering;
 use std::time::Duration;
 use tokio::process::Command;
 
@@ -51,8 +52,12 @@ const COMPONENTS: &[Component] = &[
     },
 ];
 
-pub async fn check() -> Vec<Update> {
+/// An empty list means "up to date". When every release lookup failed
+/// (offline, rate-limited) that's an error, not "up to date".
+pub async fn check() -> Result<Vec<Update>, String> {
     let mut out = Vec::new();
+    let mut looked_up = 0usize;
+    let mut failed = 0usize;
     for c in COMPONENTS {
         // Skip silently when the companion isn't installed locally.
         // The in-app self-updater handles cgui-visual's own updates
@@ -60,13 +65,16 @@ pub async fn check() -> Vec<Update> {
         let Some(installed) = installed_version(c).await else {
             continue;
         };
+        looked_up += 1;
         let Some(release) = fetch_release(c.repo).await else {
+            failed += 1;
             continue;
         };
         let latest = strip_v_prefix(&release.tag_name);
-        if installed == latest {
+        // Up to date, or a newer local build than the latest release.
+        if !update_available(&installed, &latest) {
             continue;
-        } // up to date
+        }
         out.push(Update {
             component: c.label.to_string(),
             installed,
@@ -78,7 +86,17 @@ pub async fn check() -> Vec<Update> {
             url: format!("https://github.com/{}/releases/tag/v{latest}", c.repo),
         });
     }
-    out
+    lookup_verdict(looked_up, failed)?;
+    Ok(out)
+}
+
+fn lookup_verdict(looked_up: usize, failed: usize) -> Result<(), String> {
+    if looked_up > 0 && failed == looked_up {
+        return Err(
+            "couldn't reach GitHub to check for updates (offline or rate-limited)".to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Resolve the installed version of a component, or None when the
@@ -103,13 +121,48 @@ async fn installed_version(c: &Component) -> Option<String> {
     extract_version(&s)
 }
 
-fn extract_version(s: &str) -> Option<String> {
+pub(crate) fn extract_version(s: &str) -> Option<String> {
     s.split(|c: char| c.is_whitespace() || c == ',' || c == '(' || c == ')')
         .find(|tok| {
             let t = tok.trim_start_matches('v');
             !t.is_empty() && t.chars().next().is_some_and(|c| c.is_ascii_digit()) && t.contains('.')
         })
         .map(strip_v_prefix)
+}
+
+/// True when `latest` is strictly newer than `installed`. If either
+/// string isn't a parseable version, any difference counts as an update.
+fn update_available(installed: &str, latest: &str) -> bool {
+    match version_cmp(installed, latest) {
+        Some(ord) => ord == Ordering::Less,
+        None => installed != latest,
+    }
+}
+
+/// Numeric components of an `x.y.z` version plus whether it carries a
+/// pre-release suffix (`-rc1`). Build metadata (`+abc`) is ignored.
+fn parse_version(s: &str) -> Option<(Vec<u64>, bool)> {
+    let s = s.trim().trim_start_matches('v');
+    let s = s.split('+').next().unwrap_or(s);
+    let (core, pre) = match s.split_once('-') {
+        Some((c, _)) => (c, true),
+        None => (s, false),
+    };
+    let parts: Option<Vec<u64>> = core.split('.').map(|p| p.parse().ok()).collect();
+    let parts = parts.filter(|p| !p.is_empty())?;
+    Some((parts, pre))
+}
+
+/// Numeric semver-style comparison (`1.10.0 > 1.7.1`). Missing trailing
+/// components count as 0; a pre-release sorts before its release.
+/// `None` when either side isn't a parseable version.
+pub(crate) fn version_cmp(a: &str, b: &str) -> Option<Ordering> {
+    let (mut pa, pre_a) = parse_version(a)?;
+    let (mut pb, pre_b) = parse_version(b)?;
+    let n = pa.len().max(pb.len());
+    pa.resize(n, 0);
+    pb.resize(n, 0);
+    Some(pa.cmp(&pb).then(pre_b.cmp(&pre_a)))
 }
 
 fn strip_v_prefix(s: &str) -> String {
@@ -160,6 +213,47 @@ mod tests {
         assert_eq!(extract_version("v0.13.0").as_deref(), Some("0.13.0"));
         assert_eq!(extract_version("cgui 1.4.5\n").as_deref(), Some("1.4.5"));
         assert_eq!(extract_version("no version here"), None);
+    }
+
+    #[test]
+    fn version_cmp_is_numeric() {
+        use Ordering::*;
+        assert_eq!(version_cmp("1.4.0", "1.4.1"), Some(Less));
+        assert_eq!(version_cmp("1.4.1", "1.7.1"), Some(Less));
+        assert_eq!(version_cmp("1.7.1", "1.10.0"), Some(Less));
+        assert_eq!(version_cmp("1.10.0", "1.7.1"), Some(Greater));
+        assert_eq!(version_cmp("1.7.1", "v1.7.1"), Some(Equal));
+        assert_eq!(version_cmp("1.7", "1.7.0"), Some(Equal));
+        assert_eq!(version_cmp("1.8.0-rc1", "1.8.0"), Some(Less));
+        assert_eq!(version_cmp("1.7.1+build5", "1.7.1"), Some(Equal));
+        assert_eq!(version_cmp("garbage", "1.7.1"), None);
+    }
+
+    #[test]
+    fn version_cmp_works_on_extracted_cli_output() {
+        let v = extract_version("container CLI version 1.7.1 (build: release, commit: a15b460)")
+            .unwrap();
+        assert_eq!(v, "1.7.1");
+        assert_eq!(version_cmp(&v, "1.4.1"), Some(Ordering::Greater));
+        assert_eq!(version_cmp(&v, "1.7.1"), Some(Ordering::Equal));
+    }
+
+    #[test]
+    fn newer_local_build_is_not_an_update() {
+        assert!(!update_available("1.8.0", "1.7.1"));
+        assert!(!update_available("1.7.1", "1.7.1"));
+        assert!(update_available("1.7.1", "1.10.0"));
+        // Unparseable on either side: fall back to "different means update".
+        assert!(update_available("nightly", "1.7.1"));
+    }
+
+    #[test]
+    fn lookup_verdict_only_errors_when_every_lookup_failed() {
+        assert!(lookup_verdict(0, 0).is_ok()); // nothing installed
+        assert!(lookup_verdict(2, 0).is_ok());
+        assert!(lookup_verdict(2, 1).is_ok()); // partial: report what we have
+        assert!(lookup_verdict(2, 2).is_err());
+        assert!(lookup_verdict(1, 1).is_err());
     }
 
     #[test]

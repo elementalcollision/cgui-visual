@@ -42,6 +42,13 @@ export interface Image {
   layers: number;
 }
 
+/** `image ls` result: readable images plus a non-blocking warning when the
+ *  CLI (>= 1.6) skipped unreadable ones and exited non-zero. */
+export interface ImageListing {
+  images: Image[];
+  warning?: string | null;
+}
+
 export interface Volume {
   name: string;
   driver: string;
@@ -111,11 +118,32 @@ export interface TrivyFinding {
   refs?: string[];
 }
 
+/** A stack TOML file that couldn't be read/parsed (shown as an error row). */
+export interface InvalidStack {
+  file: string;
+  name: string;
+  error: string;
+}
+
+export interface StackListing {
+  stacks: Stack[];
+  invalid: InvalidStack[];
+}
+
 export interface TrivyResult {
   image: string;
   counts: Record<Severity, number>;
   findings: TrivyFinding[];
 }
+
+/**
+ * Outcome of a scan. `notInstalled` and `failed` are distinct from a clean
+ * result so a missing/failed scan is never rendered as "0 CVEs".
+ */
+export type ScanResponse =
+  | { status: 'ok'; result: TrivyResult }
+  | { status: 'notInstalled' }
+  | { status: 'failed'; message: string };
 
 export interface Update {
   component: string;

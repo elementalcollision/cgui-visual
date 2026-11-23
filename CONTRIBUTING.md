@@ -49,6 +49,23 @@ npm run dev
   `state::poll_once`, `runtime::list_images/volumes/networks`, the stacks
   parser, and the live GitHub updates check.
 
+## Live CLI tests
+
+`app/src-tauri/tests/live_cli.rs` drives the app's own runtime functions
+against a real `container` CLI. It is opt-in: every test is `#[ignore]` and
+also returns early unless `CGUI_LIVE=1`, so `cargo test` and CI never run it.
+
+```sh
+cd app/src-tauri
+CGUI_LIVE=1 cargo test --test live_cli -- --ignored --nocapture
+```
+
+Needs services running and `alpine:latest` pullable; takes about a minute.
+Tests only create `cgui-live-<pid>-*` resources and delete them on exit
+(even on panic). Offline parser tests use real CLI output committed under
+`app/src-tauri/tests/fixtures/<version>/`; refresh or add a version with
+`app/src-tauri/scripts/capture-fixtures.sh <output-dir>`.
+
 ## Code conventions
 
 - **No comments unless WHY isn't obvious** — well-named identifiers do the
@@ -57,10 +74,12 @@ npm run dev
 - **Frontend types in `src/types.ts` mirror Rust serde shapes in
   `src-tauri/src/model.rs`.** Add fields to both, with serde
   `rename_all = "camelCase"` on the Rust side.
-- **Every backend command has a fixture fallback** — `commands.rs` calls
-  `runtime::available()` and falls back to `fixtures::*` when the CLI
-  isn't on PATH. Don't break this; design work outside Tauri depends on
-  it.
+- **List/inspect commands fall back to fixtures only when the CLI isn't
+  on PATH (debug builds)** — `commands.rs` calls `runtime::available()`
+  and uses `fixtures::*` in that case; `api.ts` does the same outside
+  Tauri. A CLI call that *fails* (e.g. services stopped) must return an
+  error, never an empty list or fixture, so the UI can show it. Don't
+  break the dev fallback; design work outside Tauri depends on it.
 - **Streaming events use the pattern** `start_X(args)` invoke +
   `X:tick` event. See `start_log_stream` and `start_pull` for the
   template.
