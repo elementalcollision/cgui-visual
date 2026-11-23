@@ -10,6 +10,7 @@ pub mod runtime;
 pub mod snapshot;
 pub mod stacks;
 pub mod state;
+pub mod timeutil;
 pub mod trivy;
 pub mod updates;
 

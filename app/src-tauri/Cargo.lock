@@ -70,7 +70,6 @@ version = "0.6.2"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
- "chrono",
  "portable-pty",
  "rusqlite",
  "serde",
@@ -85,6 +84,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
+ "time",
  "tokio",
  "toml 1.2.2+spec-1.1.0",
  "uuid",
