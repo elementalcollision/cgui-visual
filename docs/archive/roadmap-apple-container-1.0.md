@@ -1,3 +1,5 @@
+> **Historical.** This gap analysis was written against cgui-visual v0.2.5 and apple/container 1.0.0 and is no longer maintained; see [`../architecture.md`](../architecture.md) for the current layout.
+
 # Divergence roadmap: apple/container 1.0.0 vs cgui-visual
 
 Source basis: `apple/container` tag `1.0.0` (commit `ee848e3`), parsed from

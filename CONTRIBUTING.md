@@ -71,6 +71,10 @@ Tests only create `cgui-live-<pid>-*` resources and delete them on exit
 - **No comments unless WHY isn't obvious** — well-named identifiers do the
   what; comments are for hidden constraints, subtle invariants, and
   workarounds.
+- **Where things live.** Dialogs are one file each under `app/src/modals/`
+  (add new ones to `modals/index.ts` and `ModalsHost.tsx`); CLI calls are
+  grouped by area under `app/src-tauri/src/runtime/` and re-exported from
+  `runtime/mod.rs`. See [`docs/architecture.md`](./docs/architecture.md).
 - **Frontend types in `src/types.ts` mirror Rust serde shapes in
   `src-tauri/src/model.rs`.** Add fields to both, with serde
   `rename_all = "camelCase"` on the Rust side.

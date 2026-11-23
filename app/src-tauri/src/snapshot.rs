@@ -12,7 +12,6 @@
 // `restore(create(name)) == name's TOML on disk`.
 
 use anyhow::{anyhow, Context, Result};
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 const MAGIC: &str = "cgui-snapshot";
@@ -56,7 +55,7 @@ pub fn create(name: &str, note: &str) -> Result<String> {
     let env = Envelope {
         kind: MAGIC.into(),
         version: VERSION,
-        created_at: Utc::now().to_rfc3339(),
+        created_at: crate::timeutil::now_rfc3339(),
         cgui_version: env!("CARGO_PKG_VERSION").to_string(),
         stack: SnapshotStack {
             name: name.into(),

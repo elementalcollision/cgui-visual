@@ -24,7 +24,7 @@ struct Set {
 
 macro_rules! fx {
     ($v:literal, $f:literal) => {
-        include_str!(concat!("../tests/fixtures/", $v, "/", $f))
+        include_str!(concat!("../../tests/fixtures/", $v, "/", $f))
     };
 }
 
@@ -139,6 +139,13 @@ fn fixtures_stats_parse() {
         assert_eq!(r.memory_limit_bytes, 1 << 30, "{}", s.version);
         assert!(r.network_rx_bytes > 0, "{}", s.version);
         assert!(r.block_read_bytes > 0, "{}", s.version);
+        // `cpuUtilization` arrived in 1.7.1; older CLIs must parse as None.
+        assert_eq!(
+            r.cpu_utilization.is_some(),
+            s.version != "1.4.1",
+            "{}",
+            s.version
+        );
     }
 }
 

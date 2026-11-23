@@ -3,7 +3,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 // `decorations: true`. Frameless chrome and platform detection were removed
 // when the project's scope was locked to Apple's container runtime.
 import { getTheme } from './theme';
-import type { Tab, Modal, Runtime, Container, Image, Stack } from './types';
+import type { Tab, Modal, Container, Image, Stack } from './types';
 import { api, type Prefs } from './api';
 import { FramelessChrome, Sidebar, TopBar, StatusBar } from './components';
 import { ContainersView, ImagesView, VolumesView, NetworksView, StacksView, LogsView } from './views';
@@ -21,7 +21,6 @@ const ModalsHost = lazy(() => import('./ModalsHost'));
 export default function App() {
   const [dark, setDark] = useState(true);
   const [collapsed, setCollapsed] = useState(false);
-  const [runtime, setRuntime] = useState<Runtime>('container');
   const [tab, setTab] = useState<Tab>('containers');
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<string>('');
@@ -94,7 +93,6 @@ export default function App() {
     api.loadPrefs().then(p => {
       setDark(p.dark);
       setCollapsed(p.sidebarCollapsed);
-      setRuntime(p.runtime);
       if (['containers','images','volumes','networks','stacks','logs'].includes(p.lastTab)) {
         setTab(p.lastTab as Tab);
       }
@@ -144,11 +142,11 @@ export default function App() {
   useEffect(() => {
     if (!prefsLoaded.current) return;
     const p: Prefs = {
-      dark, sidebarCollapsed: collapsed, runtime, lastTab: tab,
+      dark, sidebarCollapsed: collapsed, lastTab: tab,
       menubarMode, globalHotkey, notifyOnExit,
     };
     api.savePrefs(p);
-  }, [dark, collapsed, runtime, tab, menubarMode, globalHotkey, notifyOnExit]);
+  }, [dark, collapsed, tab, menubarMode, globalHotkey, notifyOnExit]);
 
   // Push hotkey changes to the backend so they take effect immediately
   // without a restart. Surfaces parser/conflict errors via toast.
@@ -290,7 +288,8 @@ export default function App() {
     })();
 
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setModal(null);
+      // Esc is handled by the open dialog itself (a11y.tsx useDialog), which
+      // knows which dialog is topmost; don't also close the modal here.
       const inInput = (document.activeElement as HTMLElement | null)?.tagName === 'INPUT' ||
         (document.activeElement as HTMLElement | null)?.tagName === 'TEXTAREA';
 
@@ -443,8 +442,9 @@ export default function App() {
                 onPrune={onPrune}
                 onImport={tab === 'images' ? onImportImage : null}
                 onBuild={tab === 'images' ? () => setModal({ type: 'build' }) : null}
+                onNew={tab === 'volumes' ? () => setModal({ type: 'createVolume' })
+                  : tab === 'networks' ? () => setModal({ type: 'createNetwork' }) : null}
                 onCollapse={() => setCollapsed(!collapsed)}
-                runtime={runtime}
                 dark={dark}
                 setDark={setDark}
                 onUpdate={updateCount > 0 ? () => setModal({ type: 'update' }) : null}
@@ -472,7 +472,7 @@ export default function App() {
               {tab === 'networks' && <NetworksView t={t} search={search} reloadKey={pruneTick} onInspect={(n) => setModal({ type: 'networkInspect', id: n.id, name: n.name })} />}
               {tab === 'stacks'   && <StacksView   t={t} search={search} onGraph={s => setModal({ type: 'stackGraph', stack: s })} />}
               {tab === 'logs'     && <LogsView     t={t} target={logTarget ?? containers.find(c => c.status === 'running')?.id} />}
-              <StatusBar t={t} runtime={runtime} tab={tab} lastTickAt={lastTickAt} />
+              <StatusBar t={t} tab={tab} lastTickAt={lastTickAt} />
             </div>
           </div>
         </FramelessChrome>
@@ -482,8 +482,6 @@ export default function App() {
             <ModalsHost
               modal={modal}
               t={t}
-              runtime={runtime}
-              setRuntime={setRuntime}
               onClose={() => {
                 if (modal.type === 'onboarding') setOnboardingDismissed(true);
                 setModal(null);
@@ -496,6 +494,7 @@ export default function App() {
               notifyOnExit={notifyOnExit} setNotifyOnExit={setNotifyOnExit}
               containers={containers} images={paletteImages} stacks={paletteStacks}
               setTab={setTab} setModal={setModal} setLogTarget={setLogTarget}
+              onResourcesChanged={() => setPruneTick(n => n + 1)}
             />
           </Suspense>
         )}

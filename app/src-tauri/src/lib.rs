@@ -3,13 +3,17 @@ pub mod compose;
 mod doctor;
 mod fixtures;
 pub mod history;
+pub mod logpersist;
+mod menubar_hint;
 pub mod model;
+mod paths;
 mod prefs;
 pub mod pty;
 pub mod runtime;
 pub mod snapshot;
 pub mod stacks;
 pub mod state;
+pub mod timeutil;
 pub mod trivy;
 pub mod updates;
 
@@ -237,20 +241,20 @@ pub fn run() {
                 {
                     api.prevent_close();
                     hide_main_window(window.app_handle());
+                    menubar_hint::on_hidden_by_close(window.app_handle());
                 }
             }
         })
         .setup(|app| {
             // Patch PATH first so every subsequent runtime probe / child
-            // spawn (container, docker, podman, trivy) can find binaries
+            // spawn (container, trivy) can find binaries
             // installed at /usr/local/bin or /opt/homebrew/bin even when
             // the app was launched from Finder / Spotlight / Dock with
             // the bare launchd PATH.
             runtime::ensure_user_path();
 
-            // Load prefs once: seed runtime + register optional global hotkey.
+            // Load prefs once: register optional global hotkey.
             let initial_prefs = prefs::Prefs::load();
-            runtime::set_bin(&initial_prefs.runtime);
             MENUBAR_MODE.store(initial_prefs.menubar_mode, Ordering::Relaxed);
 
             // Open the long-form history sidecar (B6). Failures only mean
@@ -499,12 +503,10 @@ pub fn run() {
             commands::list_volumes,
             commands::list_networks,
             commands::list_stacks,
-            commands::tail_logs,
             commands::inspect_container,
             commands::doctor,
             commands::scan_image,
             commands::list_updates,
-            commands::pull_stream,
             commands::start_container,
             commands::stop_container,
             commands::kill_container,
@@ -519,12 +521,15 @@ pub fn run() {
             commands::delete_image,
             commands::delete_volume,
             commands::delete_network,
+            commands::create_volume,
+            commands::create_network,
             commands::exec_container,
             commands::inspect_volume,
             commands::inspect_network,
             commands::inspect_image,
             commands::run_image,
             commands::tag_image,
+            commands::commit_container,
             commands::prune_containers,
             commands::prune_images,
             commands::prune_volumes,
@@ -549,6 +554,8 @@ pub fn run() {
             commands::start_build,
             commands::machine_list,
             commands::machine_create,
+            commands::machine_logs,
+            commands::machine_inspect,
             commands::machine_stop,
             commands::machine_delete,
             commands::machine_set_default,
@@ -556,7 +563,7 @@ pub fn run() {
             commands::stack_down,
             commands::stack_health,
             commands::runtime_available,
-            commands::probe_runtime,
+            commands::cli_version,
             commands::container_history,
             commands::vuln_history,
             commands::load_logs,

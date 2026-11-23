@@ -22,6 +22,8 @@ import {
   SettingsModal,
   JsonInspectModal,
   RunImageModal,
+  CreateVolumeModal,
+  CreateNetworkModal,
   OnboardingModal,
   CommandPaletteModal,
   ImageInspectModal,
@@ -29,13 +31,11 @@ import {
 } from './modals';
 import { toast } from './toast';
 import type { ThemeTokens } from './theme';
-import type { Container, Image, Modal, Runtime, Stack, Tab } from './types';
+import type { Container, Image, Modal, Stack, Tab } from './types';
 
 export default function ModalsHost(props: {
   modal: Modal;
   t: ThemeTokens;
-  runtime: Runtime;
-  setRuntime: (r: Runtime) => void;
   onClose: () => void;
   onUpdateClosed: () => void;
   onOnboardingResolved: () => void;
@@ -55,9 +55,12 @@ export default function ModalsHost(props: {
   setTab: (t: Tab) => void;
   setModal: (m: Modal) => void;
   setLogTarget: (id: string | undefined) => void;
+  // A modal created/changed an image, volume or network: refresh those lists.
+  onResourcesChanged?: () => void;
 }) {
+  const { onResourcesChanged } = props;
   const {
-    modal, t, runtime, setRuntime, onClose, onUpdateClosed, onOnboardingResolved,
+    modal, t, onClose, onUpdateClosed, onOnboardingResolved,
     menubarMode, setMenubarMode, globalHotkey, setGlobalHotkey, notifyOnExit, setNotifyOnExit,
     dark, setDark, containers, images, stacks, setTab, setModal, setLogTarget,
   } = props;
@@ -70,6 +73,7 @@ export default function ModalsHost(props: {
       return <DetailModal
         item={modal.payload} t={t} onClose={onClose}
         onExec={c => setModal({ type: 'terminal', container: c })}
+        onImagesChanged={onResourcesChanged}
       />;
     case 'pull':
       return <PullModal t={t} onClose={onClose} />;
@@ -83,7 +87,7 @@ export default function ModalsHost(props: {
       return <DoctorModal t={t} onClose={onClose} />;
     case 'settings':
       return <SettingsModal
-        t={t} runtime={runtime} setRuntime={setRuntime} onClose={onClose}
+        t={t} onClose={onClose}
         dark={dark} setDark={setDark}
         menubarMode={menubarMode} setMenubarMode={setMenubarMode}
         globalHotkey={globalHotkey} setGlobalHotkey={setGlobalHotkey}
@@ -101,6 +105,10 @@ export default function ModalsHost(props: {
       return <RunImageModal t={t} image={modal.image}
                             onLaunched={(id) => toast(`launched ${id}`, 'info')}
                             onClose={onClose} />;
+    case 'createVolume':
+      return <CreateVolumeModal t={t} onCreated={() => onResourcesChanged?.()} onClose={onClose} />;
+    case 'createNetwork':
+      return <CreateNetworkModal t={t} onCreated={() => onResourcesChanged?.()} onClose={onClose} />;
     case 'terminal':
       return (
         <Suspense fallback={null}>

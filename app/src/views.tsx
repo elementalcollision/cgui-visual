@@ -4,6 +4,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import type { ThemeTokens } from './theme';
 import type { Container, Image, Volume, Network, Stack } from './types';
+import { VisuallyHidden } from './a11y';
 import { Icon, Sparkline, Bar, StatusDot, BulkActionBar, SelectCheckbox, iconBtn, pillBtn, tableHeader, tableRow, fmtCreated } from './components';
 import { api, newStreamId } from './api';
 import { toast, withToast } from './toast';
@@ -204,6 +205,15 @@ export function ContainersView({ t, search, selected, setSelected, onInspect, on
             const isPicked = picked.has(c.id);
             return (
               <div key={c.id} onClick={() => setSelected(c.id)}
+                // Keyboard: rows are focusable; Space selects, Enter opens
+                // the detail view (onInspect). Only when the row itself has focus, so keys in the
+                // checkbox / action buttons keep their native behaviour.
+                role="group" aria-label={`Container ${c.name}`} aria-current={sel ? 'true' : undefined} tabIndex={0}
+                onKeyDown={e => {
+                  if (e.target !== e.currentTarget) return;
+                  if (e.key === ' ') { e.preventDefault(); setSelected(c.id); }
+                  else if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); setSelected(c.id); onInspect(c); }
+                }}
                 style={{
                   ...tableRow(t, COLS_CONTAINERS),
                   background: sel ? t.selected : (isPicked ? t.hover : 'transparent'),
@@ -243,20 +253,20 @@ export function ContainersView({ t, search, selected, setSelected, onInspect, on
                 <div style={{ fontFamily: t.mono, fontSize: 11, color: t.fg3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.ports.join(', ') || '—'}</div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 4, justifyContent: 'flex-end' }}>
                   <span style={{ fontFamily: t.mono, fontSize: 11, color: t.fg3, marginRight: 8 }}>{c.uptime}</span>
-                  <button onClick={e => { e.stopPropagation(); onInspect(c); }} style={iconBtn()} title="Inspect"><Icon name="info" size={13} color={t.fg2} /></button>
-                  <button onClick={e => { e.stopPropagation(); onLogs(c); }} style={iconBtn()} title="Logs"><Icon name="logs" size={13} color={t.fg2} /></button>
+                  <button onClick={e => { e.stopPropagation(); onInspect(c); }} style={iconBtn()} title="Inspect" aria-label="Inspect"><Icon name="info" size={13} color={t.fg2} /></button>
+                  <button onClick={e => { e.stopPropagation(); onLogs(c); }} style={iconBtn()} title="Logs" aria-label="Logs"><Icon name="logs" size={13} color={t.fg2} /></button>
                   {c.status === 'running' &&
                     <button onClick={e => {
                       e.stopPropagation();
                       withToast(`reclaim space in ${c.name}`, api.cleanContainers([c.id]))
                         .then(() => toast(`Reclaimed space in ${c.name}`, 'info'))
                         .catch(() => {});
-                    }} style={iconBtn()} title="Reclaim space — trim the container's disk images to return freed space to macOS (container clean). Running containers only; no data is removed.">
+                    }} style={iconBtn()} aria-label="Reclaim space" title="Reclaim space — trim the container's disk images to return freed space to macOS (container clean). Running containers only; no data is removed.">
                       <Icon name="sparkle" size={13} color={t.fg2} />
                     </button>}
                   {c.status === 'running'
-                    ? <button onClick={e => { e.stopPropagation(); withToast(`stop ${c.name}`, api.stopContainer(c.id)).catch(() => {}); }} style={iconBtn()} title="Stop"><Icon name="stop" size={13} color={t.fg2} /></button>
-                    : <button onClick={e => { e.stopPropagation(); withToast(`start ${c.name}`, api.startContainer(c.id)).catch(() => {}); }} style={iconBtn()} title="Start"><Icon name="play" size={13} color={t.success} /></button>}
+                    ? <button onClick={e => { e.stopPropagation(); withToast(`stop ${c.name}`, api.stopContainer(c.id)).catch(() => {}); }} style={iconBtn()} title="Stop" aria-label="Stop"><Icon name="stop" size={13} color={t.fg2} /></button>
+                    : <button onClick={e => { e.stopPropagation(); withToast(`start ${c.name}`, api.startContainer(c.id)).catch(() => {}); }} style={iconBtn()} title="Start" aria-label="Start"><Icon name="play" size={13} color={t.success} /></button>}
                 </div>
               </div>
             );
@@ -424,13 +434,13 @@ export function ImagesView({ t, search, onScan, onRun, onInspect, reloadKey = 0 
           <div style={{ textAlign: 'right', fontFamily: t.mono, fontSize: 12, color: t.fg2 }}>{img.layers || '—'}</div>
           <div style={{ fontFamily: t.mono, fontSize: 12, color: t.fg3 }}>{fmtCreated(img.created)}</div>
           <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
-            <button onClick={() => onInspect(img)} style={iconBtn()} title="Inspect"><Icon name="info" size={13} color={t.fg2} /></button>
-            <button onClick={() => onTag(img)} style={iconBtn()} title="Tag"><Icon name="tag" size={13} color={t.fg2} /></button>
-            <button onClick={() => onPush(img)} style={iconBtn()} title="Push to registry"><Icon name="upload" size={13} color={t.fg2} /></button>
-            <button onClick={() => onSave(img)} style={iconBtn()} title="Save as OCI tar…"><Icon name="download" size={13} color={t.fg2} /></button>
-            <button onClick={() => onScan(img)} style={iconBtn()} title="Trivy scan"><Icon name="shield" size={13} color={t.fg2} /></button>
-            <button onClick={() => onRun(img)} style={iconBtn()} title="Run"><Icon name="play" size={13} color={t.fg2} /></button>
-            <button onClick={() => onDelete(img)} style={iconBtn()} title="Delete"><Icon name="trash" size={13} color={t.fg2} /></button>
+            <button onClick={() => onInspect(img)} style={iconBtn()} title="Inspect" aria-label="Inspect"><Icon name="info" size={13} color={t.fg2} /></button>
+            <button onClick={() => onTag(img)} style={iconBtn()} title="Tag" aria-label="Tag"><Icon name="tag" size={13} color={t.fg2} /></button>
+            <button onClick={() => onPush(img)} style={iconBtn()} title="Push to registry" aria-label="Push to registry"><Icon name="upload" size={13} color={t.fg2} /></button>
+            <button onClick={() => onSave(img)} style={iconBtn()} title="Save as OCI tar…" aria-label="Save as OCI tar…"><Icon name="download" size={13} color={t.fg2} /></button>
+            <button onClick={() => onScan(img)} style={iconBtn()} title="Trivy scan" aria-label="Trivy scan"><Icon name="shield" size={13} color={t.fg2} /></button>
+            <button onClick={() => onRun(img)} style={iconBtn()} title="Run" aria-label="Run"><Icon name="play" size={13} color={t.fg2} /></button>
+            <button onClick={() => onDelete(img)} style={iconBtn()} title="Delete" aria-label="Delete"><Icon name="trash" size={13} color={t.fg2} /></button>
           </div>
         </div>
         );
@@ -487,8 +497,8 @@ export function VolumesView({ t, search, onInspect, reloadKey = 0 }: {
               <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                 <span style={{ fontSize: 11, color: t.fg3, fontFamily: t.mono }}>{v.refs} {v.refs === 1 ? 'reference' : 'references'}</span>
                 <div style={{ display: 'flex', gap: 4 }}>
-                  <button onClick={() => onInspect(v)} style={iconBtn()} title="Inspect"><Icon name="info" size={13} color={t.fg2} /></button>
-                  <button onClick={() => onDelete(v)} style={iconBtn()} title="Delete volume"><Icon name="trash" size={13} color={t.fg2} /></button>
+                  <button onClick={() => onInspect(v)} style={iconBtn()} title="Inspect" aria-label="Inspect"><Icon name="info" size={13} color={t.fg2} /></button>
+                  <button onClick={() => onDelete(v)} style={iconBtn()} title="Delete volume" aria-label="Delete volume"><Icon name="trash" size={13} color={t.fg2} /></button>
                 </div>
               </div>
             </div>
@@ -544,8 +554,8 @@ export function NetworksView({ t, search, onInspect, reloadKey = 0 }: {
           <div style={{ fontFamily: t.mono, fontSize: 12, color: t.fg3 }}>{n.dns.join(', ') || '—'}</div>
           <div style={{ textAlign: 'right', fontFamily: t.mono, fontSize: 12, color: t.fg1, fontVariantNumeric: 'tabular-nums' }}>{n.containers}</div>
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 4 }}>
-            <button onClick={() => onInspect(n)} style={iconBtn()} title="Inspect"><Icon name="info" size={13} color={t.fg2} /></button>
-            <button onClick={() => onDelete(n)} style={iconBtn()} title="Delete network"><Icon name="trash" size={13} color={t.fg2} /></button>
+            <button onClick={() => onInspect(n)} style={iconBtn()} title="Inspect" aria-label="Inspect"><Icon name="info" size={13} color={t.fg2} /></button>
+            <button onClick={() => onDelete(n)} style={iconBtn()} title="Delete network" aria-label="Delete network"><Icon name="trash" size={13} color={t.fg2} /></button>
           </div>
         </div>
       ))}
@@ -847,6 +857,7 @@ export function StacksView({ t, search, onGraph }: {
                   return (
                     <div key={sv.name} style={{ padding: '8px 10px', background: t.surfaceAlt, border: `1px solid ${t.border}`, borderRadius: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
                       <StatusDot status={sv.state} t={t} />
+                      <VisuallyHidden>{sv.state}</VisuallyHidden>
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: 12, fontWeight: 500, color: t.fg1, fontFamily: t.mono }}>{sv.name}</div>
                         <div style={{ fontSize: 10, color: t.fg3, fontFamily: t.mono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sv.image}</div>
@@ -983,7 +994,7 @@ export function LogsView({ t, target }: { t: ThemeTokens; target?: string }) {
   };
 
   const levelPill = (key: LogLevel, label: string, color?: string) => (
-    <button onClick={() => setLevel(level === key ? 'all' : key)}
+    <button onClick={() => setLevel(level === key ? 'all' : key)} aria-pressed={level === key}
       style={{
         ...pillBtn(t, color ?? t.fg2),
         background: level === key ? (color ?? t.accent) : t.surfaceAlt,
@@ -1003,7 +1014,7 @@ export function LogsView({ t, target }: { t: ThemeTokens; target?: string }) {
         {levelPill('error', 'ERROR', t.danger)}
         {levelPill('warn',  'WARN',  t.warning)}
         {levelPill('info',  'INFO')}
-        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search…"
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search…" aria-label="Search logs"
           style={{ padding: '5px 10px', background: t.surfaceAlt, border: `1px solid ${t.border}`, borderRadius: 6, color: t.fg1, fontSize: 12, fontFamily: t.mono, width: 200, outline: 'none' }} />
         <div style={{ flex: 1 }} />
         <button
@@ -1014,6 +1025,7 @@ export function LogsView({ t, target }: { t: ThemeTokens; target?: string }) {
             color: bootLog ? t.fg1 : t.fg2,
           }}
           onClick={() => setBootLog(b => !b)}
+          aria-pressed={bootLog}
           disabled={!target}
           title="Stream the VM boot log (container logs --boot) instead of stdio — useful when a container dies before producing output"
         >Boot log</button>
@@ -1038,6 +1050,7 @@ export function LogsView({ t, target }: { t: ThemeTokens; target?: string }) {
             color: stripColors ? t.fg1 : t.fg2,
           }}
           onClick={() => setStripColors(s => !s)}
+          aria-pressed={stripColors}
           title="Strip ANSI escape sequences from rendered + copied + downloaded output"
         >No colour</button>
         <button style={pillBtn(t)} onClick={() => setPaused(p => !p)}>{paused ? 'Resume' : 'Pause'}</button>

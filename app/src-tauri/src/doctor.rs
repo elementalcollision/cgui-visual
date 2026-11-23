@@ -14,8 +14,7 @@ const MIN_CONTAINER_VERSION: &str = "1.4.1";
 pub async fn run() -> Vec<DoctorCheck> {
     let mut out: Vec<DoctorCheck> = Vec::new();
 
-    // 1. Active profile (we hardcode `container` until the Settings picker
-    // is wired through to the runtime selector).
+    // 1. Active profile (always `container`; cgui is Apple-container-only).
     out.push(ok(format!("active profile: container → {RUNTIME_BIN}")));
 
     // 2. Runtime binary on PATH.
@@ -222,10 +221,7 @@ fn err(text: String) -> DoctorCheck {
 }
 
 fn config_path(name: &str) -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("cgui").join(name))
+    Some(crate::paths::config_dir("cgui")?.join(name))
 }
 
 #[cfg(test)]

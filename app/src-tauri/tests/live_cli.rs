@@ -75,10 +75,31 @@ struct Guard {
     containers: Vec<String>,
     volumes: Vec<String>,
     networks: Vec<String>,
+    images: Vec<String>,
+    machines: Vec<String>,
     files: Vec<std::path::PathBuf>,
 }
 
 impl Guard {
+    /// Register a resource the test creates itself (via the app's own
+    /// functions) so it is still cleaned up if the test panics.
+    fn track_volume(&mut self, n: &str) -> String {
+        self.volumes.push(n.to_string());
+        n.to_string()
+    }
+    fn track_network(&mut self, n: &str) -> String {
+        self.networks.push(n.to_string());
+        n.to_string()
+    }
+    fn track_image(&mut self, r: &str) -> String {
+        self.images.push(r.to_string());
+        r.to_string()
+    }
+    #[allow(dead_code)]
+    fn track_machine(&mut self, n: &str) -> String {
+        self.machines.push(n.to_string());
+        n.to_string()
+    }
     fn container(&mut self, n: &str) -> String {
         self.containers.push(n.to_string());
         n.to_string()
@@ -103,6 +124,12 @@ impl Drop for Guard {
     fn drop(&mut self) {
         for c in &self.containers {
             let _ = cli(&["delete", "--force", c]);
+        }
+        for m in &self.machines {
+            let _ = cli(&["machine", "delete", m]);
+        }
+        for i in &self.images {
+            let _ = cli(&["image", "delete", i]);
         }
         for v in &self.volumes {
             let _ = cli(&["volume", "delete", v]);
@@ -429,4 +456,335 @@ async fn quoted_command_and_flag_like_id() {
 
     assert!(runtime::stop("--all").await.is_err());
     assert!(runtime::delete("-f").await.is_err());
+}
+
+/// Reopening a Logs view must not duplicate persisted history. Drives the
+/// same `logpersist::start/stop_owner` path commands.rs uses.
+#[tokio::test]
+#[ignore]
+async fn reopening_log_view_does_not_duplicate_history() {
+    live_only!();
+    let dir = std::env::temp_dir().join(format!("cgui-live-hist-{}", std::process::id()));
+    let mut g = Guard::default();
+    g.file(dir.join("cgui-gui").join("history.db"));
+    // history::init reads XDG_CONFIG_HOME; no other live test touches it.
+    std::env::set_var("XDG_CONFIG_HOME", &dir);
+    app_lib::history::init().expect("history init");
+
+    let cname = g.container(&name("histdup"));
+    let args = RunArgs {
+        command: Some(
+            "sh -c \"i=0; while true; do i=$((i+1)); echo tick$i; sleep 1; done\"".into(),
+        ),
+        ..run_args(&cname)
+    };
+    runtime::run_image(args).await.expect("run");
+    tokio::time::sleep(Duration::from_secs(4)).await; // pre-existing output
+
+    let rows = |c: &str| {
+        app_lib::history::flush_logs();
+        app_lib::history::load_logs(c, 5000, None)
+    };
+
+    // View open #1: no history yet -> full replay stored once.
+    assert!(app_lib::logpersist::start("s1", &cname).await.unwrap());
+    // A second view of the same container must not start a second follower.
+    assert!(!app_lib::logpersist::start("s1b", &cname).await.unwrap());
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    app_lib::logpersist::stop_owner("s1");
+    let first = rows(&cname);
+    assert!(
+        first.len() >= 5,
+        "replay + live stored, got {}",
+        first.len()
+    );
+    assert!(first.iter().any(|l| l.line == "tick1"), "replay captured");
+
+    // View opens #2 and #3: history exists -> `-n 0`, new lines only.
+    for owner in ["s2", "s3"] {
+        assert!(app_lib::logpersist::start(owner, &cname).await.unwrap());
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        app_lib::logpersist::stop_owner(owner);
+    }
+    let all = rows(&cname);
+    assert!(
+        all.len() > first.len(),
+        "new live lines were still captured"
+    );
+    let mut seen = std::collections::HashSet::new();
+    for l in &all {
+        assert!(seen.insert(l.line.clone()), "duplicate row: {}", l.line);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Commit (1.6+): works on a running and on a stopped container, and the
+/// new image shows up in `image ls`.
+#[tokio::test]
+#[ignore]
+async fn commit_running_and_stopped_container() {
+    live_only!();
+    let mut g = Guard::default();
+    let cname = g.container(&name("commit"));
+    runtime::run_image(run_args(&cname)).await.expect("run");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let live_ref = g.track_image(&format!("{}:live", name("commit-img")));
+    runtime::commit_container(&cname, &live_ref)
+        .await
+        .expect("commit running");
+    runtime::stop(&cname).await.expect("stop");
+    let stopped_ref = g.track_image(&format!("{}:stopped", name("commit-img")));
+    runtime::commit_container(&cname, &stopped_ref)
+        .await
+        .expect("commit stopped");
+
+    let images = runtime::list_images().await.unwrap();
+    for r in [&live_ref, &stopped_ref] {
+        assert!(
+            images.iter().any(|i| i.reference.ends_with(r.as_str())),
+            "{r} missing from {:?}",
+            images.iter().map(|i| &i.reference).collect::<Vec<_>>()
+        );
+    }
+
+    // Bad references never reach the CLI.
+    assert!(runtime::commit_container(&cname, "Bad Ref").await.is_err());
+    assert!(runtime::commit_container(&cname, "-x").await.is_err());
+}
+
+/// Create a volume (with size + label) and a network (with subnet + label)
+/// through the app's own argv builders; both show up in the list views.
+#[tokio::test]
+#[ignore]
+async fn create_volume_and_network_with_options() {
+    live_only!();
+    let mut g = Guard::default();
+
+    let vol = g.track_volume(&name("mk-vol"));
+    runtime::create_volume(runtime::VolumeCreateArgs {
+        name: vol.clone(),
+        size: Some("64M".into()),
+        labels: vec!["team=live".into()],
+    })
+    .await
+    .expect("create volume");
+    let listed = runtime::list_volumes().await.unwrap();
+    let v = listed
+        .iter()
+        .find(|v| v.name == vol)
+        .expect("volume listed");
+    assert!((v.size - 64.0 / 1024.0).abs() < 1e-6, "size {}", v.size);
+    let inspected = runtime::inspect_volume(&vol).await.unwrap();
+    assert!(
+        inspected.contains("team") && inspected.contains("live"),
+        "{inspected}"
+    );
+    // Creating it again is a CLI error that reaches the caller.
+    assert!(runtime::create_volume(runtime::VolumeCreateArgs {
+        name: vol.clone(),
+        ..Default::default()
+    })
+    .await
+    .is_err());
+
+    let net = g.track_network(&name("mk-net"));
+    // A pid-derived 192.168.X.0/24 keeps parallel/previous runs from colliding.
+    let octet = 100 + (std::process::id() % 100);
+    let subnet = format!("192.168.{octet}.0/24");
+    runtime::create_network(runtime::NetworkCreateArgs {
+        name: net.clone(),
+        subnet: Some(subnet.clone()),
+        labels: vec!["team=live".into()],
+        ..Default::default()
+    })
+    .await
+    .expect("create network");
+    let nets = runtime::list_networks().await.unwrap();
+    let n = nets.iter().find(|n| n.name == net).expect("network listed");
+    assert_eq!(n.subnet, subnet);
+
+    // Bad input never reaches the CLI.
+    assert!(runtime::create_volume(runtime::VolumeCreateArgs {
+        name: "-x".into(),
+        ..Default::default()
+    })
+    .await
+    .is_err());
+    assert!(runtime::create_network(runtime::NetworkCreateArgs {
+        name: "Bad_Upper".into(),
+        ..Default::default()
+    })
+    .await
+    .is_err());
+}
+
+/// Machines (1.6+ user options): create a small alpine machine with a custom
+/// account, then read it back via inspect, fetch both log kinds, delete it.
+/// Alpine is already pulled by `ensure_alpine`, so nothing large downloads.
+#[tokio::test]
+#[ignore]
+async fn machine_user_options_inspect_and_logs() {
+    live_only!();
+    let mut g = Guard::default();
+    let m = g.track_machine(&name("mach"));
+    let opts = runtime::MachineUserOpts {
+        user: Some("cguilive".into()),
+        uid: Some(1234),
+        gid: Some(1234),
+        home: Some("/home/cguilive".into()),
+    };
+    runtime::machine_create(&m, "alpine:latest", None, None, false, &opts)
+        .await
+        .expect("machine create");
+
+    let listed = runtime::machine_list().await.unwrap();
+    assert!(listed.iter().any(|x| x.id == m), "{listed:?}");
+
+    let inspected = runtime::machine_inspect(&m).await.expect("inspect");
+    // `machine inspect` prints a one-element array.
+    let v: serde_json::Value = serde_json::from_str(&inspected).expect("json");
+    let v = &v[0];
+    assert_eq!(v["id"], m.as_str());
+    assert_eq!(v["userSetup"]["username"], "cguilive");
+    assert_eq!(v["userSetup"]["uid"], 1234);
+    assert_eq!(v["userSetup"]["home"], "/home/cguilive");
+
+    let boot = runtime::machine_logs(&m, true, Some(20))
+        .await
+        .expect("boot log");
+    assert!(!boot.trim().is_empty(), "boot log empty");
+    assert!(boot.lines().count() <= 20, "-n not honoured");
+    // stdio may legitimately be empty, but the call must succeed once booted.
+    runtime::machine_logs(&m, false, Some(5))
+        .await
+        .expect("stdio log");
+
+    runtime::machine_delete(&m).await.expect("delete");
+    let after = runtime::machine_list().await.unwrap();
+    assert!(after.iter().all(|x| x.id != m));
+}
+
+/// DNS aliases (1.6+): run with `--network net,alias=...` and read them back
+/// from `ls` (`configuration.networks[].options.aliases`) and `inspect`.
+#[tokio::test]
+#[ignore]
+async fn run_with_dns_aliases_reads_back() {
+    live_only!();
+    let mut g = Guard::default();
+    let net = g.network(&name("al-net"));
+    let cname = g.container(&name("alias"));
+    let args = RunArgs {
+        network: Some(net.clone()),
+        aliases: vec!["web.example.test".into(), "www.example.test".into()],
+        ..run_args(&cname)
+    };
+    runtime::run_image(args).await.expect("run with aliases");
+
+    let ls: serde_json::Value =
+        serde_json::from_str(&cli_ok(&["ls", "--all", "--format", "json"])).unwrap();
+    let mine = ls
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["configuration"]["id"] == cname.as_str())
+        .expect("container in ls");
+    let nets = mine["configuration"]["networks"].as_array().unwrap();
+    assert_eq!(nets[0]["network"], net.as_str());
+    let aliases: Vec<&str> = nets[0]["options"]["aliases"]
+        .as_array()
+        .expect("aliases in ls json")
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect();
+    assert_eq!(aliases, ["web.example.test", "www.example.test"]);
+
+    // The same data is in `inspect` (what the detail modal shows).
+    let inspected = runtime::inspect(&cname).await.expect("inspect");
+    assert!(inspected.contains("web.example.test"), "{inspected}");
+
+    // An alias without a dot needs a default DNS domain; the CLI says so
+    // and we surface its message rather than hiding it.
+    let single = RunArgs {
+        network: Some(net.clone()),
+        aliases: vec!["justone".into()],
+        ..run_args(&g.container(&name("alias-bad")))
+    };
+    if let Err(e) = runtime::run_image(single).await {
+        assert!(format!("{e:#}").contains("fully qualified"), "{e:#}");
+    }
+    // Invalid names never reach the CLI.
+    let bad = RunArgs {
+        aliases: vec!["a,alias=b".into()],
+        ..run_args(&name("alias-inj"))
+    };
+    assert!(runtime::run_image(bad).await.is_err());
+}
+
+/// Stats (1.7.1+): `cpuUtilization` is a fraction of ONE core, and the
+/// first poll already reports it (no baseline poll needed).
+#[tokio::test]
+#[ignore]
+async fn stats_native_cpu_utilization() {
+    live_only!();
+    let mut g = Guard::default();
+    let cname = g.container(&name("cpu"));
+    let busy = RunArgs {
+        command: Some("sh -c 'while :; do :; done'".into()),
+        ..run_args(&cname)
+    };
+    runtime::run_image(busy).await.expect("run");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let version = runtime::cli_version().await.expect("version");
+    // `stats --no-stream` samples every running container for ~2 s; when other
+    // live tests create/delete containers in that window the CLI call can fail,
+    // so retry a few times instead of flaking.
+    let mut last_err = None;
+    let mut rows = Vec::new();
+    for _ in 0..5 {
+        match runtime::stats_snapshot().await {
+            Ok(r) if r.iter().any(|r| r.id == cname) => {
+                rows = r;
+                break;
+            }
+            Ok(_) => last_err = Some("row missing".to_string()),
+            Err(e) => last_err = Some(format!("{e:#}")),
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let row = rows
+        .iter()
+        .find(|r| r.id == cname)
+        .unwrap_or_else(|| panic!("stat row for {cname}: {last_err:?}"));
+    let Some(frac) = row.cpu_utilization else {
+        eprintln!("CLI {version} has no cpuUtilization (needs 1.7.1+); skipping");
+        return;
+    };
+    assert!(
+        (0.5..=4.2).contains(&frac),
+        "a busy loop should use about one core, got {frac}"
+    );
+
+    // The UI value (percent of one core) from the very first poll.
+    let history = app_lib::state::History::new();
+    let cs = app_lib::state::poll_once(&history).await.expect("poll");
+    let c = cs.iter().find(|c| c.id == cname).expect("listed");
+    assert!(
+        (50.0..=420.0).contains(&c.cpu),
+        "first poll cpu% should come from cpuUtilization, got {}",
+        c.cpu
+    );
+}
+
+/// Capability gate: the cached CLI version parses and matches `--version`.
+#[tokio::test]
+#[ignore]
+async fn cli_version_is_detected_and_cached() {
+    live_only!();
+    let v = runtime::cli_version().await.expect("cli version");
+    assert!(v.chars().next().unwrap().is_ascii_digit(), "{v}");
+    let raw = cli_ok(&["--version"]);
+    assert!(raw.contains(&v), "`{raw}` should contain {v}");
+    assert_eq!(runtime::cli_version().await, Some(v));
 }

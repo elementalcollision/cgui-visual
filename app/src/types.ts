@@ -198,7 +198,6 @@ export interface DoctorCheck {
 }
 
 export type Tab = 'containers' | 'images' | 'volumes' | 'networks' | 'stacks' | 'logs';
-export type Runtime = 'container' | 'docker' | 'podman';
 
 export type Modal =
   | { type: 'detail'; payload: Container }
@@ -212,6 +211,8 @@ export type Modal =
   | { type: 'networkInspect'; id: string; name: string }
   | { type: 'imageInspect'; reference: string }
   | { type: 'runImage'; image: string }
+  | { type: 'createVolume' }
+  | { type: 'createNetwork' }
   | { type: 'onboarding' }
   | { type: 'commandPalette' }
   | { type: 'terminal'; container: Container }

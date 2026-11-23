@@ -12,7 +12,8 @@ import '@xterm/xterm/css/xterm.css';
 import { api } from './api';
 import type { Container } from './types';
 import type { ThemeTokens } from './theme';
-import { Icon, iconBtn, pillBtn } from './components';
+import { Icon, IconButton, pillBtn } from './components';
+import { DialogBackdrop } from './a11y';
 
 // Map our theme tokens to xterm.js's palette so the colours match the
 // surrounding app chrome. Only the keys xterm cares about are set;
@@ -159,12 +160,10 @@ export default function TerminalModal({ container, t, onClose }: {
     t.fg3;
 
   return (
-    <div onClick={onClose} style={{
-      position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.55)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      zIndex: 100, backdropFilter: 'blur(2px)',
-    }}>
-      <div onClick={e => e.stopPropagation()} style={{
+    // Esc is left to the shell (vim, less, ...); the close button and a
+    // backdrop click still dismiss the terminal.
+    <DialogBackdrop onClose={onClose} title={`Terminal: ${container.name}`} background="rgba(0,0,0,0.55)" escapeCloses={false}>
+      <div style={{
         width: '85vw', maxWidth: 1100, height: '78vh',
         background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12,
         overflow: 'hidden', display: 'flex', flexDirection: 'column',
@@ -183,9 +182,9 @@ export default function TerminalModal({ container, t, onClose }: {
               {' · '}exec -it {container.id} /bin/sh
             </div>
           </div>
-          <button onClick={onClose} style={iconBtn()} title="Close terminal">
+          <IconButton onClick={onClose} label="Close terminal">
             <Icon name="x" size={16} color={t.fg2} />
-          </button>
+          </IconButton>
         </div>
         <div ref={hostRef} style={{
           flex: 1, minHeight: 0, padding: 8, background: t.bg,
@@ -210,6 +209,6 @@ export default function TerminalModal({ container, t, onClose }: {
           </div>
         )}
       </div>
-    </div>
+    </DialogBackdrop>
   );
 }

@@ -94,6 +94,7 @@ pub async fn poll_once(history: &History) -> Result<Vec<Container>> {
             net_bytes,
             disk_bytes,
         );
+        let cpu_pct = pick_cpu_pct(s.cpu_utilization, cpu_pct);
         let used_gib = bytes_to_gib(s.memory_usage_bytes);
         let limit_gib = if s.memory_limit_bytes > 0 {
             bytes_to_gib(s.memory_limit_bytes)
@@ -158,4 +159,63 @@ fn derive_rates(
 
 fn bytes_to_gib(b: u64) -> f64 {
     (b as f64) / (1024.0 * 1024.0 * 1024.0)
+}
+
+/// CPU% for the UI. The UI shows percent of ONE core (a container using two
+/// full cores reads 200%), which is exactly `cpuUtilization * 100`, so a
+/// native value from the CLI (1.7.1+) is used when present and sane; it is
+/// already averaged over the CLI's own ~2 s sample and needs no baseline poll.
+/// Otherwise fall back to the delta of cumulative `cpuUsageUsec` between polls.
+fn pick_cpu_pct(native_fraction: Option<f64>, delta_pct: f64) -> f64 {
+    match native_fraction {
+        Some(f) if f.is_finite() && f >= 0.0 => f * 100.0,
+        _ => delta_pct,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_cpu_utilization_is_a_fraction_of_one_core() {
+        assert_eq!(pick_cpu_pct(Some(1.0), 3.0), 100.0);
+        assert!((pick_cpu_pct(Some(0.0123), 0.0) - 1.23).abs() < 1e-9);
+        // More than one core busy reads above 100, like the delta method.
+        assert!((pick_cpu_pct(Some(2.5), 0.0) - 250.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn falls_back_to_the_delta_when_native_is_absent_or_bogus() {
+        assert_eq!(pick_cpu_pct(None, 42.5), 42.5);
+        assert_eq!(pick_cpu_pct(Some(f64::NAN), 7.0), 7.0);
+        assert_eq!(pick_cpu_pct(Some(-1.0), 7.0), 7.0);
+        assert_eq!(pick_cpu_pct(Some(f64::INFINITY), 7.0), 7.0);
+    }
+
+    #[test]
+    fn delta_method_matches_cumulative_usec_over_wall_time() {
+        let mut last = HashMap::new();
+        let t0 = Instant::now();
+        // First sample has no baseline.
+        assert_eq!(derive_rates(&mut last, "a", t0, 1_000_000, 0, 0).0, 0.0);
+        // 500 ms of CPU over 1 s of wall time = 50% of one core.
+        let t1 = t0 + std::time::Duration::from_secs(1);
+        let (cpu, _, _) = derive_rates(&mut last, "a", t1, 1_500_000, 0, 0);
+        assert!((cpu - 50.0).abs() < 1e-6, "{cpu}");
+    }
+
+    #[test]
+    fn stat_row_parses_with_and_without_cpu_utilization() {
+        let new: Vec<crate::runtime::StatRow> = serde_json::from_str(
+            r#"[{"id":"a","cpuUsageUsec":5087657,"cpuUtilization":1.0002196937116234,"memoryUsageBytes":1,"memoryLimitBytes":2,"numProcesses":1}]"#,
+        )
+        .unwrap();
+        assert_eq!(new[0].cpu_utilization, Some(1.0002196937116234));
+        let old: Vec<crate::runtime::StatRow> = serde_json::from_str(
+            r#"[{"id":"a","cpuUsageUsec":5087657,"memoryUsageBytes":1,"memoryLimitBytes":2}]"#,
+        )
+        .unwrap();
+        assert_eq!(old[0].cpu_utilization, None);
+    }
 }

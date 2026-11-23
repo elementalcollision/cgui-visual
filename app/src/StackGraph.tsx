@@ -12,7 +12,8 @@
 import { useMemo, useState } from 'react';
 import type { ThemeTokens } from './theme';
 import type { Stack, Service } from './types';
-import { Icon, iconBtn } from './components';
+import { Icon, IconButton } from './components';
+import { DialogBackdrop } from './a11y';
 
 interface PositionedNode {
   svc: Service;
@@ -142,12 +143,8 @@ export default function StackGraphModal({ stack, t, onClose }: {
     : t.fg3;
 
   return (
-    <div onClick={onClose} style={{
-      position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.55)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      zIndex: 100, backdropFilter: 'blur(2px)',
-    }}>
-      <div onClick={e => e.stopPropagation()} style={{
+    <DialogBackdrop onClose={onClose} title={`Stack graph: ${stack.name}`} background="rgba(0,0,0,0.55)">
+      <div style={{
         width: 'min(85vw, 1100px)', maxHeight: '85vh',
         background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12,
         overflow: 'hidden', display: 'flex', flexDirection: 'column',
@@ -166,9 +163,9 @@ export default function StackGraphModal({ stack, t, onClose }: {
               {hover && ` · hovering ${hover}`}
             </div>
           </div>
-          <button onClick={onClose} style={iconBtn()} title="Close">
+          <IconButton onClick={onClose} label="Close">
             <Icon name="x" size={16} color={t.fg2} />
-          </button>
+          </IconButton>
         </div>
         <div style={{
           flex: 1, overflow: 'auto', background: t.bg, padding: 8,
@@ -246,6 +243,6 @@ export default function StackGraphModal({ stack, t, onClose }: {
           <span>● stopped</span>
         </div>
       </div>
-    </div>
+    </DialogBackdrop>
   );
 }

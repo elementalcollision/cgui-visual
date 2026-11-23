@@ -34,6 +34,10 @@ pub struct ServiceToml {
     pub volumes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<String>,
+    /// DNS aliases on `network` (container 1.6+; `--network net,alias=NAME`).
+    /// Needs fully qualified names unless a default DNS domain is configured.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -87,10 +91,7 @@ fn default_interval() -> u64 {
 }
 
 pub fn stacks_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("cgui").join("stacks"))
+    Some(crate::paths::config_dir("cgui")?.join("stacks"))
 }
 
 /// Validate a stack name before it is ever used to build a file path.
@@ -382,9 +383,10 @@ fn run_args(stack: &str, svc: &ServiceToml) -> Vec<String> {
     argv.push(format!("com.docker.compose.project={stack}"));
     // `restart` is intentionally not emitted: Apple's `container run` has
     // no restart-policy flag. The field is still parsed and stored.
-    if let Some(net) = svc.network.as_deref() {
+    // Aliases are validated up front (`validate_stack_names`).
+    if let Some(net) = runtime::network_spec(svc.network.as_deref(), &svc.aliases) {
         argv.push("--network".into());
-        argv.push(net.into());
+        argv.push(net);
     }
     for p in &svc.ports {
         argv.push("-p".into());
@@ -426,6 +428,10 @@ fn validate_stack_names(stack: &StackToml) -> Result<()> {
                 svc.name
             )
         })?;
+        for alias in &svc.aliases {
+            runtime::validate_alias(alias)
+                .map_err(|e| anyhow!("stack '{}' service '{}': {e:#}", stack.name, svc.name))?;
+        }
     }
     Ok(())
 }
@@ -596,7 +602,7 @@ pub async fn health_check_stack(name: &str) -> Result<Vec<(String, String)>> {
         Ok((cs, _)) => cs,
         Err(_) => vec![],
     };
-    let now_unix = chrono::Utc::now().timestamp();
+    let now_unix = crate::timeutil::now_unix();
 
     let mut out = Vec::with_capacity(stack.services.len());
     for svc in &stack.services {
@@ -890,6 +896,69 @@ mod tests {
                 "{rp}: {argv:?}"
             );
         }
+    }
+
+    #[test]
+    fn run_args_emits_network_aliases() {
+        let svc = ServiceToml {
+            name: "db".into(),
+            image: "postgres:16".into(),
+            network: Some("backend".into()),
+            aliases: vec!["db.example.test".into(), "pg.example.test".into()],
+            ..Default::default()
+        };
+        let argv = run_args("s", &svc);
+        let i = argv.iter().position(|a| a == "--network").unwrap();
+        assert_eq!(
+            argv[i + 1],
+            "backend,alias=db.example.test,alias=pg.example.test"
+        );
+        // No network named: aliases attach to the default network.
+        let svc = ServiceToml {
+            network: None,
+            ..svc
+        };
+        let argv = run_args("s", &svc);
+        let i = argv.iter().position(|a| a == "--network").unwrap();
+        assert!(argv[i + 1].starts_with("default,alias=db.example.test"));
+        // Plain network with no aliases is unchanged.
+        let svc = ServiceToml {
+            network: Some("backend".into()),
+            aliases: vec![],
+            ..svc
+        };
+        let argv = run_args("s", &svc);
+        let i = argv.iter().position(|a| a == "--network").unwrap();
+        assert_eq!(argv[i + 1], "backend");
+    }
+
+    #[test]
+    fn aliases_round_trip_through_toml_and_validate_up_front() {
+        let toml_src = r#"
+name = "s"
+[[service]]
+name = "db"
+image = "postgres:16"
+network = "backend"
+aliases = ["db.example.test"]
+"#;
+        let st: StackToml = toml::from_str(toml_src).unwrap();
+        assert_eq!(st.services[0].aliases, vec!["db.example.test"]);
+        let back = toml::to_string(&st).unwrap();
+        assert!(back.contains("aliases"), "{back}");
+        // Absent field stays absent on output.
+        let plain: StackToml =
+            toml::from_str("name=\"s\"\n[[service]]\nname=\"a\"\nimage=\"i\"\n").unwrap();
+        assert!(!toml::to_string(&plain).unwrap().contains("aliases"));
+
+        assert!(validate_stack_names(&st).is_ok());
+        let mut bad = st.clone();
+        bad.services[0].aliases = vec!["bad alias,x=y".into()];
+        let e = validate_stack_names(&bad).unwrap_err().to_string();
+        assert!(
+            e.contains("service 'db'") && e.contains("not a valid DNS name"),
+            "{e}"
+        );
     }
 
     #[test]

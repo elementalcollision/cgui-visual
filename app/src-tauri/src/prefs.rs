@@ -10,7 +10,6 @@ use std::path::PathBuf;
 pub struct Prefs {
     pub dark: bool,
     pub sidebar_collapsed: bool,
-    pub runtime: String,
     pub last_tab: String,
     /// When true, closing the main window hides it instead of quitting so
     /// the menu-bar tray stays alive and the Dock icon is hidden while the
@@ -23,6 +22,10 @@ pub struct Prefs {
     /// Fire a macOS notification when a container exits with a non-zero
     /// status. Only meaningful when the runtime is reachable.
     pub notify_on_exit: bool,
+    /// Set once the "still running in the menu bar" hint has been shown
+    /// (see menubar_hint.rs). Backend-owned: the frontend never sends it,
+    /// so `save_prefs` preserves the on-disk value.
+    pub menubar_hint_shown: bool,
 }
 
 impl Default for Prefs {
@@ -30,11 +33,11 @@ impl Default for Prefs {
         Self {
             dark: true,
             sidebar_collapsed: false,
-            runtime: "container".into(),
             last_tab: "containers".into(),
             menubar_mode: false,
             global_hotkey: String::new(),
             notify_on_exit: true,
+            menubar_hint_shown: false,
         }
     }
 }
@@ -60,10 +63,7 @@ impl Prefs {
 }
 
 fn path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("cgui-gui").join("state.json"))
+    Some(crate::paths::config_dir("cgui-gui")?.join("state.json"))
 }
 
 #[cfg(test)]
@@ -75,7 +75,6 @@ mod tests {
         let p = Prefs::default();
         assert!(p.dark);
         assert!(!p.sidebar_collapsed);
-        assert_eq!(p.runtime, "container");
         assert_eq!(p.last_tab, "containers");
     }
 
@@ -84,21 +83,21 @@ mod tests {
         let p = Prefs {
             dark: false,
             sidebar_collapsed: true,
-            runtime: "podman".into(),
             last_tab: "logs".into(),
             menubar_mode: true,
             global_hotkey: "CmdOrCtrl+Alt+Space".into(),
             notify_on_exit: false,
+            menubar_hint_shown: true,
         };
         let s = serde_json::to_string(&p).unwrap();
         let back: Prefs = serde_json::from_str(&s).unwrap();
         assert!(!back.dark);
         assert!(back.sidebar_collapsed);
-        assert_eq!(back.runtime, "podman");
         assert_eq!(back.last_tab, "logs");
         assert!(back.menubar_mode);
         assert_eq!(back.global_hotkey, "CmdOrCtrl+Alt+Space");
         assert!(!back.notify_on_exit);
+        assert!(back.menubar_hint_shown);
     }
 
     #[test]
@@ -110,6 +109,20 @@ mod tests {
         assert!(!p.menubar_mode);
         assert_eq!(p.global_hotkey, "");
         assert!(p.notify_on_exit);
+    }
+
+    #[test]
+    fn prefs_ignores_legacy_runtime_key() {
+        // state.json files from <= 0.6.2 carry a `runtime` key (possibly
+        // "docker"/"podman"). It is no longer a setting; loading must
+        // succeed and keep the other fields.
+        let s = r#"{"dark": false, "sidebarCollapsed": true, "runtime": "docker", "lastTab": "images"}"#;
+        let p: Prefs = serde_json::from_str(s).unwrap();
+        assert!(!p.dark);
+        assert!(p.sidebar_collapsed);
+        assert_eq!(p.last_tab, "images");
+        let out = serde_json::to_string(&p).unwrap();
+        assert!(!out.contains("runtime"));
     }
 
     #[test]
