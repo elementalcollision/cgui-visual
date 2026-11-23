@@ -226,6 +226,35 @@ pub async fn probe_bin(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Render an argv for logs and error text with environment values hidden:
+/// `-e KEY=value` / `--env KEY=value` / `--env=KEY=value` become `KEY=***`.
+/// Display only; the argv actually executed is never modified.
+pub fn mask_env_args<S: AsRef<str>>(args: &[S]) -> Vec<String> {
+    fn mask(kv: &str) -> String {
+        match kv.split_once('=') {
+            Some((k, _)) => format!("{k}=***"),
+            None => kv.to_string(), // `-e KEY` (inherit) carries no value
+        }
+    }
+    let mut out = Vec::with_capacity(args.len());
+    let mut mask_next = false;
+    for a in args {
+        let a = a.as_ref();
+        if mask_next {
+            out.push(mask(a));
+            mask_next = false;
+        } else if a == "-e" || a == "--env" {
+            out.push(a.to_string());
+            mask_next = true;
+        } else if let Some(kv) = a.strip_prefix("--env=") {
+            out.push(format!("--env={}", mask(kv)));
+        } else {
+            out.push(a.to_string());
+        }
+    }
+    out
+}
+
 async fn run(args: &[&str]) -> Result<Vec<u8>> {
     run_with_timeout(args, RUN_TIMEOUT).await
 }
@@ -239,7 +268,7 @@ pub(crate) async fn run_with_timeout(args: &[&str], timeout: Duration) -> Result
         return Err(anyhow!(
             "`{} {}` exited {}: {}",
             bin(),
-            args.join(" "),
+            mask_env_args(args).join(" "),
             out.status,
             String::from_utf8_lossy(&out.stderr).trim()
         ));
@@ -258,11 +287,17 @@ async fn run_output(args: &[&str], timeout: Duration) -> Result<std::process::Ou
             anyhow!(
                 "`{} {}` timed out after {}s",
                 bin(),
-                args.join(" "),
+                mask_env_args(args).join(" "),
                 timeout.as_secs()
             )
         })?
-        .with_context(|| format!("failed to spawn `{} {}`", bin(), args.join(" ")))
+        .with_context(|| {
+            format!(
+                "failed to spawn `{} {}`",
+                bin(),
+                mask_env_args(args).join(" ")
+            )
+        })
 }
 
 // Raw ls + stats; the merge happens in state.rs because CPU% needs deltas
@@ -1522,7 +1557,7 @@ pub fn spawn(args: &[&str]) -> Result<Child> {
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .with_context(|| format!("spawn `{} {}`", bin(), args.join(" ")))
+        .with_context(|| format!("spawn `{} {}`", bin(), mask_env_args(args).join(" ")))
 }
 
 // Drain stdout+stderr line-by-line, invoking `on_line` for each. Returns when
@@ -1630,6 +1665,53 @@ mod tests {
         assert_eq!(shell_quote("path/to/bin"), "path/to/bin");
         assert_eq!(shell_quote("has space"), "'has space'");
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn mask_env_args_hides_values_but_keeps_everything_else() {
+        let argv = [
+            "run",
+            "-d",
+            "--name",
+            "s_web",
+            "-e",
+            "DB_PASS=hunter2=x",
+            "-e",
+            "INHERIT",
+            "--env",
+            "A=1",
+            "--env=B=2",
+            "-p",
+            "80:80",
+            "img",
+            "sh",
+            "-e",
+            "not-env",
+        ];
+        let masked = mask_env_args(&argv);
+        assert_eq!(
+            masked,
+            [
+                "run",
+                "-d",
+                "--name",
+                "s_web",
+                "-e",
+                "DB_PASS=***",
+                "-e",
+                "INHERIT",
+                "--env",
+                "A=***",
+                "--env=B=***",
+                "-p",
+                "80:80",
+                "img",
+                "sh",
+                "-e",
+                "not-env",
+            ]
+        );
+        assert!(!masked.join(" ").contains("hunter2"));
     }
 
     #[test]
