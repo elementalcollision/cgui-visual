@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-11-23
+
+Targets Apple's `container` CLI 1.7.1; **1.4.1 or later is now required.**
+Tested with container 1.4.1 and 1.7.1 on macOS 26.7.3 and macOS 27.2.1.
+
+### Added
+
+- **Menu-bar mode works.** With it on, closing the window hides cgui to the
+  menu bar instead of quitting (no Dock icon while hidden); the tray's Show
+  cgui, or opening cgui again from Spotlight or Finder, brings it back.
+  Background polling slows from every 2 s to every 10 s while the window is
+  hidden. The setting applies immediately.
+- **Doctor checks the container version.** It reports an error below
+  1.4.1, and warns when the CLI and its background server are different
+  versions — which happens after upgrading until the services restart — with
+  a one-click **Restart services** fix.
+- **Opt-in live test suite** (`CGUI_LIVE=1 cargo test --test live_cli --
+  --ignored`) that drives a real `container` install, plus parser fixtures
+  captured from container 1.4.1 and 1.7.1. See CONTRIBUTING.md.
+
+### Fixed
+
+- **Errors are shown instead of empty lists.** When the container services
+  are stopped, views say so and offer **Start services**; other failures
+  show the CLI's message instead of an empty table. Build and the builder
+  panel do the same for container 1.6+'s "Plugins are unavailable" error.
+- **A failed Trivy scan is no longer shown as clean.** Scans report "not
+  installed", "scan failed" (with the reason), a clean result, or findings,
+  and failed scans are not recorded in vulnerability history.
+- **Log views no longer leak or mix streams.** Switching containers or log
+  options stops the previous `container logs -f`; each view only shows its
+  own stream. Log history is written in batches, so a chatty container no
+  longer slows the metrics recorder.
+- **Quitting cleans up.** Terminal sessions and log streams are stopped on
+  Quit, and closed terminal tabs no longer leave zombie processes.
+- **Stacks:** `stack down` reports which services failed instead of always
+  saying it succeeded, and a stack file with a typo is listed as invalid
+  (with the parse error) instead of silently disappearing.
+- **Restart** only ignores a "not running" stop failure; other failures are
+  reported.
+- **Images view with unreadable images:** container 1.6+ exits with an error
+  when any image can't be read even though it lists the rest; cgui now shows
+  the readable images with a warning banner.
+- **Healthcheck grace period now applies.** `start_period_s` never took
+  effect on container 1.x because the container start time wasn't parsed.
+- **Update check** compares versions numerically, so a newer local build no
+  longer shows as "update available".
+
+### Removed
+
+- Parsing paths for container 0.x output formats.
+
 ## [0.5.4] — 2026-11-23
 
 Security and correctness hotfix. Verified live against Apple's `container`
@@ -336,7 +388,8 @@ Initial macOS-only release. Tauri + React + TypeScript GUI for Apple's
   binary. Apple's `container` CLI is similarly optional but required for
   any real data.
 
-[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.4...HEAD
+[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.4...v0.6.0
 [0.5.4]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.1...v0.5.2
