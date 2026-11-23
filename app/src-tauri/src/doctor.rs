@@ -26,10 +26,10 @@ pub async fn run() -> Vec<DoctorCheck> {
     {
         Ok(o) if o.status.success() => {
             let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            out.push(ok(format!("`{RUNTIME_BIN}` resolves to {path}")));
+            out.push(ok(format!("{RUNTIME_BIN} resolves to {path}")));
         }
         _ => {
-            let mut c = err(format!("`{RUNTIME_BIN}` not on PATH"));
+            let mut c = err(format!("{RUNTIME_BIN} not on PATH"));
             c.fix = Some(DoctorFix::Url {
                 label: "Open Apple container releases".into(),
                 url: "https://github.com/apple/container/releases".into(),
@@ -47,12 +47,12 @@ pub async fn run() -> Vec<DoctorCheck> {
     {
         Ok(o) if o.status.success() => {
             let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            out.push(ok(format!("`{RUNTIME_BIN} --version` → {v}")));
+            out.push(ok(format!("{RUNTIME_BIN} --version → {v}")));
             if let Some(c) = min_version_check(crate::updates::extract_version(&v).as_deref()) {
                 out.push(c);
             }
         }
-        _ => out.push(err(format!("`{RUNTIME_BIN} --version` failed"))),
+        _ => out.push(err(format!("{RUNTIME_BIN} --version failed"))),
     }
 
     // 4. system status (Apple-container-specific). `--format json` gives
@@ -85,7 +85,7 @@ pub async fn run() -> Vec<DoctorCheck> {
             }
         }
         _ => {
-            let mut c = warn("could not query `container system status`".into());
+            let mut c = warn("could not query container system status".into());
             c.fix = Some(DoctorFix::Run {
                 label: "Start services".into(),
                 action: "system-start".into(),
@@ -134,10 +134,9 @@ pub async fn run() -> Vec<DoctorCheck> {
             out.push(ok(format!("trivy: {path} (image scan available)")));
         }
         _ => {
-            let mut c =
-                warn("trivy not on PATH (image scan disabled — `brew install trivy`)".into());
+            let mut c = warn("trivy not on PATH (image scan disabled — brew install trivy)".into());
             c.fix = Some(DoctorFix::Copy {
-                label: "Copy `brew install trivy`".into(),
+                label: "Copy brew install trivy".into(),
                 command: "brew install trivy".into(),
             });
             out.push(c);

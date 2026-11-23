@@ -446,7 +446,7 @@ fn restart_warnings(stack: &StackToml) -> Vec<String> {
             let rp = svc.restart.as_deref()?.trim();
             (!rp.is_empty() && rp != "no").then(|| {
                 format!(
-                    "warning: service `{}`: restart policy `{rp}` ignored \u{2014} Apple's container CLI has no restart policies",
+                    "warning: service '{}': restart policy '{rp}' ignored \u{2014} Apple's container CLI has no restart policies",
                     svc.name
                 )
             })
@@ -979,7 +979,7 @@ aliases = ["db.example.test"]
         };
         let w = restart_warnings(&st);
         assert_eq!(w.len(), 1);
-        assert!(w[0].contains("service `web`") && w[0].contains("`always` ignored"));
+        assert!(w[0].contains("service 'web'") && w[0].contains("'always' ignored"));
     }
 
     #[test]

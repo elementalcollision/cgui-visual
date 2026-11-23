@@ -4,6 +4,7 @@ import { Icon, iconBtn } from '../components';
 import type { ThemeTokens } from '../theme';
 import type { DoctorCheck, DoctorFix } from '../types';
 import { Backdrop } from './shared';
+import { plainText } from '../plainText';
 
 // Fire a DoctorFix. URL fixes go through the opener plugin (or a fallback
 // window.open in browser-dev mode). Copy fixes write to the clipboard and
@@ -64,7 +65,7 @@ function DoctorRow({ t, d }: { t: ThemeTokens; d: DoctorCheck }) {
               : flash === 'copied' ? '✓ Copied'
               : flash === 'opened' ? '✓ Opened'
               : flash === 'ran' ? '✓ Done'
-              : d.fix?.label;
+              : d.fix && plainText(d.fix.label);
   const fixTitle = !d.fix ? undefined
                  : d.fix.kind === 'url' ? d.fix.url
                  : d.fix.kind === 'copy' ? d.fix.command
@@ -75,7 +76,7 @@ function DoctorRow({ t, d }: { t: ThemeTokens; d: DoctorCheck }) {
       color: d.ok ? t.fg1 : d.warn ? t.warning : t.danger,
     }}>
       <span style={{ width: 16, color: d.ok ? t.success : t.warning, fontWeight: 700 }}>{d.ok ? '✓' : '!'}</span>
-      <span style={{ flex: 1 }}>{d.text}</span>
+      <span style={{ flex: 1 }}>{plainText(d.text)}</span>
       {d.fix && (
         <button
           onClick={onClick}

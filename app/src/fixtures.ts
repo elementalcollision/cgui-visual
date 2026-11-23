@@ -232,12 +232,12 @@ export const updates: Update[] = [
 
 export const doctor: DoctorCheck[] = [
   { ok: true,  text: 'active profile: container → container' },
-  { ok: true,  text: '`container` resolves to /usr/local/bin/container' },
-  { ok: true,  text: '`container --version` → container CLI version 1.4.1' },
+  { ok: true,  text: 'container resolves to /usr/local/bin/container' },
+  { ok: true,  text: 'container --version → container CLI version 1.4.1' },
   { ok: true,  text: 'container system status: running' },
   { ok: false, text: 'no profiles.toml at ~/.config/cgui/profiles.toml (using built-in default)', warn: true },
   { ok: true,  text: 'state.json at ~/.config/cgui/state.json parses cleanly' },
-  { ok: false, text: 'trivy not on PATH (image scan disabled — `brew install trivy`)', warn: true },
+  { ok: false, text: 'trivy not on PATH (image scan disabled — brew install trivy)', warn: true },
   { ok: true,  text: 'runtime API reachable on /var/run/container.sock' },
 ];
 
