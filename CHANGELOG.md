@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4] — 2026-11-23
+
+Security and correctness hotfix. Verified live against Apple's `container`
+CLI 1.4.1 on macOS 26.7.3 and macOS 27.2.1.
+
+### Fixed
+
+- **Containers with IDs longer than 8 characters can be managed again.**
+  The app shortened every container ID to its first 8 characters and sent
+  that to the CLI, which matches IDs exactly. Start, stop, delete, restart,
+  kill, Reclaim space, logs, terminal, inspect, copy and export all failed
+  for stack containers (`stack_service`) and unnamed (UUID) containers. The
+  full ID is now sent everywhere; the short form is display-only. Stats are
+  matched by exact ID, so `stack_web` no longer picks up `stack_worker`'s
+  numbers. Container history is keyed by the full ID from now on; history
+  recorded under the old short IDs ages out.
+- **Stacks with a restart policy start again.** `stack up` passed
+  `--restart`, which Apple's `container run` has never supported, so any
+  service with `restart: always` or `on-failure` failed. The policy is still
+  imported and saved, and `stack up` now logs a warning that it is ignored.
+- **Stack and snapshot names can no longer write outside the stacks
+  folder.** A compose file's `name:` or a snapshot's stack name was used
+  directly as a file name, so `../` or an absolute path could write a
+  `.toml` elsewhere. Names must now be 1–63 letters, digits, `_`, `.` or
+  `-`, and are checked before anything is written.
+- **Timed-out CLI calls are stopped.** A call that hit its timeout left the
+  `container` process running; stack commands had no timeout at all. Every
+  CLI call now ends its process on timeout, and stack commands use the same
+  timeouts as the rest of the app.
+- **Start, stop, delete and restart get 60 seconds instead of 8**, so a
+  slow stop or cold VM start no longer reports "timed out" while it is
+  still working.
+
+### Security
+
+- **Tauri 2.12.7 with updater plugin 2.14.1 and `rustls` 0.23.46**, which
+  clears all six open Rust advisories. Only the `rustls` ones affected code
+  in the macOS app (the updater's HTTPS client); the `zip` ones were in the
+  lockfile only. Dev-tool advisories in Vite, Vitest, undici and
+  source-map-js are fixed too; none of those ship in the app.
+
+### Changed
+
+- Tauri plugins and `@tauri-apps/*` packages updated to matching versions;
+  React 19.3. CI and release builds use Node 24 (Node 20 is end of life).
+
 ## [0.5.3] — 2026-09-27
 
 ### Added
@@ -290,7 +336,8 @@ Initial macOS-only release. Tauri + React + TypeScript GUI for Apple's
   binary. Apple's `container` CLI is similarly optional but required for
   any real data.
 
-[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.4...HEAD
+[0.5.4]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.0...v0.5.1
