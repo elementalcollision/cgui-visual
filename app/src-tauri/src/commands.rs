@@ -302,6 +302,14 @@ pub async fn system_status() -> Result<bool, String> {
     runtime::system_running().await.map_err(err_str)
 }
 
+/// Detected CLI version (cached) for the UI's capability gate. `None` when
+/// the CLI isn't installed or its version can't be parsed; the UI then fails
+/// open and lets the CLI itself report any unsupported feature.
+#[tauri::command]
+pub async fn cli_version() -> Option<String> {
+    runtime::cli_version().await
+}
+
 // ─── Container machines (phase 4) ─────────────────────────────────────
 
 #[tauri::command]

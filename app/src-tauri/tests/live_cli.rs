@@ -430,3 +430,15 @@ async fn quoted_command_and_flag_like_id() {
     assert!(runtime::stop("--all").await.is_err());
     assert!(runtime::delete("-f").await.is_err());
 }
+
+/// Capability gate: the cached CLI version parses and matches `--version`.
+#[tokio::test]
+#[ignore]
+async fn cli_version_is_detected_and_cached() {
+    live_only!();
+    let v = runtime::cli_version().await.expect("cli version");
+    assert!(v.chars().next().unwrap().is_ascii_digit(), "{v}");
+    let raw = cli_ok(&["--version"]);
+    assert!(raw.contains(&v), "`{raw}` should contain {v}");
+    assert_eq!(runtime::cli_version().await, Some(v));
+}

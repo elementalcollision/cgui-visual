@@ -556,6 +556,7 @@ pub fn run() {
             commands::stack_down,
             commands::stack_health,
             commands::runtime_available,
+            commands::cli_version,
             commands::probe_runtime,
             commands::container_history,
             commands::vuln_history,

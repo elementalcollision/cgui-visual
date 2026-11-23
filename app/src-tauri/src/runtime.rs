@@ -1232,12 +1232,14 @@ pub async fn builder_delete() -> Result<()> {
 // `start` is idempotent; `stop` tears the services down.
 
 pub async fn system_start() -> Result<()> {
+    clear_cli_version_cache();
     run_with_timeout(&["system", "start"], RUN_LONG_TIMEOUT)
         .await
         .map(|_| ())
 }
 
 pub async fn system_stop() -> Result<()> {
+    clear_cli_version_cache();
     run_with_timeout(&["system", "stop"], RUN_LONG_TIMEOUT)
         .await
         .map(|_| ())
@@ -1291,6 +1293,31 @@ pub async fn system_running() -> Result<bool> {
         Ok(bytes) => Ok(parse_system_running(&String::from_utf8_lossy(&bytes))),
         Err(_) => Ok(false),
     }
+}
+
+// ─── CLI capability gate ──────────────────────────────────────────────
+// Features that need a newer CLI (commit 1.6+, DNS aliases 1.6+, native CPU
+// 1.7.1+, ...) are gated in the UI on the detected CLI version. The version
+// is cached for the process lifetime; start/stop/restart of the services
+// clears it so an upgrade followed by a services restart is picked up.
+
+static CLI_VERSION: RwLock<Option<String>> = RwLock::new(None);
+
+fn clear_cli_version_cache() {
+    *CLI_VERSION.write().unwrap() = None;
+}
+
+/// Version of the CLI binary (`container --version`), e.g. `1.7.1`. `None`
+/// when the binary can't be run or prints nothing parseable. Only successful
+/// detections are cached.
+pub async fn cli_version() -> Option<String> {
+    if let Some(v) = CLI_VERSION.read().unwrap().clone() {
+        return Some(v);
+    }
+    let bytes = run(&["--version"]).await.ok()?;
+    let v = crate::updates::extract_version(&String::from_utf8_lossy(&bytes))?;
+    *CLI_VERSION.write().unwrap() = Some(v.clone());
+    Some(v)
 }
 
 // Args for a streamed `container build`. Mirrors the BuildModal form.

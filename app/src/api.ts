@@ -136,6 +136,11 @@ export const api = {
     volumes:    { total: 0, active: 0, sizeInBytes: 0, reclaimable: 0 },
   }),
 
+  // Detected Apple container CLI version (`1.7.1`), or null when unknown.
+  // The backend caches it; restarting the services clears that cache.
+  // Browser dev mode reports a current version so gated features are usable.
+  cliVersion: () => call<string | null>('cli_version', '1.7.1'),
+
   // First-run onboarding probe. Outside Tauri (browser dev mode) the
   // fallback returns true so the OnboardingModal doesn't trigger when the
   // entire data layer is fixtures by design.
