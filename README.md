@@ -28,7 +28,7 @@
   </tr>
   <tr>
     <td align="center"><sub><b>Logs</b>: live, colour-coded by level, with history kept across restarts</sub></td>
-    <td align="center"><sub><b>Container details</b>: trends, env, mounts, network, terminal, commit to image</sub></td>
+    <td align="center"><sub><b>Container details</b>: trends, network and DNS aliases, terminal, commit to image</sub></td>
   </tr>
   <tr>
     <td width="50%"><img src="docs/screenshots/settings.png" alt="Settings, showing dark mode, menu-bar mode, notifications and background log saving"/></td>
