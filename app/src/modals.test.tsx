@@ -281,6 +281,7 @@ describe('SettingsModal menu-bar toggle', () => {
     renderSettings(false, () => {});
     expect(screen.getByText(/hides it instead of quitting/i)).toBeInTheDocument();
     expect(screen.getByText(/When off, closing the window quits cgui/i)).toBeInTheDocument();
+    expect(screen.getByText(/open cgui again from Spotlight or Finder/i)).toBeInTheDocument();
   });
 
   it('toggling calls setMenubarMode with the inverted value', async () => {
