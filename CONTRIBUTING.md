@@ -49,6 +49,23 @@ npm run dev
   `state::poll_once`, `runtime::list_images/volumes/networks`, the stacks
   parser, and the live GitHub updates check.
 
+## Live CLI tests
+
+`app/src-tauri/tests/live_cli.rs` drives the app's own runtime functions
+against a real `container` CLI. It is opt-in: every test is `#[ignore]` and
+also returns early unless `CGUI_LIVE=1`, so `cargo test` and CI never run it.
+
+```sh
+cd app/src-tauri
+CGUI_LIVE=1 cargo test --test live_cli -- --ignored --nocapture
+```
+
+Needs services running and `alpine:latest` pullable; takes about a minute.
+Tests only create `cgui-live-<pid>-*` resources and delete them on exit
+(even on panic). Offline parser tests use real CLI output committed under
+`app/src-tauri/tests/fixtures/<version>/`; refresh or add a version with
+`app/src-tauri/scripts/capture-fixtures.sh <output-dir>`.
+
 ## Code conventions
 
 - **No comments unless WHY isn't obvious** — well-named identifiers do the
