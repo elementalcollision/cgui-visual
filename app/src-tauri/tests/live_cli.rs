@@ -485,6 +485,44 @@ async fn commit_running_and_stopped_container() {
     assert!(runtime::commit_container(&cname, "-x").await.is_err());
 }
 
+/// Stats (1.7.1+): `cpuUtilization` is a fraction of ONE core, and the
+/// first poll already reports it (no baseline poll needed).
+#[tokio::test]
+#[ignore]
+async fn stats_native_cpu_utilization() {
+    live_only!();
+    let mut g = Guard::default();
+    let cname = g.container(&name("cpu"));
+    let busy = RunArgs {
+        command: Some("sh -c 'while :; do :; done'".into()),
+        ..run_args(&cname)
+    };
+    runtime::run_image(busy).await.expect("run");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let version = runtime::cli_version().await.expect("version");
+    let rows = runtime::stats_snapshot().await.expect("stats");
+    let row = rows.iter().find(|r| r.id == cname).expect("stat row");
+    let Some(frac) = row.cpu_utilization else {
+        eprintln!("CLI {version} has no cpuUtilization (needs 1.7.1+); skipping");
+        return;
+    };
+    assert!(
+        (0.5..=4.2).contains(&frac),
+        "a busy loop should use about one core, got {frac}"
+    );
+
+    // The UI value (percent of one core) from the very first poll.
+    let history = app_lib::state::History::new();
+    let cs = app_lib::state::poll_once(&history).await.expect("poll");
+    let c = cs.iter().find(|c| c.id == cname).expect("listed");
+    assert!(
+        (50.0..=420.0).contains(&c.cpu),
+        "first poll cpu% should come from cpuUtilization, got {}",
+        c.cpu
+    );
+}
+
 /// Capability gate: the cached CLI version parses and matches `--version`.
 #[tokio::test]
 #[ignore]

@@ -163,6 +163,11 @@ pub struct StatRow {
     pub block_read_bytes: u64,
     #[serde(rename = "blockWriteBytes", default)]
     pub block_write_bytes: u64,
+    /// CPU use as a fraction of ONE core (1.0 = one core fully busy),
+    /// sampled by the CLI over ~2 s. Present since container 1.7.1; older
+    /// CLIs omit it and state.rs falls back to `cpu_usage_usec` deltas.
+    #[serde(rename = "cpuUtilization", default)]
+    pub cpu_utilization: Option<f64>,
 }
 
 const RUN_TIMEOUT: Duration = Duration::from_secs(8);
