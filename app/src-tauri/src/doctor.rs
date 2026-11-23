@@ -16,7 +16,12 @@ pub async fn run() -> Vec<DoctorCheck> {
     out.push(ok(format!("active profile: container → {RUNTIME_BIN}")));
 
     // 2. Runtime binary on PATH.
-    match Command::new("which").arg(RUNTIME_BIN).output().await {
+    match Command::new("which")
+        .kill_on_drop(true)
+        .arg(RUNTIME_BIN)
+        .output()
+        .await
+    {
         Ok(o) if o.status.success() => {
             let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
             out.push(ok(format!("`{RUNTIME_BIN}` resolves to {path}")));
@@ -32,7 +37,12 @@ pub async fn run() -> Vec<DoctorCheck> {
     }
 
     // 3. Runtime --version.
-    match Command::new(RUNTIME_BIN).arg("--version").output().await {
+    match Command::new(RUNTIME_BIN)
+        .kill_on_drop(true)
+        .arg("--version")
+        .output()
+        .await
+    {
         Ok(o) if o.status.success() => {
             let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
             out.push(ok(format!("`{RUNTIME_BIN} --version` → {v}")));
@@ -44,6 +54,7 @@ pub async fn run() -> Vec<DoctorCheck> {
     // `parse_system_running` a `status` field to key off on 1.4+, and
     // older CLIs accept the flag too (see runtime::parse_system_running).
     match Command::new(RUNTIME_BIN)
+        .kill_on_drop(true)
         .args(["system", "status", "--format", "json"])
         .output()
         .await
@@ -103,7 +114,12 @@ pub async fn run() -> Vec<DoctorCheck> {
     }
 
     // 7. trivy on PATH (optional).
-    match Command::new("which").arg("trivy").output().await {
+    match Command::new("which")
+        .kill_on_drop(true)
+        .arg("trivy")
+        .output()
+        .await
+    {
         Ok(o) if o.status.success() => {
             let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
             out.push(ok(format!("trivy: {path} (image scan available)")));

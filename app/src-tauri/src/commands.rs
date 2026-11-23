@@ -476,10 +476,10 @@ pub async fn import_compose(path: String, overwrite: bool) -> Result<String, Str
     let p = PathBuf::from(&path);
     let (stack, toml_text) = crate::compose::import_file(&p).map_err(err_str)?;
 
-    let dir = crate::stacks::stacks_dir()
-        .ok_or_else(|| "could not resolve $XDG_CONFIG_HOME or $HOME".to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create stacks dir: {e}"))?;
-    let dest = dir.join(format!("{}.toml", stack.name));
+    let dest = crate::stacks::stack_path(&stack.name).map_err(err_str)?;
+    if let Some(dir) = dest.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("create stacks dir: {e}"))?;
+    }
 
     if dest.exists() && !overwrite {
         return Err(format!(
