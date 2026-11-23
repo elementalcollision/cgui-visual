@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Updates will keep arriving after the project is renamed.** cgui is
+  going to be renamed Quayside, and the address cgui checks for updates
+  changes with the project's name. cgui now also checks the future address,
+  so this version and later ones find new releases before and after the
+  rename. Copies older than this one will need to be updated by hand once
+  the rename happens.
+
 ## [0.7.3] — 2026-11-23
 
 ### Fixed

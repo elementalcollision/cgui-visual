@@ -99,6 +99,15 @@ download and install signed updates. The flow:
    Updates modal and click **Install**. The plugin verifies the signature
    against the public key baked into `tauri.conf.json` before applying.
 
+The updater lists a second address,
+`https://elementalcollision.github.io/quayside/updates/latest.json`. It is
+the bridge for the planned rename of this repository to `quayside`: a GitHub
+Pages address follows the repository's name, so after the rename the first
+address returns 404 and the updater moves on to the second (it tries the
+addresses in order and skips one that fails). Keep both until every copy in
+use is on a release that lists the second one; see
+[`docs/brand/README.md`](../docs/brand/README.md).
+
 ### Setup (once)
 
 ```sh

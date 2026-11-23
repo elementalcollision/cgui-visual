@@ -272,4 +272,29 @@ mod tests {
         assert!(trimmed.len() < 6500);
         assert!(trimmed.ends_with("[…notes truncated…]"));
     }
+
+    /// The app's own updates come from the tauri-plugin-updater endpoints in
+    /// `tauri.conf.json`. The second address is the bridge for renaming the
+    /// repository to `quayside` (a GitHub Pages address follows the repo's
+    /// name; the plugin tries the addresses in order and skips one that
+    /// fails). Copies that lack it stop getting updates after the rename, so
+    /// it must ship, and stay, until every copy in use has it.
+    #[test]
+    fn updater_lists_current_then_post_rename_address() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let endpoints: Vec<&str> = conf["plugins"]["updater"]["endpoints"]
+            .as_array()
+            .expect("updater endpoints")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            endpoints,
+            [
+                "https://elementalcollision.github.io/cgui-visual/updates/latest.json",
+                "https://elementalcollision.github.io/quayside/updates/latest.json",
+            ]
+        );
+    }
 }
