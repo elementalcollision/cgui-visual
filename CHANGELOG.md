@@ -32,6 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and skipped as many of its first lines as the old run had printed. cgui
   now checks each run's saved lines against what the log shows and stores a
   new run separately, from its first line.
+- **Saved logs no longer lose or repeat lines after a burst.** While a
+  container prints a burst of output, `container logs -f` sometimes splits a
+  long line in two, and it leaves blank lines out. Background log saving
+  counted saved lines, so after cgui was reopened it could skip one real
+  line per split, or save a line twice after a blank line. It now picks up
+  from how much text is saved, which splits and missing blank lines don't
+  change. A line that was split is still saved as two rows next to each
+  other.
 
 ### Internal
 

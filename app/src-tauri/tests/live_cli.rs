@@ -714,6 +714,206 @@ async fn app_restart_resumes_without_gap_or_duplicate() {
     let _ = wait_logs_follower(&cname, false, 10).await;
 }
 
+// A burst: lines printed in one go, far faster than any timestamp can tell
+// apart. BURSTS bursts of BURST lines plus TAIL slow lines stay under the
+// 5,000 rows `rows()` reads back, even with a few dozen lines split in two.
+const BURST: usize = 1500;
+const BURSTS: usize = 3;
+const TAIL: usize = 10;
+
+/// Burst lines carry ~2 KB of padding, so one burst (~3 MB) is far more
+/// than a pipe buffer and than a follower reads in one wake-up (tokio's
+/// budget is 128 reads of 8 KB). That is what lets the test stop the
+/// supervisor with a burst only partly saved. It is also what makes
+/// `logs -f` split lines (see `logpersist`).
+fn burst_pad() -> String {
+    "abcdefghijklmnopqrstuvwxyz0123456789".repeat(56)
+}
+
+/// The container's whole log. Before burst k it prints `n<i>` and waits for
+/// `/tmp/go<k>`; burst k is BURST lines `n<i> <pad>` from one `seq | sed`;
+/// after the last burst come TAIL lines 100 ms apart, then silence.
+fn burst_cmd() -> String {
+    let ks: Vec<String> = (1..=BURSTS).map(|k| k.to_string()).collect();
+    format!(
+        "sh -c \"i=0; for k in {ks}; do \
+           i=$((i+1)); echo n$i; \
+           while [ ! -e /tmp/go$k ]; do sleep 0.05; done; \
+           seq $((i+1)) $((i+{BURST})) | sed 's/.*/n& {pad}/'; i=$((i+{BURST})); \
+         done; \
+         t=0; while [ $t -lt {TAIL} ]; do i=$((i+1)); t=$((t+1)); echo n$i; sleep 0.1; done; \
+         exec sleep 3600\"",
+        ks = ks.join(" "),
+        pad = burst_pad(),
+    )
+}
+
+/// What `burst_cmd` prints, line by line.
+fn burst_log() -> Vec<String> {
+    let pad = burst_pad();
+    let mut log = Vec::new();
+    for _ in 0..BURSTS {
+        log.push(format!("n{}", log.len() + 1));
+        for _ in 0..BURST {
+            log.push(format!("n{} {pad}", log.len() + 1));
+        }
+    }
+    for _ in 0..TAIL {
+        log.push(format!("n{}", log.len() + 1));
+    }
+    log
+}
+
+/// Text bytes of `lines` (each without its `\n`): the position a run has
+/// once exactly these lines are stored.
+fn text_bytes(lines: &[String]) -> usize {
+    lines.iter().map(String::len).sum()
+}
+
+/// Text bytes of `run` the history has stored, after flushing the writer.
+fn stored_bytes(cid: &str, run: i64) -> usize {
+    app_lib::history::flush_logs();
+    app_lib::history::run_progress(cid, run)
+        .and_then(|p| p.digest)
+        .map_or(0, |d| d.bytes as usize)
+}
+
+/// Check that `rows` are the first lines of `log` in order, each whole or
+/// in consecutive pieces (a line `logs -f` split is stored as two rows),
+/// covering exactly `bytes` text bytes. Reports the first difference only
+/// (lines are ~2 KB).
+fn assert_rows_are_log(rows: &[String], log: &[String], bytes: usize, ctx: &str) {
+    let short = |l: &str| l.chars().take(24).collect::<String>();
+    let (mut line, mut at, mut total, mut pieces) = (0usize, 0usize, 0usize, 0usize);
+    for (i, r) in rows.iter().enumerate() {
+        let want = log.get(line).map_or("", |l| &l[at..]);
+        assert!(
+            !r.is_empty() && want.starts_with(r.as_str()),
+            "{ctx}: row {} is {:?} ({} bytes), expected (part of) line {} {:?} ({} bytes)",
+            i + 1,
+            short(r),
+            r.len(),
+            line + 1,
+            short(want),
+            want.len()
+        );
+        if at > 0 || r.len() < want.len() {
+            pieces += 1;
+        }
+        at += r.len();
+        total += r.len();
+        if at == log[line].len() {
+            line += 1;
+            at = 0;
+        }
+    }
+    assert_eq!(total, bytes, "{ctx}: text bytes stored");
+    if pieces > 0 {
+        eprintln!("{ctx}: {pieces} rows are pieces of lines `logs -f` split");
+    }
+}
+
+/// Poll every millisecond until part of the burst after line `before` is
+/// saved, then stop the supervisor at once; returns the text bytes saved.
+/// The test runtime has one thread, so the follower cannot run, let alone
+/// save more, between that read and the stop.
+async fn stop_inside_burst(sup: &Supervisor, cid: &str, run: i64, before: usize) -> usize {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let n = stored_bytes(cid, run);
+        if n > before {
+            sup.stop_all();
+            return n;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "burst after text byte {before} never arrived"
+        );
+    }
+}
+
+/// (b2) Resuming inside a burst. Each round, a fresh supervisor (= app
+/// restart) catches up to where the container waits, the container prints
+/// a burst, and the supervisor is stopped with only part of it saved. The
+/// next one must resume at exactly that point, although the lines around
+/// it were printed in the same instant and `logs -f` may have split some of
+/// them. Three rounds; then the saved log must be `container logs`.
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn app_restart_inside_a_burst_resumes_exactly() {
+    live_only!();
+    init_history();
+    let mut g = Guard::default();
+    let cname = g.container(&name("burst"));
+    let args = RunArgs {
+        command: Some(burst_cmd()),
+        ..run_args(&cname)
+    };
+    runtime::run_image(args).await.expect("run");
+    let run = find(&cname).await.started_unix.expect("started");
+    let log = burst_log();
+    // Text bytes up to and including the line printed before burst `k`.
+    let before = |k: usize| text_bytes(&log[..k * (BURST + 1) + 1]);
+
+    for k in 0..BURSTS {
+        let sup = Arc::new(Supervisor::new());
+        // Replays the run, skips what is saved (from round 1 on, part of
+        // the previous burst) and saves the rest, up to the wait.
+        assert!(
+            tick_until(&sup, "burst", 30, || stored_bytes(&cname, run) >= before(k)).await,
+            "round {k}: caught up to {} of {} text bytes",
+            stored_bytes(&cname, run),
+            before(k)
+        );
+        assert_eq!(stored_bytes(&cname, run), before(k), "round {k}: position");
+        assert_rows_are_log(
+            &rows(&cname),
+            &log,
+            before(k),
+            &format!("round {k} resumed"),
+        );
+
+        cli_ok(&["exec", &cname, "touch", &format!("/tmp/go{}", k + 1)]);
+        let saved = stop_inside_burst(&sup, &cname, run, before(k)).await;
+        eprintln!(
+            "round {k}: stopped with {} of {} burst bytes saved",
+            saved - before(k),
+            before(k + 1) - before(k)
+        );
+        assert!(
+            saved < before(k + 1),
+            "round {k}: the whole burst was saved before the stop"
+        );
+        assert!(wait_logs_follower(&cname, false, 10).await, "killed");
+        assert_eq!(
+            stored_bytes(&cname, run),
+            saved,
+            "round {k}: nothing saved after the stop"
+        );
+        assert_rows_are_log(&rows(&cname), &log, saved, &format!("round {k} stopped"));
+    }
+
+    // The last restart saves the rest of the last burst and the slow tail.
+    let sup = Arc::new(Supervisor::new());
+    let all = text_bytes(&log);
+    assert!(
+        tick_until(&sup, "burst", 30, || stored_bytes(&cname, run) >= all).await,
+        "caught up to {} of {all} text bytes",
+        stored_bytes(&cname, run),
+    );
+    sup.stop_all();
+    assert!(wait_logs_follower(&cname, false, 10).await, "killed");
+    assert_eq!(stored_bytes(&cname, run), all, "final position");
+    let saved = rows(&cname);
+    assert_rows_are_log(&saved, &log, all, "final");
+    let cli: Vec<String> = cli_ok(&["logs", &cname])
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(cli, log, "`container logs` prints what the test expects");
+}
+
 /// (c) Restarting a container starts a new run: the new run's lines are
 /// captured, the old run's stay.
 #[tokio::test]

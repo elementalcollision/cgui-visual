@@ -205,6 +205,8 @@ const LOG_RUNS_SCHEMA: &str = r#"
         complete        INTEGER NOT NULL DEFAULT 0,
         recheck         INTEGER NOT NULL DEFAULT 0,
         updated_at      INTEGER NOT NULL DEFAULT 0,
+        text_bytes      INTEGER,
+        trailing_empty  INTEGER NOT NULL DEFAULT 0,
         digest          INTEGER,
         checkpoints     BLOB,
         PRIMARY KEY (container_id, started_at, seq)
@@ -224,14 +226,16 @@ fn has_column(conn: &Connection, table: &str, col: &str) -> rusqlite::Result<boo
 ///   * `log_runs`: one row per (container, run) holding how many lines of
 ///     that run's stdio log have been persisted (see `write_log_batch`).
 ///
-/// Later, runs that share a start second are told apart:
+/// Later, runs that share a start second are told apart, and a run is
+/// resumed by its text bytes rather than its row count (see `logpersist`):
 ///   * `seq` (in both tables): which of the runs with the same
 ///     (container, start second) the row belongs to, 0 for the first.
 ///     Existing rows become seq 0. `log_runs` is rebuilt for its new
 ///     primary key, keeping every row.
-///   * `log_runs.digest` / `checkpoints`: a fingerprint of the persisted
-///     lines (see `RunDigest`). NULL for rows saved before fingerprints:
-///     those runs are resumed by count alone, as before.
+///   * `log_runs.text_bytes` / `digest` / `checkpoints`: where the stored
+///     rows end in the run's log, and a fingerprint of them (see
+///     `RunDigest`); `trailing_empty`: see `RunProgress`. NULL for runs
+///     saved before: those are resumed by row count alone, as before.
 ///   * `log_runs.recheck`: see `RunProgress::recheck`.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     if !has_column(conn, "container_logs", "started_at")? {
@@ -536,7 +540,8 @@ const LOG_BATCH_WINDOW: Duration = Duration::from_millis(100);
 /// container sitting at the cap isn't trimmed on every flush).
 const LOGS_TRIM_SLACK: i64 = LOGS_PER_CONTAINER / 20;
 
-/// One line of a container's stdio log on its way to disk.
+/// One line of a container's stdio log (or a piece of one, see
+/// `logpersist`) on its way to disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogRow {
     pub container_id: String,
@@ -546,7 +551,16 @@ pub struct LogRow {
     /// Which run of those sharing `started_at` (see `RunProgress::seq`).
     pub seq: i64,
     pub ts: i64,
-    pub line: String,
+    /// The raw text as streamed: the line without its final `\n`, before
+    /// UTF-8 decoding (a piece of a line can end inside a character).
+    pub text: Vec<u8>,
+}
+
+/// The line as stored and shown: `text` without a final `\r` (of a `\r\n`
+/// line ending), decoded lossily, so a stray non-UTF-8 byte can never stop
+/// a follower or shift its position.
+pub fn stored_line(text: &[u8]) -> String {
+    String::from_utf8_lossy(text.strip_suffix(b"\r").unwrap_or(text)).into_owned()
 }
 
 /// One unit of work for the writer, applied in queue order.
@@ -570,22 +584,26 @@ enum LogOp {
     },
 }
 
-/// FNV-1a 64 offset basis: the digest of a run with no lines.
+/// FNV-1a 64 offset basis: the digest of a run with no text.
 const DIGEST_SEED: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-/// Fingerprint of the first `lines` lines of a run, used to check that a
-/// replay of the CLI's log really is the run we stored (and not a later run
-/// that started in the same second, see `logpersist`).
+/// Where the stored rows of a run end in its log, and a fingerprint of
+/// them, used to resume exactly and to check that a replay of the CLI's log
+/// really is the run we stored (and not a later run that started in the
+/// same second, see `logpersist`).
 ///
-/// `hash` is FNV-1a 64 over the lines, each followed by `\n` (a line never
-/// contains `\n`, so different line sequences hash different bytes). It is
-/// stored in the DB, so it must never change. `checkpoints[i]` is `hash`
-/// as it was after the first 2^i lines: a replay that differs from the
-/// stored run at line d is caught by line 2d, not only at line `lines`.
+/// Both are over the run's raw TEXT BYTES: the rows' `text`, line breaks
+/// left out. Unlike a row count, these do not change when `logs -f` splits
+/// a line in two or leaves out a blank line (see `logpersist`).
+///
+/// `hash` is FNV-1a 64 over those bytes. It is stored in the DB, so it must
+/// never change. `checkpoints[i]` is `hash` as it was after the first 2^i
+/// bytes: a replay that differs from the stored run at byte d is caught by
+/// byte 2d, not only at byte `bytes`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunDigest {
-    pub lines: i64,
+    pub bytes: i64,
     pub hash: u64,
     pub checkpoints: Vec<u64>,
 }
@@ -593,7 +611,7 @@ pub struct RunDigest {
 impl Default for RunDigest {
     fn default() -> Self {
         RunDigest {
-            lines: 0,
+            bytes: 0,
             hash: DIGEST_SEED,
             checkpoints: Vec::new(),
         }
@@ -601,14 +619,14 @@ impl Default for RunDigest {
 }
 
 impl RunDigest {
-    pub fn push(&mut self, line: &str) {
-        for &b in line.as_bytes().iter().chain(b"\n") {
+    pub fn push(&mut self, text: &[u8]) {
+        for &b in text {
             self.hash ^= u64::from(b);
             self.hash = self.hash.wrapping_mul(FNV_PRIME);
-        }
-        self.lines += 1;
-        if (self.lines as u64).is_power_of_two() {
-            self.checkpoints.push(self.hash);
+            self.bytes += 1;
+            if (self.bytes as u64).is_power_of_two() {
+                self.checkpoints.push(self.hash);
+            }
         }
     }
 
@@ -620,11 +638,16 @@ impl RunDigest {
     }
 
     /// Rebuild from DB columns; `None` when there is nothing to rebuild
-    /// from (a run saved before fingerprints existed).
-    fn from_db(lines: i64, digest: Option<i64>, blob: Option<Vec<u8>>) -> Option<Self> {
-        match digest {
-            Some(d) => Some(RunDigest {
-                lines,
+    /// from (a run saved before text bytes were recorded).
+    fn from_db(
+        rows: i64,
+        bytes: Option<i64>,
+        digest: Option<i64>,
+        blob: Option<Vec<u8>>,
+    ) -> Option<Self> {
+        match (bytes, digest) {
+            (Some(bytes), Some(d)) => Some(RunDigest {
+                bytes,
                 hash: d as u64,
                 checkpoints: blob
                     .unwrap_or_default()
@@ -632,8 +655,8 @@ impl RunDigest {
                     .map(|c| u64::from_le_bytes(c.try_into().expect("8-byte chunk")))
                     .collect(),
             }),
-            None if lines == 0 => Some(RunDigest::default()),
-            None => None,
+            _ if rows == 0 => Some(RunDigest::default()),
+            _ => None,
         }
     }
 }
@@ -664,18 +687,19 @@ fn log_sender() -> Option<&'static mpsc::Sender<LogMsg>> {
     LOG_TX.get()
 }
 
-/// Queue a log line of run (`container_id`, `started_at`, `seq`) for
-/// persistence. Best-effort and non-blocking — silently no-ops when the DB
-/// isn't initialised. A single writer thread batches lines (≤ LOG_BATCH_MAX
-/// or LOG_BATCH_WINDOW) into one transaction, so a chatty container can't
+/// Queue a row of run (`container_id`, `started_at`, `seq`) for
+/// persistence: `text` is the line's raw text, without its final `\n`.
+/// Best-effort and non-blocking — silently no-ops when the DB isn't
+/// initialised. A single writer thread batches rows (≤ LOG_BATCH_MAX or
+/// LOG_BATCH_WINDOW) into one transaction, so a chatty container can't
 /// starve the 2 s metrics `record`.
-pub fn record_run_log(container_id: &str, started_at: i64, seq: i64, line: &str) {
+pub fn record_run_log(container_id: &str, started_at: i64, seq: i64, text: Vec<u8>) {
     queue(LogOp::Row(LogRow {
         container_id: container_id.to_string(),
         started_at: Some(started_at),
         seq,
         ts: crate::timeutil::now_unix(),
-        line: line.to_string(),
+        text,
     }));
 }
 
@@ -725,17 +749,19 @@ pub struct RunProgress {
     /// Runs of one container that share a start second are stored as
     /// seq 0, 1, … in the order they ran.
     pub seq: i64,
-    /// Lines of the run's stdio log that have been persisted (see
-    /// `write_log_batch` for exactly what that counts).
+    /// Rows persisted for the run: its lines, a line `logs -f` split being
+    /// two rows (see `write_log_batch` for exactly what that counts).
     pub persisted_lines: i64,
+    /// How many of the last rows are empty (blank lines).
+    pub trailing_empty: i64,
     /// The log was read to its end after the container stopped.
     pub complete: bool,
     /// `complete`, but the read that completed it began while a later run
     /// could still start in the same second (and so share this key). Such
     /// a run is read once more after that second (see `logpersist`).
     pub recheck: bool,
-    /// Fingerprint of the persisted lines; `None` for a run saved before
-    /// fingerprints existed.
+    /// Text bytes and fingerprint of the persisted rows; `None` for a run
+    /// saved before they were recorded (resumed by row count).
     pub digest: Option<RunDigest>,
 }
 
@@ -744,6 +770,7 @@ impl Default for RunProgress {
         RunProgress {
             seq: 0,
             persisted_lines: 0,
+            trailing_empty: 0,
             complete: false,
             recheck: false,
             digest: Some(RunDigest::default()),
@@ -768,17 +795,18 @@ pub fn runs_at(container_id: &str, started_at: i64) -> Vec<RunProgress> {
     runs_at_conn(&conn, container_id, started_at).unwrap_or_default()
 }
 
-const RUN_COLUMNS: &str =
-    "seq, persisted_lines, complete, recheck, digest, checkpoints FROM log_runs";
+const RUN_COLUMNS: &str = "seq, persisted_lines, complete, recheck, digest, checkpoints, \
+     text_bytes, trailing_empty FROM log_runs";
 
 fn run_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunProgress> {
     let persisted_lines: i64 = r.get(1)?;
     Ok(RunProgress {
         seq: r.get(0)?,
         persisted_lines,
+        trailing_empty: r.get(7)?,
         complete: r.get::<_, i64>(2)? != 0,
         recheck: r.get::<_, i64>(3)? != 0,
-        digest: RunDigest::from_db(persisted_lines, r.get(4)?, r.get(5)?),
+        digest: RunDigest::from_db(persisted_lines, r.get(6)?, r.get(4)?, r.get(5)?),
     })
 }
 
@@ -819,16 +847,18 @@ fn load_run(
     cid: &str,
     started_at: i64,
     seq: i64,
-) -> rusqlite::Result<(i64, Option<RunDigest>)> {
+) -> rusqlite::Result<RunProgress> {
     let row = tx.query_row(
         &format!("SELECT {RUN_COLUMNS} WHERE container_id = ? AND started_at = ? AND seq = ?"),
         params![cid, started_at, seq],
         run_from_row,
     );
     match row {
-        Ok(p) => Ok((p.persisted_lines, p.digest)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok((0, Some(RunDigest::default()))),
-        Err(e) => Err(e),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(RunProgress {
+            seq,
+            ..RunProgress::default()
+        }),
+        other => other,
     }
 }
 
@@ -885,22 +915,20 @@ fn log_writer_loop(rx: mpsc::Receiver<LogMsg>) {
 }
 
 /// Apply `batch` in ONE transaction: insert the rows, advance each run's
-/// `log_runs.persisted_lines` and fingerprint (`digest`, `checkpoints`) by
-/// the rows inserted for it, open new runs, set `complete` flags, then trim
-/// any container whose (approximate, in-memory) row count exceeds cap +
-/// slack.
+/// position in `log_runs` (`persisted_lines`, `text_bytes`,
+/// `trailing_empty`) and fingerprint (`digest`, `checkpoints`) by the rows
+/// inserted for it, open new runs, set `complete` flags, then trim any
+/// container whose (approximate, in-memory) row count exceeds cap + slack.
 ///
-/// Rows, counters and fingerprints commit or roll back together, so after
-/// a crash `persisted_lines` is exactly the number of lines of that run the
-/// follower had delivered to the DB, and the fingerprint is that of exactly
-/// those lines; a follower resuming from it (see `logpersist`) neither
-/// loses nor repeats a line.
+/// Rows, position and fingerprint commit or roll back together, so after a
+/// crash they describe exactly the rows of that run the follower had
+/// delivered to the DB; a follower resuming from them (see `logpersist`)
+/// neither loses nor repeats a line.
 ///
-/// `persisted_lines` counts lines SEEN for the run, not rows currently
+/// The position counts what was SEEN for the run, not rows currently
 /// stored: trimming (per-container row cap) and age-based GC delete rows
-/// but never touch the counter or the fingerprint, because both describe a
-/// prefix of the CLI's append-only log, which does not shrink when we drop
-/// old rows.
+/// but never touch it or the fingerprint, because both describe a prefix of
+/// the CLI's append-only log, which does not shrink when we drop old rows.
 ///
 /// Row counts are seeded with one COUNT(*) the first time a container is
 /// seen, so the steady state is a batched INSERT plus one lookup and one
@@ -913,8 +941,7 @@ fn write_log_batch(
     let tx = conn.transaction()?;
     let now = crate::timeutil::now_unix();
     let mut touched: Vec<&str> = Vec::new();
-    // (container, start, seq) -> (persisted_lines, fingerprint)
-    let mut runs: HashMap<(&str, i64, i64), (i64, Option<RunDigest>)> = HashMap::new();
+    let mut runs: HashMap<(&str, i64, i64), RunProgress> = HashMap::new();
     {
         let mut ins = tx.prepare_cached(
             "INSERT INTO container_logs (container_id, ts, line, started_at, seq)
@@ -931,7 +958,13 @@ fn write_log_batch(
                 )?;
                 counts.insert(cid.clone(), n);
             }
-            ins.execute(params![cid, r.ts, r.line, r.started_at, r.seq])?;
+            ins.execute(params![
+                cid,
+                r.ts,
+                stored_line(&r.text),
+                r.started_at,
+                r.seq
+            ])?;
             if let Some(c) = counts.get_mut(cid) {
                 *c += 1;
             }
@@ -939,35 +972,57 @@ fn write_log_batch(
                 touched.push(cid);
             }
             if let Some(s) = r.started_at {
-                let (n, digest) = match runs.entry((cid.as_str(), s, r.seq)) {
+                let p = match runs.entry((cid.as_str(), s, r.seq)) {
                     std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
                     std::collections::hash_map::Entry::Vacant(e) => {
                         e.insert(load_run(&tx, cid, s, r.seq)?)
                     }
                 };
-                *n += 1;
-                // A run saved before fingerprints stays without one.
-                if let Some(d) = digest {
-                    d.push(&r.line);
+                p.persisted_lines += 1;
+                p.trailing_empty = if r.text.is_empty() {
+                    p.trailing_empty + 1
+                } else {
+                    0
+                };
+                // A run saved before text bytes were recorded stays without.
+                if let Some(d) = &mut p.digest {
+                    d.push(&r.text);
                 }
             }
         }
     }
-    for ((cid, s, seq), (n, digest)) in &runs {
-        let (hash, blob) = match digest {
-            Some(d) => (Some(d.hash as i64), Some(d.checkpoints_blob())),
-            None => (None, None),
+    for ((cid, s, seq), p) in &runs {
+        let (bytes, hash, blob) = match &p.digest {
+            Some(d) => (
+                Some(d.bytes),
+                Some(d.hash as i64),
+                Some(d.checkpoints_blob()),
+            ),
+            None => (None, None, None),
         };
         tx.execute(
             "INSERT INTO log_runs
-                 (container_id, started_at, seq, persisted_lines, updated_at, digest, checkpoints)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 (container_id, started_at, seq, persisted_lines, trailing_empty, updated_at,
+                  text_bytes, digest, checkpoints)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT (container_id, started_at, seq) DO UPDATE SET
                  persisted_lines = excluded.persisted_lines,
+                 trailing_empty = excluded.trailing_empty,
                  updated_at = excluded.updated_at,
+                 text_bytes = excluded.text_bytes,
                  digest = excluded.digest,
                  checkpoints = excluded.checkpoints",
-            params![cid, s, seq, n, now, hash, blob],
+            params![
+                cid,
+                s,
+                seq,
+                p.persisted_lines,
+                p.trailing_empty,
+                now,
+                bytes,
+                hash,
+                blob
+            ],
         )?;
     }
     // A run's NewRun comes before its rows and its Complete after them in
@@ -984,8 +1039,8 @@ fn write_log_batch(
             } => {
                 tx.execute(
                     "INSERT OR IGNORE INTO log_runs
-                         (container_id, started_at, seq, updated_at, digest)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                         (container_id, started_at, seq, updated_at, text_bytes, digest)
+                     VALUES (?1, ?2, ?3, ?4, 0, ?5)",
                     params![container_id, started_at, seq, now, empty],
                 )?;
                 // The later run was found: nothing earlier needs a recheck.
@@ -1003,8 +1058,9 @@ fn write_log_batch(
             } => {
                 tx.execute(
                     "INSERT INTO log_runs
-                         (container_id, started_at, seq, complete, recheck, updated_at, digest)
-                     VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6)
+                         (container_id, started_at, seq, complete, recheck, updated_at,
+                          text_bytes, digest)
+                     VALUES (?1, ?2, ?3, 1, ?4, ?5, 0, ?6)
                      ON CONFLICT (container_id, started_at, seq) DO UPDATE SET
                          complete = 1,
                          recheck = excluded.recheck,
@@ -1215,22 +1271,24 @@ mod tests {
 
     fn seq_batch(cid: &str, run: Option<i64>, seq: i64, from: usize, n: usize) -> Vec<LogOp> {
         (from..from + n)
-            .map(|i| {
-                LogOp::Row(LogRow {
-                    container_id: cid.to_string(),
-                    started_at: run,
-                    seq,
-                    ts: 1,
-                    line: format!("l{i}"),
-                })
-            })
+            .map(|i| row(cid, run, seq, format!("l{i}").as_bytes()))
             .collect()
+    }
+
+    fn row(cid: &str, run: Option<i64>, seq: i64, text: &[u8]) -> LogOp {
+        LogOp::Row(LogRow {
+            container_id: cid.to_string(),
+            started_at: run,
+            seq,
+            ts: 1,
+            text: text.to_vec(),
+        })
     }
 
     fn digest_of(lines: impl IntoIterator<Item = String>) -> RunDigest {
         let mut d = RunDigest::default();
         for l in lines {
-            d.push(&l);
+            d.push(l.as_bytes());
         }
         d
     }
@@ -1398,17 +1456,54 @@ mod tests {
         let p = progress(&conn, "a", 1);
         assert_eq!(p.persisted_lines, from as i64);
         assert_eq!(p.digest.as_ref(), Some(&want));
-        // 48 lines: checkpoints after 1, 2, 4, 8, 16, 32 lines.
-        assert_eq!(want.checkpoints.len(), 6);
+        // 48 rows "l0".."l47": 10 × 2 + 38 × 3 = 134 text bytes, so
+        // checkpoints after 1, 2, 4, …, 128 bytes.
+        assert_eq!(want.bytes, 134);
+        assert_eq!(want.checkpoints.len(), 8);
         // Another order of the same lines is another fingerprint.
         let mut rev: Vec<String> = (0..from).map(|i| format!("l{i}")).collect();
         rev.swap(0, 1);
         assert_ne!(digest_of(rev).hash, want.hash);
-        // Splitting a line differently is, too (`\n` is part of the input).
-        assert_ne!(
-            digest_of(["ab".into(), "c".into()]).hash,
-            digest_of(["a".into(), "bc".into()]).hash
+        // Where the line breaks fall is not part of it: a line that
+        // `logs -f` split in two has the line's fingerprint.
+        assert_eq!(
+            digest_of(["ab".into(), "c".into()]),
+            digest_of(["a".into(), "bc".into()])
         );
+        assert_eq!(
+            digest_of(["abc".into(), String::new()]),
+            digest_of(["abc".into()])
+        );
+    }
+
+    #[test]
+    fn position_counts_raw_text_bytes_and_trailing_blank_rows() {
+        let mut conn = logs_conn();
+        let mut counts = HashMap::new();
+        // A two-byte character cut in two by a split, a `\r\n` line, blank
+        // rows at the end.
+        let e_acute = "é".as_bytes();
+        let b = [
+            row("a", Some(1), 0, &[b'x', e_acute[0]]),
+            row("a", Some(1), 0, &[e_acute[1], b'y']),
+            row("a", Some(1), 0, b"z\r"),
+            row("a", Some(1), 0, b""),
+            row("a", Some(1), 0, b""),
+        ];
+        write_log_batch(&mut conn, &b, &mut counts).unwrap();
+        let p = progress(&conn, "a", 1);
+        assert_eq!((p.persisted_lines, p.trailing_empty), (5, 2));
+        let mut want = RunDigest::default();
+        want.push("xéyz\r".as_bytes());
+        assert_eq!(p.digest, Some(want), "raw bytes, before decoding");
+        // Stored for display: decoded (the cut character becomes U+FFFD in
+        // each piece), without the `\r`.
+        let shown = lines_for(&conn, "a");
+        assert_eq!(shown[0], "x\u{fffd}");
+        assert_eq!(shown[2], "z");
+        // A row with text ends the blank run.
+        write_log_batch(&mut conn, &[row("a", Some(1), 0, b"w")], &mut counts).unwrap();
+        assert_eq!(progress(&conn, "a", 1).trailing_empty, 0);
     }
 
     #[test]
