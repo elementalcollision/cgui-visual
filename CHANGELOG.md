@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-11-23
+
+New Apple `container` features, accessibility, and cgui is now Apple
+`container` only. Tested with container 1.4.1 and 1.7.1 on macOS 26.7 and
+macOS 27.2.
+
+### Added
+
+- **Commit a container to an image** (container 1.6+): **Commit to image…**
+  in a container's details, for running or stopped containers.
+- **DNS aliases** (container 1.6+) in the Run dialog, in stacks, and in
+  compose import/export (`networks: {net: {aliases: [...]}}`). A container's
+  aliases show on its Network tab.
+- **New volume…** and **New network…**, with size, labels, IPv4/IPv6 subnets
+  and internal-only networks.
+- **Machines:** user options when creating a machine (container 1.6+), plus
+  **Logs** and **Inspect** for each machine.
+- **Native CPU %** from container 1.7.1's own measurement, accurate from the
+  first refresh; older versions keep the previous calculation.
+- Features that need a newer `container` are shown greyed out with a note
+  saying which version they need, instead of failing.
+- **Accessibility:** dialogs are announced as dialogs with their titles, Esc
+  closes the top one, keyboard focus moves into a dialog and back out when it
+  closes, every icon-only button has a label, Settings toggles are switches,
+  notifications are announced, and container rows work from the keyboard.
+  Selecting text by dragging out of a dialog no longer closes it.
+- A one-time notification the first time Menu-bar mode hides the window,
+  explaining how to bring it back (useful when your menu bar hides cgui's
+  icon).
+
+### Changed
+
+- **cgui is Apple `container` only.** The Docker and Podman options are
+  removed; they couldn't work, because cgui only understands `container`'s
+  output. Existing settings still load.
+- **Fonts are bundled**, so cgui no longer contacts Google Fonts; the
+  security policy now only allows the app itself.
+- **In the terminal, Esc goes to the shell** (vim, less, …). Close the
+  terminal with its X button.
+- The top bar no longer shows the "runtime: container" label (the status bar
+  still does).
+
+### Fixed
+
+- **Log history no longer fills up with duplicates.** Opening a container's
+  logs stored its whole log again each time. Now the full log is saved once
+  and only new lines after that. Lines written while no Logs view is open
+  aren't saved.
+- **The Network tab** in a container's details showed nothing for Apple
+  containers; it now shows networks, addresses and aliases.
+- `cookie` 0.18.3 (RUSTSEC-2026-0594), via Tauri.
+
+### Internal
+
+- `modals.tsx` and `runtime.rs` (about 2,800 and 3,000 lines) are split into
+  one file per dialog and one module per area, with no behaviour change; see
+  `docs/architecture.md`.
+- `chrono` (unmaintained) replaced with `time`; unused commands removed; one
+  helper for the config folder.
+- The opt-in live test suite now has 13 tests.
+
 ## [0.6.2] — 2026-11-23
 
 Hardening and toolchain release.
@@ -460,7 +521,8 @@ Initial macOS-only release. Tauri + React + TypeScript GUI for Apple's
   binary. Apple's `container` CLI is similarly optional but required for
   any real data.
 
-[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/elementalcollision/cgui-visual/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/elementalcollision/cgui-visual/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/elementalcollision/cgui-visual/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/elementalcollision/cgui-visual/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/elementalcollision/cgui-visual/compare/v0.5.4...v0.6.0
