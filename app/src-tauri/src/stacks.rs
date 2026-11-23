@@ -676,7 +676,7 @@ async fn probe_tcp(target: Option<&str>) -> String {
 async fn probe_http(target: Option<&str>, expect: &[u16]) -> String {
     let Some(t) = target else { return "—".into() };
     let url = http_url_for(t);
-    let fut = Command::new("curl")
+    let fut = Command::new("/usr/bin/curl")
         .kill_on_drop(true)
         .args([
             "-s",

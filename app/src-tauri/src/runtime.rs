@@ -1524,11 +1524,11 @@ pub fn exec_in_terminal(id: &str) -> Result<()> {
         r#"tell application "Terminal" to do script "{}""#,
         cmd_line.replace('\\', "\\\\").replace('"', "\\\"")
     );
-    std::process::Command::new("osascript")
+    std::process::Command::new("/usr/bin/osascript")
         .args(["-e", &script])
         .spawn()
         .with_context(|| "failed to spawn osascript")?;
-    let _ = std::process::Command::new("osascript")
+    let _ = std::process::Command::new("/usr/bin/osascript")
         .args(["-e", r#"tell application "Terminal" to activate"#])
         .status();
     Ok(())
