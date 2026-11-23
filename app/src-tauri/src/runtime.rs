@@ -1011,7 +1011,7 @@ pub struct RunArgs {
     #[serde(default)]
     pub env: Vec<String>, // "KEY=value" each
     #[serde(default)]
-    pub command: Option<String>, // free-form; split on spaces
+    pub command: Option<String>, // free-form; shell-style splitting (split_command)
     #[serde(default)]
     pub cpus: Option<u32>,
     #[serde(default)]
@@ -1034,7 +1034,88 @@ pub struct RunArgs {
     pub rosetta: bool,
 }
 
-pub fn run_image_argv(args: &RunArgs) -> Vec<String> {
+/// Split a command line into words the way a POSIX shell would, minus
+/// every expansion (no variables, globs, substitution or operators):
+///
+/// * unquoted whitespace separates words;
+/// * `'...'` is literal;
+/// * inside `"..."` a backslash escapes only `"`, `\`, `$` and `` ` ``
+///   (before any other character it is kept as-is), as in POSIX;
+/// * outside quotes a backslash makes the next character literal, and
+///   backslash-newline is a line continuation;
+/// * `""` / `''` produce an empty word.
+///
+/// An unterminated quote (or a trailing backslash) is an error so the user
+/// sees what is wrong instead of silently running a different command.
+pub fn split_command(input: &str) -> Result<Vec<String>> {
+    let mut words: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut in_word = false;
+    let mut chars = input.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            c if c.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut cur));
+                    in_word = false;
+                }
+            }
+            '\'' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('\'') => break,
+                        Some(ch) => cur.push(ch),
+                        None => {
+                            return Err(anyhow!("unterminated single quote (') in: {input}"));
+                        }
+                    }
+                }
+            }
+            '"' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('"') => break,
+                        Some('\\') => match chars.next() {
+                            Some(e @ ('"' | '\\' | '$' | '`')) => cur.push(e),
+                            Some('\n') => {}
+                            Some(other) => {
+                                cur.push('\\');
+                                cur.push(other);
+                            }
+                            None => {
+                                return Err(anyhow!("unterminated double quote (\") in: {input}"));
+                            }
+                        },
+                        Some(ch) => cur.push(ch),
+                        None => {
+                            return Err(anyhow!("unterminated double quote (\") in: {input}"));
+                        }
+                    }
+                }
+            }
+            '\\' => match chars.next() {
+                Some('\n') => {}
+                Some(e) => {
+                    in_word = true;
+                    cur.push(e);
+                }
+                None => return Err(anyhow!("dangling backslash at the end of: {input}")),
+            },
+            other => {
+                in_word = true;
+                cur.push(other);
+            }
+        }
+    }
+    if in_word {
+        words.push(cur);
+    }
+    Ok(words)
+}
+
+pub fn run_image_argv(args: &RunArgs) -> Result<Vec<String>> {
     let mut argv: Vec<String> = vec!["run".into(), "-d".into()];
     let mut opt = |flag: &str, val: Option<&str>| {
         if let Some(v) = val.filter(|s| !s.is_empty()) {
@@ -1074,11 +1155,9 @@ pub fn run_image_argv(args: &RunArgs) -> Vec<String> {
     }
     argv.push(args.image.clone());
     if let Some(cmd) = args.command.as_deref().filter(|s| !s.is_empty()) {
-        for tok in cmd.split_whitespace() {
-            argv.push(tok.into());
-        }
+        argv.extend(split_command(cmd).context("could not parse the command")?);
     }
-    argv
+    Ok(argv)
 }
 
 pub async fn run_image(args: RunArgs) -> Result<String> {
@@ -1086,7 +1165,7 @@ pub async fn run_image(args: RunArgs) -> Result<String> {
     if let Some(name) = args.name.as_deref().filter(|s| !s.is_empty()) {
         validate_entity_name("container", name)?;
     }
-    let argv = run_image_argv(&args);
+    let argv = run_image_argv(&args)?;
     let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
     // First-run image pulls + VM provisioning blow past the default
     // inspect-sized timeout; use the long envelope so the modal isn't
@@ -1667,6 +1746,92 @@ mod tests {
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
     }
 
+    fn words(s: &str) -> Vec<String> {
+        split_command(s).unwrap()
+    }
+
+    #[test]
+    fn split_command_plain_whitespace() {
+        assert_eq!(
+            words("node server.js --port 3000"),
+            ["node", "server.js", "--port", "3000"]
+        );
+        assert_eq!(words("  a \t b\n c  "), ["a", "b", "c"]);
+        assert!(words("").is_empty());
+        assert!(words("   ").is_empty());
+    }
+
+    #[test]
+    fn split_command_sh_c_with_quoted_script() {
+        // The F18 case: previously split into `"echo`, `hi`, `&&`, ...
+        assert_eq!(
+            words(r#"sh -c "echo hi && sleep 5""#),
+            ["sh", "-c", "echo hi && sleep 5"]
+        );
+        assert_eq!(
+            words("sh -c 'echo hi && sleep 5'"),
+            ["sh", "-c", "echo hi && sleep 5"]
+        );
+    }
+
+    #[test]
+    fn split_command_quote_rules() {
+        // single quotes are literal, including backslashes and double quotes
+        assert_eq!(words(r#"echo 'a "b" \n $x'"#), ["echo", r#"a "b" \n $x"#]);
+        // double quotes: \" and \\ escape, other backslashes stay
+        assert_eq!(
+            words(r#"echo "say \"hi\" \\ \n""#),
+            ["echo", r#"say "hi" \ \n"#]
+        );
+        // adjacent quoted/unquoted pieces join into one word
+        assert_eq!(words(r#"a"b c"'d e'f"#), ["ab cd ef"]);
+        // empty quotes make an empty word
+        assert_eq!(words(r#"echo "" ''"#), ["echo", "", ""]);
+        // backslash outside quotes escapes a space, a quote or a backslash
+        assert_eq!(words(r"echo a\ b \'c \\"), ["echo", "a b", "'c", "\\"]);
+        // line continuation disappears
+        assert_eq!(words("a \\\nb"), ["a", "b"]);
+        // a single quote inside double quotes is just a character
+        assert_eq!(words(r#"echo "it's""#), ["echo", "it's"]);
+    }
+
+    #[test]
+    fn split_command_unterminated_input_is_an_error() {
+        for bad in [
+            r#"sh -c "echo hi"#,
+            "sh -c 'echo hi",
+            "echo \\",
+            r#"echo "abc\"#,
+        ] {
+            let e = split_command(bad).unwrap_err().to_string();
+            assert!(
+                e.contains("unterminated") || e.contains("dangling"),
+                "{bad}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_image_argv_keeps_quoted_command_as_single_args() {
+        let args = RunArgs {
+            image: "alpine".into(),
+            command: Some(r#"sh -c "echo hi && sleep 5""#.into()),
+            ..Default::default()
+        };
+        let argv = run_image_argv(&args).unwrap();
+        assert_eq!(
+            &argv[argv.len() - 4..],
+            ["alpine", "sh", "-c", "echo hi && sleep 5"]
+        );
+        let bad = RunArgs {
+            image: "alpine".into(),
+            command: Some("sh -c \"oops".into()),
+            ..Default::default()
+        };
+        let e = format!("{:#}", run_image_argv(&bad).unwrap_err());
+        assert!(e.contains("unterminated"), "{e}");
+    }
+
     #[test]
     fn mask_env_args_hides_values_but_keeps_everything_else() {
         let argv = [
@@ -2003,7 +2168,7 @@ mod tests {
             rm: true,
             rosetta: false,
         };
-        let argv = run_image_argv(&args);
+        let argv = run_image_argv(&args).unwrap();
         let s = argv.join(" ");
         assert!(s.starts_with("run -d "));
         for frag in [
@@ -2035,7 +2200,7 @@ mod tests {
             image: "redis:7".into(),
             ..Default::default()
         };
-        assert_eq!(run_image_argv(&args), vec!["run", "-d", "redis:7"]);
+        assert_eq!(run_image_argv(&args).unwrap(), vec!["run", "-d", "redis:7"]);
     }
 
     #[test]
