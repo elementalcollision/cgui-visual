@@ -198,7 +198,6 @@ export interface DoctorCheck {
 }
 
 export type Tab = 'containers' | 'images' | 'volumes' | 'networks' | 'stacks' | 'logs';
-export type Runtime = 'container' | 'docker' | 'podman';
 
 export type Modal =
   | { type: 'detail'; payload: Container }

@@ -31,7 +31,7 @@
     "publisher": "elementalcollision",
     "homepage": "https://github.com/elementalcollision/cgui",
     "shortDescription": "Visual GUI for Apple's container runtime",
-    "longDescription": "cgui is a desktop GUI front-end for Apple's `container` CLI, with Docker-compatible support. Inspect containers, images, volumes, networks, and stacks; stream logs; pull images; run Trivy scans; and check for component updates.",
+    "longDescription": "cgui is a desktop GUI front-end for Apple's `container` CLI. Inspect containers, images, volumes, networks, and stacks; stream logs; pull images; run Trivy scans; and check for component updates.",
     "category": "DeveloperTool",
     "copyright": "Copyright (c) 2026 elementalcollision. MIT License.",
     "icon": [

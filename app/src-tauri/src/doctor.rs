@@ -14,8 +14,7 @@ const MIN_CONTAINER_VERSION: &str = "1.4.1";
 pub async fn run() -> Vec<DoctorCheck> {
     let mut out: Vec<DoctorCheck> = Vec::new();
 
-    // 1. Active profile (we hardcode `container` until the Settings picker
-    // is wired through to the runtime selector).
+    // 1. Active profile (always `container`; cgui is Apple-container-only).
     out.push(ok(format!("active profile: container → {RUNTIME_BIN}")));
 
     // 2. Runtime binary on PATH.

@@ -2,7 +2,7 @@
 
 import React, { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ThemeTokens } from './theme';
-import type { Container, Image, ScanResponse, Severity, Stack, Tab, TrivyFinding, Update, DoctorCheck, DoctorFix, HistoryPoint, VulnHistory, Runtime, DiskUsage, DiskUsageRow } from './types';
+import type { Container, Image, ScanResponse, Severity, Stack, Tab, TrivyFinding, Update, DoctorCheck, DoctorFix, HistoryPoint, VulnHistory, DiskUsage, DiskUsageRow } from './types';
 import { Icon, Bar, Sparkline, iconBtn, pillBtn, fmtCreated } from './components';
 import { api } from './api';
 import { toast, withToast } from './toast';
@@ -1778,50 +1778,18 @@ export function OnboardingModal({ t, onAvailable, onDismiss }: {
 }
 
 export function SettingsModal({
-  t, onClose, runtime, setRuntime,
+  t, onClose,
   dark, setDark,
   menubarMode, setMenubarMode,
   globalHotkey, setGlobalHotkey,
   notifyOnExit, setNotifyOnExit,
 }: {
-  t: ThemeTokens; onClose: () => void; runtime: Runtime; setRuntime: (r: Runtime) => void;
+  t: ThemeTokens; onClose: () => void;
   dark: boolean; setDark: (b: boolean) => void;
   menubarMode: boolean; setMenubarMode: (b: boolean) => void;
   globalHotkey: string; setGlobalHotkey: (s: string) => void;
   notifyOnExit: boolean; setNotifyOnExit: (b: boolean) => void;
 }) {
-  const runtimes: { key: Runtime; path: string }[] = [
-    { key: 'container', path: '/usr/local/bin/container' },
-    { key: 'docker', path: '/usr/local/bin/docker' },
-    { key: 'podman', path: '/opt/homebrew/bin/podman' },
-  ];
-
-  // Per-runtime availability probe (B8). undefined = still probing.
-  // Probes run once on mount + whenever the modal re-opens.
-  const [avail, setAvail] = useState<Record<Runtime, boolean | undefined>>({
-    container: undefined, docker: undefined, podman: undefined,
-  });
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const results = await Promise.all(runtimes.map(async ({ key }) => {
-        try { return [key, await api.probeRuntime(key)] as const; }
-        catch { return [key, false] as const; }
-      }));
-      if (!cancelled) {
-        setAvail(prev => {
-          const next = { ...prev };
-          for (const [k, v] of results) next[k] = v;
-          return next;
-        });
-      }
-    })();
-    return () => { cancelled = true; };
-    // runtimes is a constant array literal; eslint can't see that from a
-    // const-in-render perspective so the list of deps stays empty.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   return (
     <Backdrop onClose={onClose}>
       <div style={{ width: 640, background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, overflow: 'hidden', maxHeight: '85vh', display: 'flex', flexDirection: 'column' }}>
@@ -1831,34 +1799,7 @@ export function SettingsModal({
           <button onClick={onClose} style={iconBtn()}><Icon name="x" size={16} color={t.fg2} /></button>
         </div>
         <div style={{ flex: 1, overflow: 'auto', padding: '18px 22px' }}>
-          <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: t.fg3, marginBottom: 10 }}>Runtime profile</div>
-          {runtimes.map(({ key, path }) => {
-            const ok = avail[key];
-            const probing = ok === undefined;
-            const installed = ok === true;
-            return (
-              <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderRadius: 6, background: key === runtime ? t.selected : 'transparent', border: `1px solid ${key === runtime ? t.accent : t.border}`, marginBottom: 6, cursor: 'pointer' }}>
-                <input type="radio" checked={key === runtime} onChange={() => setRuntime(key)} style={{ accentColor: t.accent }} />
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 13, color: t.fg1, fontWeight: 500, fontFamily: t.mono }}>{key}</div>
-                  <div style={{ fontSize: 11, color: t.fg3, fontFamily: t.mono }}>{path}</div>
-                </div>
-                {/* Availability badge: probing / installed / missing */}
-                <span style={{
-                  fontSize: 10, fontFamily: t.mono, letterSpacing: '0.04em',
-                  padding: '3px 8px', borderRadius: 999,
-                  color: probing ? t.fg3 : (installed ? t.success : t.danger),
-                  background: probing ? t.surfaceAlt
-                    : (installed ? `${t.success}22` : `${t.danger}22`),
-                  border: `1px solid ${probing ? t.border : (installed ? t.success : t.danger)}`,
-                }}>
-                  {probing ? '… probing' : (installed ? '● installed' : '○ missing')}
-                </span>
-                {key === runtime && <span style={{ fontSize: 10, color: t.success, fontFamily: t.mono }}>● ACTIVE</span>}
-              </label>
-            );
-          })}
-          <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: t.fg3, margin: '20px 0 10px' }}>Appearance</div>
+          <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: t.fg3, marginBottom: 10 }}>Appearance</div>
           <SettingsToggle t={t} label="Dark mode" hint="Switch the UI to a light theme when off." value={dark} onChange={setDark} />
 
           <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: t.fg3, margin: '20px 0 10px' }}>Menu bar</div>

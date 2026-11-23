@@ -14,7 +14,6 @@ const inTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 export type Prefs = {
   dark: boolean;
   sidebarCollapsed: boolean;
-  runtime: 'container' | 'docker' | 'podman';
   lastTab: string;
   menubarMode: boolean;
   globalHotkey: string;
@@ -22,7 +21,7 @@ export type Prefs = {
 };
 
 const PREFS_DEFAULT: Prefs = {
-  dark: true, sidebarCollapsed: false, runtime: 'container', lastTab: 'containers',
+  dark: true, sidebarCollapsed: false, lastTab: 'containers',
   menubarMode: false, globalHotkey: '', notifyOnExit: true,
 };
 
@@ -173,12 +172,6 @@ export const api = {
   restoreStackFromPath: (path: string, overwrite = false) =>
     inTauri ? invokeStrict<string>('restore_stack_from_path', { path, overwrite }) :
               Promise.resolve('(dev-mode no-op)'),
-
-  // Per-runtime availability probe (B8). Outside Tauri we report all
-  // three as available so the Settings UI exercises every state.
-  probeRuntime: (name: string) =>
-    inTauri ? invokeStrict<boolean>('probe_runtime', { name }) :
-              Promise.resolve(true),
 
   // Long-form per-container metrics (B6). Returns ascending-by-ts
   // points within the last `sinceSecs` seconds. Empty when the

@@ -10,7 +10,6 @@ use std::path::PathBuf;
 pub struct Prefs {
     pub dark: bool,
     pub sidebar_collapsed: bool,
-    pub runtime: String,
     pub last_tab: String,
     /// When true, closing the main window hides it instead of quitting so
     /// the menu-bar tray stays alive and the Dock icon is hidden while the
@@ -30,7 +29,6 @@ impl Default for Prefs {
         Self {
             dark: true,
             sidebar_collapsed: false,
-            runtime: "container".into(),
             last_tab: "containers".into(),
             menubar_mode: false,
             global_hotkey: String::new(),
@@ -75,7 +73,6 @@ mod tests {
         let p = Prefs::default();
         assert!(p.dark);
         assert!(!p.sidebar_collapsed);
-        assert_eq!(p.runtime, "container");
         assert_eq!(p.last_tab, "containers");
     }
 
@@ -84,7 +81,6 @@ mod tests {
         let p = Prefs {
             dark: false,
             sidebar_collapsed: true,
-            runtime: "podman".into(),
             last_tab: "logs".into(),
             menubar_mode: true,
             global_hotkey: "CmdOrCtrl+Alt+Space".into(),
@@ -94,7 +90,6 @@ mod tests {
         let back: Prefs = serde_json::from_str(&s).unwrap();
         assert!(!back.dark);
         assert!(back.sidebar_collapsed);
-        assert_eq!(back.runtime, "podman");
         assert_eq!(back.last_tab, "logs");
         assert!(back.menubar_mode);
         assert_eq!(back.global_hotkey, "CmdOrCtrl+Alt+Space");
@@ -110,6 +105,20 @@ mod tests {
         assert!(!p.menubar_mode);
         assert_eq!(p.global_hotkey, "");
         assert!(p.notify_on_exit);
+    }
+
+    #[test]
+    fn prefs_ignores_legacy_runtime_key() {
+        // state.json files from <= 0.6.2 carry a `runtime` key (possibly
+        // "docker"/"podman"). It is no longer a setting; loading must
+        // succeed and keep the other fields.
+        let s = r#"{"dark": false, "sidebarCollapsed": true, "runtime": "docker", "lastTab": "images"}"#;
+        let p: Prefs = serde_json::from_str(s).unwrap();
+        assert!(!p.dark);
+        assert!(p.sidebar_collapsed);
+        assert_eq!(p.last_tab, "images");
+        let out = serde_json::to_string(&p).unwrap();
+        assert!(!out.contains("runtime"));
     }
 
     #[test]

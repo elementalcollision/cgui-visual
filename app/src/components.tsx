@@ -4,7 +4,7 @@
 import { memo, useEffect, useRef } from 'react';
 import type { CSSProperties, MouseEvent, ReactNode } from 'react';
 import type { ThemeTokens } from './theme';
-import type { ContainerStatus, Tab, Runtime } from './types';
+import type { ContainerStatus, Tab } from './types';
 
 // ─── utils ─────────────────────────────────────────────────────────────
 export function fmtBytes(gib: number, unit = 'GiB'): string {
@@ -212,7 +212,7 @@ export function Sidebar({ tab, setTab, collapsed, t, onSettings, onDoctor, runni
 }
 
 // ─── top toolbar ──────────────────────────────────────────────────────
-export function TopBar({ tab, t, search, setSearch, onPull, onPrune, onImport, onBuild, onCollapse, runtime, dark, setDark, onUpdate, updateCount = 0, updatesSeen = false, headings }: {
+export function TopBar({ tab, t, search, setSearch, onPull, onPrune, onImport, onBuild, onCollapse, dark, setDark, onUpdate, updateCount = 0, updatesSeen = false, headings }: {
   tab: Tab; t: ThemeTokens;
   search: string; setSearch: (s: string) => void;
   onPull: () => void; onCollapse: () => void;
@@ -223,7 +223,6 @@ export function TopBar({ tab, t, search, setSearch, onPull, onPrune, onImport, o
   onImport?: (() => void) | null;
   /** Open the Dockerfile build modal. Images tab only. */
   onBuild?: (() => void) | null;
-  runtime: Runtime;
   dark: boolean; setDark: (v: boolean) => void;
   onUpdate: (() => void) | null;
   /** Live count from `listUpdates`. Drives the badge label. */
@@ -250,7 +249,7 @@ export function TopBar({ tab, t, search, setSearch, onPull, onPrune, onImport, o
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 10px', height: 32, background: t.accentSoft, color: t.accent, border: `1px solid ${t.border}`, borderRadius: 999, fontSize: 11, fontFamily: t.mono }}>
         <span style={{ width: 6, height: 6, borderRadius: '50%', background: t.success }} />
-        runtime: {runtime}
+        runtime: container
       </div>
       {onUpdate && updateCount > 0 && (
         // Two visual states: unseen (warning-orange, demands attention)
@@ -341,8 +340,8 @@ export function fmtCreated(iso: string, nowMs: number = Date.now()): string {
   return `${Math.floor(day / 365)}y ago`;
 }
 
-export function StatusBar({ t, runtime, tab, lastTickAt }: {
-  t: ThemeTokens; runtime: Runtime; tab: Tab;
+export function StatusBar({ t, tab, lastTickAt }: {
+  t: ThemeTokens; tab: Tab;
   lastTickAt?: number;
 }) {
   // Hints are scoped to whichever shortcuts are actually wired for the
@@ -369,7 +368,7 @@ export function StatusBar({ t, runtime, tab, lastTickAt }: {
     }}>
       <span><span style={{ color: t.success }}>●</span> connected</span>
       <span style={{ color: t.fg3 }}>·</span>
-      <span>runtime <span style={{ color: t.fg2 }}>{runtime}</span></span>
+      <span>runtime <span style={{ color: t.fg2 }}>container</span></span>
       <span style={{ color: t.fg3 }}>·</span>
       <span>tab <span style={{ color: t.fg2 }}>{tab}</span></span>
       {lastTickAt !== undefined && (

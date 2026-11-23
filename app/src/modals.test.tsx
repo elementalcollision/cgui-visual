@@ -262,11 +262,28 @@ describe('OnboardingModal', () => {
   });
 });
 
+describe('SettingsModal runtime', () => {
+  it('no longer offers a runtime selector (Apple container only)', () => {
+    render(
+      <SettingsModal
+        t={t} onClose={() => {}}
+        dark setDark={() => {}}
+        menubarMode={false} setMenubarMode={() => {}}
+        globalHotkey="" setGlobalHotkey={() => {}}
+        notifyOnExit setNotifyOnExit={() => {}}
+      />,
+    );
+    expect(screen.queryByText(/Runtime profile/i)).toBeNull();
+    expect(screen.queryByText(/docker|podman/i)).toBeNull();
+    expect(screen.queryByRole('radio')).toBeNull();
+  });
+});
+
 describe('SettingsModal menu-bar toggle', () => {
   function renderSettings(menubarMode: boolean, setMenubarMode: (b: boolean) => void) {
     render(
       <SettingsModal
-        t={t} onClose={() => {}} runtime="container" setRuntime={() => {}}
+        t={t} onClose={() => {}}
         dark setDark={() => {}}
         menubarMode={menubarMode} setMenubarMode={setMenubarMode}
         globalHotkey="" setGlobalHotkey={() => {}}

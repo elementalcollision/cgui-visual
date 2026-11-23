@@ -400,7 +400,7 @@ pub fn pty_open(
     let runtime_bin = runtime::current_bin();
     crate::pty::open(
         &app,
-        &runtime_bin,
+        runtime_bin,
         &id,
         shell.as_deref(),
         cols.max(2),
@@ -422,19 +422,6 @@ pub fn pty_resize(session_id: String, cols: u16, rows: u16) -> Result<(), String
 #[tauri::command]
 pub fn pty_close(session_id: String) -> Result<(), String> {
     crate::pty::close(&session_id).map_err(err_str)
-}
-
-// Per-binary availability probe (B8). Settings calls this once per
-// runtime option to render an availability badge so users can see at a
-// glance which runtimes are installed before flipping the active one.
-#[tauri::command]
-pub async fn probe_runtime(name: String) -> bool {
-    // Only allow probing the runtimes the UI actually offers, to avoid
-    // turning this into a generic "is this binary on PATH" oracle.
-    if !matches!(name.as_str(), "container" | "docker" | "podman") {
-        return false;
-    }
-    runtime::probe_bin(&name).await
 }
 
 // ─── Stack snapshot / restore (B11) ───────────────────────────────────
@@ -818,7 +805,6 @@ pub fn load_prefs() -> Prefs {
 
 #[tauri::command]
 pub fn save_prefs(app: tauri::AppHandle, prefs: Prefs) -> Result<(), String> {
-    runtime::set_bin(&prefs.runtime);
     prefs.save().map_err(err_str)?;
     // Apply menubar mode live (close behaviour + Dock icon), no restart.
     crate::set_menubar_mode(&app, prefs.menubar_mode);

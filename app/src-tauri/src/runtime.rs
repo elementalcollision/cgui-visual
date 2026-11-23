@@ -8,24 +8,11 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 use std::process::Stdio;
-use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
 use crate::model::{Container, Image, MemUsage, Network, Volume};
-
-// Active runtime binary, settable from prefs at startup and from the Settings
-// modal. `bin()` returns a snapshot for the call site.
-static RUNTIME_BIN: OnceLock<RwLock<String>> = OnceLock::new();
-
-fn slot() -> &'static RwLock<String> {
-    RUNTIME_BIN.get_or_init(|| RwLock::new("container".to_string()))
-}
-
-pub fn set_bin(name: &str) {
-    *slot().write().unwrap() = name.to_string();
-}
 
 /// Validate a user-supplied container/machine name against the rules
 /// Apple's `container` 1.4+ enforces (`ManagedContainer.nameValid`):
@@ -90,7 +77,7 @@ pub fn reject_flag_like(kind: &str, value: &str) -> Result<()> {
 }
 
 /// Prepend the standard macOS install locations to our process's PATH
-/// so spawned children can resolve `container` / `docker` / `podman` /
+/// so spawned children can resolve `container` /
 /// `trivy` regardless of how the app was launched.
 ///
 /// **Why this is needed:** when a Tauri app is launched from Finder,
@@ -190,14 +177,14 @@ pub(crate) fn lifecycle_timeout() -> Duration {
     LIFECYCLE_TIMEOUT
 }
 
-fn bin() -> String {
-    slot().read().unwrap().clone()
+fn bin() -> &'static str {
+    "container"
 }
 
 /// Public accessor for the currently-active runtime binary name. Used
 /// by callers (e.g. pty.rs) that want to compose their own argv without
 /// going through the `run`/`spawn` helpers.
-pub fn current_bin() -> String {
+pub fn current_bin() -> &'static str {
     bin()
 }
 
@@ -205,19 +192,6 @@ pub fn current_bin() -> String {
 // fixtures on machines without Apple's container runtime installed.
 pub async fn available() -> bool {
     Command::new(bin())
-        .kill_on_drop(true)
-        .arg("--version")
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-// Per-runtime availability probe (B8). Doesn't read or mutate the
-// active-runtime slot; lets the Settings UI surface availability badges
-// for each candidate without flipping the active selection.
-pub async fn probe_bin(name: &str) -> bool {
-    Command::new(name)
         .kill_on_drop(true)
         .arg("--version")
         .output()
@@ -490,7 +464,7 @@ fn bytes_to_gib(bytes: u64) -> f64 {
 }
 
 // `container` returns lowercase status strings already; normalize a few
-// docker-flavored variants for safety so the UI's status-pill switch hits.
+// variants so the UI's status-pill switch hits.
 fn normalize_status(s: &str) -> String {
     let lower = s.to_ascii_lowercase();
     match lower.as_str() {
@@ -1596,7 +1570,7 @@ pub fn exec_in_terminal(id: &str) -> Result<()> {
     let runtime_bin = bin();
     let cmd_line = format!(
         "{} exec -it {} /bin/sh",
-        shell_quote(&runtime_bin),
+        shell_quote(runtime_bin),
         shell_quote(id)
     );
     let script = format!(

@@ -29,13 +29,11 @@ import {
 } from './modals';
 import { toast } from './toast';
 import type { ThemeTokens } from './theme';
-import type { Container, Image, Modal, Runtime, Stack, Tab } from './types';
+import type { Container, Image, Modal, Stack, Tab } from './types';
 
 export default function ModalsHost(props: {
   modal: Modal;
   t: ThemeTokens;
-  runtime: Runtime;
-  setRuntime: (r: Runtime) => void;
   onClose: () => void;
   onUpdateClosed: () => void;
   onOnboardingResolved: () => void;
@@ -57,7 +55,7 @@ export default function ModalsHost(props: {
   setLogTarget: (id: string | undefined) => void;
 }) {
   const {
-    modal, t, runtime, setRuntime, onClose, onUpdateClosed, onOnboardingResolved,
+    modal, t, onClose, onUpdateClosed, onOnboardingResolved,
     menubarMode, setMenubarMode, globalHotkey, setGlobalHotkey, notifyOnExit, setNotifyOnExit,
     dark, setDark, containers, images, stacks, setTab, setModal, setLogTarget,
   } = props;
@@ -83,7 +81,7 @@ export default function ModalsHost(props: {
       return <DoctorModal t={t} onClose={onClose} />;
     case 'settings':
       return <SettingsModal
-        t={t} runtime={runtime} setRuntime={setRuntime} onClose={onClose}
+        t={t} onClose={onClose}
         dark={dark} setDark={setDark}
         menubarMode={menubarMode} setMenubarMode={setMenubarMode}
         globalHotkey={globalHotkey} setGlobalHotkey={setGlobalHotkey}

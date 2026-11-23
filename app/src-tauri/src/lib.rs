@@ -242,15 +242,14 @@ pub fn run() {
         })
         .setup(|app| {
             // Patch PATH first so every subsequent runtime probe / child
-            // spawn (container, docker, podman, trivy) can find binaries
+            // spawn (container, trivy) can find binaries
             // installed at /usr/local/bin or /opt/homebrew/bin even when
             // the app was launched from Finder / Spotlight / Dock with
             // the bare launchd PATH.
             runtime::ensure_user_path();
 
-            // Load prefs once: seed runtime + register optional global hotkey.
+            // Load prefs once: register optional global hotkey.
             let initial_prefs = prefs::Prefs::load();
-            runtime::set_bin(&initial_prefs.runtime);
             MENUBAR_MODE.store(initial_prefs.menubar_mode, Ordering::Relaxed);
 
             // Open the long-form history sidecar (B6). Failures only mean
@@ -556,7 +555,6 @@ pub fn run() {
             commands::stack_down,
             commands::stack_health,
             commands::runtime_available,
-            commands::probe_runtime,
             commands::container_history,
             commands::vuln_history,
             commands::load_logs,
