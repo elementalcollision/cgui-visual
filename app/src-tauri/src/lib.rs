@@ -434,13 +434,14 @@ pub fn run() {
                         }
                         continue;
                     }
+                    let polled_at = Instant::now();
                     match state::poll_once(&history).await {
                         Ok(cs) => {
                             // Persist this tick before any other side effects
                             // so a crash mid-tick still gets the data on disk.
                             crate::history::record(&cs);
                             // Background log capture reuses this very list.
-                            logpersist::reconcile(&cs);
+                            logpersist::reconcile(&cs, polled_at);
                             // Display streams (Logs view) of stopped or
                             // deleted containers never end by themselves.
                             logstreams::reconcile(&cs);

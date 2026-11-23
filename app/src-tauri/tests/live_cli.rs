@@ -575,12 +575,13 @@ fn init_history() {
 /// follow the same container (the app has exactly one).
 async fn tick(sup: &Arc<Supervisor>, tag: &str) {
     let prefix = name(tag);
+    let polled_at = std::time::Instant::now();
     let (cs, _) = runtime::list_containers_raw().await.expect("list");
     let mine: Vec<_> = cs
         .into_iter()
         .filter(|c| c.id.starts_with(&prefix))
         .collect();
-    sup.reconcile(&mine);
+    sup.reconcile(&mine, polled_at);
 }
 
 /// Persisted lines of `cid` (oldest first).
@@ -963,6 +964,71 @@ async fn container_restart_captures_new_run_and_keeps_old() {
     let _ = wait_logs_follower(&cname, false, 10).await;
 }
 
+/// (c2) A restart between two polls, as the Restart button does it (stop,
+/// then start, with no poll in between). The old run's follower keeps its
+/// `logs -f`, which streams on into the new run. The old run's last line (a
+/// shutdown message) must be kept, and the new run's first lines must be
+/// stored once, under the new run only.
+#[tokio::test]
+#[ignore]
+async fn restart_between_polls_stores_each_run_once() {
+    live_only!();
+    init_history();
+    let mut g = Guard::default();
+    let cname = g.container(&name("restart"));
+    let args = RunArgs {
+        // The counter, plus a shutdown message on `container stop`.
+        command: Some(
+            "sh -c \"trap 'echo bye; exit 0' TERM; \
+             i=0; while true; do i=$((i+1)); echo n$i; sleep 0.2; done\""
+                .into(),
+        ),
+        ..run_args(&cname)
+    };
+    runtime::run_image(args).await.expect("run");
+    let sup = Arc::new(Supervisor::new());
+    assert!(tick_until(&sup, "restart", 25, || rows(&cname).len() >= 6).await);
+    assert!(pgrep_logs(&cname), "followed");
+    let run1 = find(&cname).await.started_unix.expect("run 1");
+
+    // No poll from here until the new run has printed for a while.
+    runtime::restart(&cname).await.expect("restart");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let run2 = find(&cname).await.started_unix.expect("run 2");
+    assert!(run2 > run1, "a later run");
+    assert!(
+        tick_until(&sup, "restart", 25, || {
+            app_lib::history::run_progress(&cname, run2).is_some_and(|p| p.persisted_lines >= 12)
+        })
+        .await,
+        "the new run is followed: {:?}",
+        rows(&cname)
+    );
+    sup.stop_all();
+    assert!(wait_logs_follower(&cname, false, 10).await);
+
+    let saved = rows(&cname);
+    let bye: Vec<usize> = (0..saved.len()).filter(|&i| saved[i] == "bye").collect();
+    assert_eq!(bye.len(), 1, "the old run's last line, once: {saved:?}");
+    let old = counters(&saved[..bye[0]]);
+    let new = counters(&saved[bye[0] + 1..]);
+    assert_contiguous_runs(&old, 1);
+    assert_contiguous_runs(&new, 1);
+    let p1 = app_lib::history::run_progress(&cname, run1).unwrap();
+    let p2 = app_lib::history::run_progress(&cname, run2).unwrap();
+    assert_eq!(
+        p1.persisted_lines as usize,
+        old.len() + 1,
+        "old run: counter and bye"
+    );
+    assert_eq!(
+        p2.persisted_lines as usize,
+        new.len(),
+        "new run from its first line"
+    );
+    let _ = wait_logs_follower(&cname, false, 10).await;
+}
+
 /// (d) A container that runs and exits while no supervisor is running is
 /// caught up on the next reconcile — exactly once. Also covers a container
 /// that exits while being followed (its unread tail is completed).
@@ -1111,13 +1177,17 @@ async fn tick_one_until(
 ) -> bool {
     let end = std::time::Instant::now() + Duration::from_secs(secs);
     while std::time::Instant::now() < end {
+        let polled_at = std::time::Instant::now();
         let (running, started) = run_state(cname).await;
-        sup.reconcile(&[app_lib::model::Container {
-            id: cname.to_string(),
-            status: if running { "running" } else { "stopped" }.into(),
-            started_unix: started,
-            ..Default::default()
-        }]);
+        sup.reconcile(
+            &[app_lib::model::Container {
+                id: cname.to_string(),
+                status: if running { "running" } else { "stopped" }.into(),
+                started_unix: started,
+                ..Default::default()
+            }],
+            polled_at,
+        );
         if f() {
             return true;
         }
