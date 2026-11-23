@@ -454,6 +454,7 @@ pub async fn stack_up(name: &str) -> Result<Vec<String>> {
     let mut log: Vec<String> = Vec::new();
     log.extend(restart_warnings(&stack));
     for svc in topo_order(&stack) {
+        runtime::reject_flag_like("image reference", &svc.image)?;
         let argv = run_args(&stack.name, svc);
         let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
         log.push(format!("$ container {}", argv.join(" ")));

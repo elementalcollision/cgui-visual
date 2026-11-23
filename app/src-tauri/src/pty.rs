@@ -62,6 +62,10 @@ pub fn open(
     cols: u16,
     rows: u16,
 ) -> Result<String> {
+    crate::runtime::reject_flag_like("container id", container_id)?;
+    if let Some(sh) = shell {
+        crate::runtime::reject_flag_like("shell", sh)?;
+    }
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {

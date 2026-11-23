@@ -64,6 +64,31 @@ pub fn validate_entity_name(kind: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Defence in depth for values handed to the CLI as *positional*
+/// arguments (ids, names, image references, paths). We never go through a
+/// shell, but a value such as `--all` supplied as an id would still be read
+/// by the CLI as a flag. Reject empty values and anything starting with `-`.
+/// Users with a file literally named `-foo` can pass `./-foo`.
+///
+/// Called at the `runtime.rs` function boundary (and from the few
+/// `commands.rs` / `pty.rs` spawners) so every caller is covered.
+pub fn reject_flag_like(kind: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(anyhow!("{kind} must not be empty"));
+    }
+    if value.starts_with('-') {
+        let hint = if kind.ends_with("path") || kind == "build context" {
+            " (prefix it with `./` to use a path that starts with `-`)"
+        } else {
+            ""
+        };
+        return Err(anyhow!(
+            "{kind} `{value}` must not start with `-` (it would be read as a command-line flag){hint}"
+        ));
+    }
+    Ok(())
+}
+
 /// Prepend the standard macOS install locations to our process's PATH
 /// so spawned children can resolve `container` / `docker` / `podman` /
 /// `trivy` regardless of how the app was launched.
@@ -756,18 +781,22 @@ fn parse_network(v: Value, refs: &std::collections::HashMap<String, u32>) -> Net
 // ─── Inspect / actions ────────────────────────────────────────────────
 
 pub async fn inspect(id: &str) -> Result<String> {
+    reject_flag_like("container id", id)?;
     inspect_args(&["inspect", id]).await
 }
 
 pub async fn inspect_volume(name: &str) -> Result<String> {
+    reject_flag_like("volume name", name)?;
     inspect_args(&["volume", "inspect", name]).await
 }
 
 pub async fn inspect_network(id: &str) -> Result<String> {
+    reject_flag_like("network name", id)?;
     inspect_args(&["network", "inspect", id]).await
 }
 
 pub async fn inspect_image(reference: &str) -> Result<String> {
+    reject_flag_like("image reference", reference)?;
     inspect_args(&["image", "inspect", reference]).await
 }
 
@@ -781,11 +810,13 @@ async fn inspect_args(args: &[&str]) -> Result<String> {
 }
 
 pub async fn start(id: &str) -> Result<()> {
+    reject_flag_like("container id", id)?;
     run_with_timeout(&["start", id], LIFECYCLE_TIMEOUT)
         .await
         .map(|_| ())
 }
 pub async fn stop(id: &str) -> Result<()> {
+    reject_flag_like("container id", id)?;
     run_with_timeout(&["stop", id], LIFECYCLE_TIMEOUT)
         .await
         .map(|_| ())
@@ -793,6 +824,10 @@ pub async fn stop(id: &str) -> Result<()> {
 /// Kill with an optional signal (`container kill -s <signal> <id>`).
 /// `None` keeps the CLI's default (SIGKILL).
 pub async fn kill(id: &str, signal: Option<&str>) -> Result<()> {
+    reject_flag_like("container id", id)?;
+    if let Some(sig) = signal.filter(|s| !s.is_empty()) {
+        reject_flag_like("signal", sig)?;
+    }
     match signal.filter(|s| !s.is_empty()) {
         Some(sig) => run_with_timeout(&["kill", "-s", sig, id], LIFECYCLE_TIMEOUT)
             .await
@@ -803,11 +838,13 @@ pub async fn kill(id: &str, signal: Option<&str>) -> Result<()> {
     }
 }
 pub async fn delete(id: &str) -> Result<()> {
+    reject_flag_like("container id", id)?;
     run_with_timeout(&["delete", id], LIFECYCLE_TIMEOUT)
         .await
         .map(|_| ())
 }
 pub async fn restart(id: &str) -> Result<()> {
+    reject_flag_like("container id", id)?;
     if let Err(e) = run_with_timeout(&["stop", id], LIFECYCLE_TIMEOUT).await {
         // Only "already stopped" is expected here; anything else (services
         // down, timeout, unknown id) must reach the user instead of being
@@ -890,6 +927,9 @@ pub fn clean_argv(ids: &[String]) -> Vec<String> {
 pub async fn clean_containers(ids: &[String]) -> Result<()> {
     if ids.is_empty() {
         return Ok(());
+    }
+    for id in ids {
+        reject_flag_like("container id", id)?;
     }
     let argv = clean_argv(ids);
     let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
@@ -1007,6 +1047,7 @@ pub fn run_image_argv(args: &RunArgs) -> Vec<String> {
 }
 
 pub async fn run_image(args: RunArgs) -> Result<String> {
+    reject_flag_like("image reference", &args.image)?;
     if let Some(name) = args.name.as_deref().filter(|s| !s.is_empty()) {
         validate_entity_name("container", name)?;
     }
@@ -1020,10 +1061,13 @@ pub async fn run_image(args: RunArgs) -> Result<String> {
 }
 
 pub async fn delete_image(reference: &str) -> Result<()> {
+    reject_flag_like("image reference", reference)?;
     run(&["image", "delete", reference]).await.map(|_| ())
 }
 
 pub async fn tag_image(source: &str, target: &str) -> Result<()> {
+    reject_flag_like("source image reference", source)?;
+    reject_flag_like("target image reference", target)?;
     run(&["image", "tag", source, target]).await.map(|_| ())
 }
 
@@ -1182,6 +1226,8 @@ pub fn build_argv(args: &BuildArgs) -> Vec<String> {
 // streams via spawn + drain_lines in commands.rs instead (progress UI).
 
 pub async fn save_image(reference: &str, output: &str) -> Result<()> {
+    reject_flag_like("image reference", reference)?;
+    reject_flag_like("output path", output)?;
     run_with_timeout(
         &["image", "save", "-o", output, reference],
         RUN_LONG_TIMEOUT,
@@ -1191,6 +1237,7 @@ pub async fn save_image(reference: &str, output: &str) -> Result<()> {
 }
 
 pub async fn load_image(input: &str) -> Result<String> {
+    reject_flag_like("input path", input)?;
     let bytes = run_with_timeout(&["image", "load", "-i", input], RUN_LONG_TIMEOUT).await?;
     Ok(String::from_utf8_lossy(&bytes).trim().to_string())
 }
@@ -1199,12 +1246,16 @@ pub async fn load_image(input: &str) -> Result<String> {
 
 /// `container copy <src> <dst>` — either side may be `<id>:<path>`.
 pub async fn copy_path(src: &str, dst: &str) -> Result<()> {
+    reject_flag_like("source path", src)?;
+    reject_flag_like("destination path", dst)?;
     run_with_timeout(&["copy", src, dst], RUN_LONG_TIMEOUT)
         .await
         .map(|_| ())
 }
 
 pub async fn export_container(id: &str, output: &str) -> Result<()> {
+    reject_flag_like("container id", id)?;
+    reject_flag_like("output path", output)?;
     run_with_timeout(&["export", "-o", output, id], RUN_LONG_TIMEOUT)
         .await
         .map(|_| ())
@@ -1245,6 +1296,7 @@ pub async fn machine_create(
     no_boot: bool,
 ) -> Result<()> {
     validate_entity_name("machine", name)?;
+    reject_flag_like("image reference", image)?;
     let mut argv: Vec<String> = vec![
         "machine".into(),
         "create".into(),
@@ -1270,18 +1322,21 @@ pub async fn machine_create(
 }
 
 pub async fn machine_stop(name: &str) -> Result<()> {
+    reject_flag_like("machine name", name)?;
     run_with_timeout(&["machine", "stop", name], RUN_LONG_TIMEOUT)
         .await
         .map(|_| ())
 }
 
 pub async fn machine_delete(name: &str) -> Result<()> {
+    reject_flag_like("machine name", name)?;
     run_with_timeout(&["machine", "delete", name], RUN_LONG_TIMEOUT)
         .await
         .map(|_| ())
 }
 
 pub async fn machine_set_default(name: &str) -> Result<()> {
+    reject_flag_like("machine name", name)?;
     run(&["machine", "set-default", name]).await.map(|_| ())
 }
 
@@ -1318,6 +1373,8 @@ pub async fn registry_list() -> Result<Vec<RegistryLogin>> {
 /// crash logs could capture. The CLI stores it in the user's keychain;
 /// we never persist it.
 pub async fn registry_login(server: &str, username: &str, password: &str) -> Result<()> {
+    reject_flag_like("registry server", server)?;
+    reject_flag_like("registry username", username)?;
     let mut child = Command::new(bin())
         .args([
             "registry",
@@ -1358,6 +1415,7 @@ pub async fn registry_login(server: &str, username: &str, password: &str) -> Res
 }
 
 pub async fn registry_logout(server: &str) -> Result<()> {
+    reject_flag_like("registry server", server)?;
     run(&["registry", "logout", server]).await.map(|_| ())
 }
 
@@ -1408,9 +1466,11 @@ pub async fn system_df() -> Result<DiskUsage> {
     serde_json::from_slice(&bytes).context("parse `system df` json")
 }
 pub async fn delete_volume(name: &str) -> Result<()> {
+    reject_flag_like("volume name", name)?;
     run(&["volume", "delete", name]).await.map(|_| ())
 }
 pub async fn delete_network(id: &str) -> Result<()> {
+    reject_flag_like("network name", id)?;
     run(&["network", "delete", id]).await.map(|_| ())
 }
 
@@ -1418,6 +1478,7 @@ pub async fn delete_network(id: &str) -> Result<()> {
 // macOS-only because the host project (Apple's `container` runtime) is
 // macOS-only.
 pub fn exec_in_terminal(id: &str) -> Result<()> {
+    reject_flag_like("container id", id)?;
     let runtime_bin = bin();
     let cmd_line = format!(
         "{} exec -it {} /bin/sh",
@@ -1569,6 +1630,71 @@ mod tests {
         assert_eq!(shell_quote("path/to/bin"), "path/to/bin");
         assert_eq!(shell_quote("has space"), "'has space'");
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn reject_flag_like_rejects_empty_and_dash_prefixed() {
+        assert!(reject_flag_like("container id", "").is_err());
+        assert!(reject_flag_like("container id", "--all").is_err());
+        assert!(reject_flag_like("container id", "-f").is_err());
+        assert!(reject_flag_like("container id", "web").is_ok());
+        assert!(reject_flag_like("image reference", "docker.io/library/alpine:3").is_ok());
+        // A dash anywhere but the front is fine.
+        assert!(reject_flag_like("container id", "my-app").is_ok());
+        assert!(reject_flag_like("path", "./-name").is_ok());
+        let e = reject_flag_like("output path", "-x")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("./"), "path errors should hint at ./: {e}");
+        let e = reject_flag_like("container id", "-x")
+            .unwrap_err()
+            .to_string();
+        assert!(!e.contains("./"), "non-path errors need no hint: {e}");
+    }
+
+    // Every runtime.rs entry point taking a positional value must reject a
+    // flag-like one *before* spawning anything (these run with no CLI).
+    #[tokio::test]
+    async fn runtime_entry_points_reject_flag_like_values() {
+        let bad = "--all";
+        assert!(inspect(bad).await.is_err());
+        assert!(inspect_volume(bad).await.is_err());
+        assert!(inspect_network(bad).await.is_err());
+        assert!(inspect_image(bad).await.is_err());
+        assert!(start(bad).await.is_err());
+        assert!(stop(bad).await.is_err());
+        assert!(kill(bad, None).await.is_err());
+        assert!(kill("web", Some("-9")).await.is_err());
+        assert!(delete(bad).await.is_err());
+        assert!(restart(bad).await.is_err());
+        assert!(clean_containers(&["ok1".into(), bad.into()]).await.is_err());
+        assert!(delete_image(bad).await.is_err());
+        assert!(tag_image(bad, "x:1").await.is_err());
+        assert!(tag_image("x:1", bad).await.is_err());
+        assert!(save_image(bad, "/tmp/o.tar").await.is_err());
+        assert!(save_image("x:1", "-o").await.is_err());
+        assert!(load_image(bad).await.is_err());
+        assert!(copy_path(bad, "/tmp/x").await.is_err());
+        assert!(copy_path("web:/etc/hosts", bad).await.is_err());
+        assert!(export_container(bad, "/tmp/o.tar").await.is_err());
+        assert!(export_container("web", bad).await.is_err());
+        assert!(machine_create("ok-machine", bad, None, None, true)
+            .await
+            .is_err());
+        assert!(machine_stop(bad).await.is_err());
+        assert!(machine_delete(bad).await.is_err());
+        assert!(machine_set_default(bad).await.is_err());
+        assert!(registry_login(bad, "u", "p").await.is_err());
+        assert!(registry_login("ghcr.io", bad, "p").await.is_err());
+        assert!(registry_logout(bad).await.is_err());
+        assert!(delete_volume(bad).await.is_err());
+        assert!(delete_network(bad).await.is_err());
+        assert!(exec_in_terminal(bad).is_err());
+        let args = RunArgs {
+            image: bad.into(),
+            ..Default::default()
+        };
+        assert!(run_image(args).await.is_err());
     }
 
     // Exercise the streaming line pump end-to-end against a controlled

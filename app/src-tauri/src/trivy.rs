@@ -87,6 +87,11 @@ pub enum ScanOutcome {
 }
 
 pub async fn scan(image: &str) -> ScanOutcome {
+    if let Err(e) = crate::runtime::reject_flag_like("image reference", image) {
+        return ScanOutcome::Failed {
+            message: format!("{e}"),
+        };
+    }
     if !available().await {
         return ScanOutcome::NotInstalled;
     }
