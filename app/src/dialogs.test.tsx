@@ -159,11 +159,12 @@ describe('self-updater consent', () => {
 
   it('does not download or relaunch when the user declines', async () => {
     const downloadAndInstall = vi.fn();
-    updaterCheck.mockResolvedValue({ version: '9.9.9', body: 'notes', downloadAndInstall });
+    updaterCheck.mockResolvedValue({ version: '9.9.9', currentVersion: '0.5.9', body: 'notes', downloadAndInstall });
     askConfirmMock.mockResolvedValue(false);
     await fire();
     expect(askConfirmMock).toHaveBeenCalledTimes(1);
     expect(askConfirmMock.mock.calls[0][0]).toContain('9.9.9');
+    expect(askConfirmMock.mock.calls[0][0]).toContain('you have 0.5.9');
     expect(askConfirmMock.mock.calls[0][0]).toContain('notes');
     expect(askConfirmMock.mock.calls[0][1]).toMatchObject({ okLabel: 'Install and Relaunch', cancelLabel: 'Later' });
     expect(downloadAndInstall).not.toHaveBeenCalled();

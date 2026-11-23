@@ -217,7 +217,7 @@ export default function App() {
           // "Install and Relaunch".
           const notes = (update.body ?? '').trim();
           const accepted = await askConfirm(
-            `cgui-visual ${update.version} is available (you have ${__APP_VERSION__}).` +
+            `cgui-visual ${update.version} is available (you have ${update.currentVersion ?? __APP_VERSION__}).` +
               (notes ? `\n\n${notes.length > 1200 ? `${notes.slice(0, 1200)}…` : notes}` : '') +
               '\n\nThe app will download the update, install it and relaunch.',
             { title: 'Update available', okLabel: 'Install and Relaunch', cancelLabel: 'Later', kind: 'info' },
