@@ -74,4 +74,24 @@ describe('LogsView stream lifecycle', () => {
     expect(await screen.findByText('fresh line from B')).toBeInTheDocument();
     expect(screen.queryByText('stale line from A')).not.toBeInTheDocument();
   });
+
+  it('does not seed persisted history when the live stream starts (no duplicate lines)', async () => {
+    const { handlers, started } = setup();
+    vi.mocked(api.loadLogs).mockResolvedValue([{ ts: 1, line: 'persisted line' }]);
+    render(<LogsView t={t} target="a" />);
+    await waitFor(() => expect(started).toHaveLength(1));
+    act(() => { handlers.get(started[0])?.('live line'); });
+    expect(await screen.findByText('live line')).toBeInTheDocument();
+    expect(api.loadLogs).not.toHaveBeenCalled();
+    expect(screen.queryByText('persisted line')).not.toBeInTheDocument();
+  });
+
+  it('falls back to persisted history when the live stream cannot start', async () => {
+    setup();
+    vi.mocked(api.loadLogs).mockResolvedValue([{ ts: 1, line: 'persisted line' }]);
+    vi.mocked(api.startLogStream).mockRejectedValue('container with ID a not found');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    render(<LogsView t={t} target="a" />);
+    expect(await screen.findByText('persisted line')).toBeInTheDocument();
+  });
 });

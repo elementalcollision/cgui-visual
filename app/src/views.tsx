@@ -913,15 +913,6 @@ export function LogsView({ t, target }: { t: ThemeTokens; target?: string }) {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
     setLines([]);
-    // Seed with persisted history so the view isn't blank between
-    // restarts (B12). Live tail then appends as usual on top. Boot mode
-    // skips the seed — the sidecar holds stdio lines, not console output.
-    if (target && !bootLog) {
-      api.loadLogs(target, 500).then(rows => {
-        if (cancelled) return;
-        if (rows.length) setLines(rows.map(r => r.line));
-      }).catch(() => { /* sidecar empty / not yet init'd */ });
-    }
     // Each effect run owns one stream id: events arrive on a per-stream
     // channel and the cleanup kills the backend child, so switching
     // container / toggling boot or tail never leaves an old follower
@@ -934,9 +925,20 @@ export function LogsView({ t, target }: { t: ThemeTokens; target?: string }) {
     let started: Promise<unknown> | null = null;
     if (target) {
       // Subscribe first so no early line is missed.
+      // `container logs -f` replays the container's whole log, so the live
+      // stream is the source of truth. Persisted history (B12) is only a
+      // fallback when the stream can't start (e.g. the container is gone);
+      // seeding it as well showed every line twice. Boot mode never seeds —
+      // the sidecar holds stdio lines, not console output.
       started = listening
         .then(() => api.startLogStream(streamId, target, { boot: bootLog, tail: tail || undefined }))
-        .catch(e => console.warn('start_log_stream failed', e));
+        .catch(e => {
+          console.warn('start_log_stream failed', e);
+          if (bootLog) return;
+          return api.loadLogs(target, 500).then(rows => {
+            if (!cancelled && rows.length) setLines(rows.map(r => r.line));
+          }).catch(() => { /* sidecar empty / not yet init'd */ });
+        });
     }
     return () => {
       cancelled = true;
