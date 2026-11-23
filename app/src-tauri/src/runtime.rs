@@ -158,6 +158,21 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(8);
 /// alpine on a slow connection.
 const RUN_LONG_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// Timeout for container lifecycle verbs (start/stop/kill/delete/restart).
+/// A graceful stop or a cold VM start routinely exceeds the 8 s fast-query
+/// envelope, which would report "timed out" while the work is still running.
+const LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Long timeout for `container run`, exposed for stacks.
+pub(crate) fn run_long_timeout() -> Duration {
+    RUN_LONG_TIMEOUT
+}
+
+/// Lifecycle timeout, exposed for stacks.
+pub(crate) fn lifecycle_timeout() -> Duration {
+    LIFECYCLE_TIMEOUT
+}
+
 fn bin() -> String {
     slot().read().unwrap().clone()
 }
@@ -173,6 +188,7 @@ pub fn current_bin() -> String {
 // fixtures on machines without Apple's container runtime installed.
 pub async fn available() -> bool {
     Command::new(bin())
+        .kill_on_drop(true)
         .arg("--version")
         .output()
         .await
@@ -185,6 +201,7 @@ pub async fn available() -> bool {
 // for each candidate without flipping the active selection.
 pub async fn probe_bin(name: &str) -> bool {
     Command::new(name)
+        .kill_on_drop(true)
         .arg("--version")
         .output()
         .await
@@ -199,8 +216,8 @@ async fn run(args: &[&str]) -> Result<Vec<u8>> {
 /// Variant of `run` with a caller-chosen timeout for operations that
 /// are inherently slower than fast inspect / list queries (image pull,
 /// `container run`, etc.). Same error envelope as `run`.
-async fn run_with_timeout(args: &[&str], timeout: Duration) -> Result<Vec<u8>> {
-    let fut = Command::new(bin()).args(args).output();
+pub(crate) async fn run_with_timeout(args: &[&str], timeout: Duration) -> Result<Vec<u8>> {
+    let fut = Command::new(bin()).args(args).kill_on_drop(true).output();
     let out = tokio::time::timeout(timeout, fut)
         .await
         .map_err(|_| {
@@ -773,25 +790,37 @@ async fn inspect_args(args: &[&str]) -> Result<String> {
 }
 
 pub async fn start(id: &str) -> Result<()> {
-    run(&["start", id]).await.map(|_| ())
+    run_with_timeout(&["start", id], LIFECYCLE_TIMEOUT)
+        .await
+        .map(|_| ())
 }
 pub async fn stop(id: &str) -> Result<()> {
-    run(&["stop", id]).await.map(|_| ())
+    run_with_timeout(&["stop", id], LIFECYCLE_TIMEOUT)
+        .await
+        .map(|_| ())
 }
 /// Kill with an optional signal (`container kill -s <signal> <id>`).
 /// `None` keeps the CLI's default (SIGKILL).
 pub async fn kill(id: &str, signal: Option<&str>) -> Result<()> {
     match signal.filter(|s| !s.is_empty()) {
-        Some(sig) => run(&["kill", "-s", sig, id]).await.map(|_| ()),
-        None => run(&["kill", id]).await.map(|_| ()),
+        Some(sig) => run_with_timeout(&["kill", "-s", sig, id], LIFECYCLE_TIMEOUT)
+            .await
+            .map(|_| ()),
+        None => run_with_timeout(&["kill", id], LIFECYCLE_TIMEOUT)
+            .await
+            .map(|_| ()),
     }
 }
 pub async fn delete(id: &str) -> Result<()> {
-    run(&["delete", id]).await.map(|_| ())
+    run_with_timeout(&["delete", id], LIFECYCLE_TIMEOUT)
+        .await
+        .map(|_| ())
 }
 pub async fn restart(id: &str) -> Result<()> {
-    let _ = run(&["stop", id]).await;
-    run(&["start", id]).await.map(|_| ())
+    let _ = run_with_timeout(&["stop", id], LIFECYCLE_TIMEOUT).await;
+    run_with_timeout(&["start", id], LIFECYCLE_TIMEOUT)
+        .await
+        .map(|_| ())
 }
 
 /// Builds `container clean <id> [<id>...]` argv. Unlike start/stop/kill/

@@ -67,6 +67,7 @@ fn pick_cvss(map: &std::collections::BTreeMap<String, RawCvss>) -> Option<f64> {
 
 pub async fn available() -> bool {
     Command::new("trivy")
+        .kill_on_drop(true)
         .arg("--version")
         .output()
         .await
@@ -79,6 +80,7 @@ pub async fn scan(image: &str) -> Option<TrivyResult> {
         return None;
     }
     let fut = Command::new("trivy")
+        .kill_on_drop(true)
         .args([
             "image",
             "--quiet",

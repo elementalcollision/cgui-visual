@@ -87,7 +87,12 @@ pub async fn check() -> Vec<Update> {
 /// collapse into None — callers don't need to distinguish.
 async fn installed_version(c: &Component) -> Option<String> {
     let (bin, args) = c.installed_version_cmd;
-    let out = Command::new(bin).args(args).output().await.ok()?;
+    let out = Command::new(bin)
+        .kill_on_drop(true)
+        .args(args)
+        .output()
+        .await
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -114,6 +119,7 @@ fn strip_v_prefix(s: &str) -> String {
 async fn fetch_release(repo: &str) -> Option<GhRelease> {
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
     let fut = Command::new("curl")
+        .kill_on_drop(true)
         .args([
             "-sf",
             "-A",
